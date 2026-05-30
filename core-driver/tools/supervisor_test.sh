@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Smoke-test the supervisor in the dev container: it spawns the core (fake camera) +
+# a lightweight in-image "probe" plugin, then `docker stop` verifies a clean teardown
+# (the core finalizes its recording). No Jetson required.
+#
+# Prereq:  docker build -f core-driver/Dockerfile.dev -t gige-dev .
+# Run:     ./core-driver/tools/supervisor_test.sh
+set -u
+REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+docker rm -f gige_sensor >/dev/null 2>&1
+
+docker run -d --init --name gige_sensor -v "$REPO/core-driver:/app" gige-dev \
+  bash -c "mkdir -p /data/recordings /tmp/gige && python3 supervisor.py -c config/supervisor-fake.yaml -v" >/dev/null
+sleep 10
+
+echo "== running (supervisor spawns core + probe; probe reads frames) =="
+docker logs gige_sensor 2>&1 | grep -iE "spawn|supervising|running|frame_id=" | head -12
+echo "== docker stop -> clean teardown =="
+docker stop -t 15 gige_sensor
+docker logs gige_sensor 2>&1 | grep -iE "signal|stopping|EOS|sensor stopped" | tail -8
+docker rm -f gige_sensor >/dev/null 2>&1

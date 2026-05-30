@@ -1,0 +1,27 @@
+# Run the real pipeline against the patched chunk-emitting GV fake camera (over GVSP
+# on loopback). Exercises the actual Aravis chunk-parse path. The emitter has no PTP,
+# so timestamps are chunk values that aren't PTP-disciplined (ptp_synced=false), but
+# the chunk EXTRACTION path is what we're validating here.
+#   (start emitter) arv-fake-gv-camera-0.8 -i 127.0.0.1 -s GV01 &
+#   python3 main.py -c config/gvsp-test.yaml -v
+camera:
+  fake: false
+  camera_id: null            # discover the GV camera on loopback
+  pixel_format: Mono8
+  frame_rate: 25.0
+  packet_size: 0             # auto-negotiate (the fake emitter uses a small packet size)
+  timestamp_source: ptp_chunk
+  ptp_enable: true           # emitter has no IEEE-1588 -> ptp_synced stays false; chunks still used
+
+recording:
+  enabled: true
+  encoder: ffv1
+  output_dir: /data/recordings
+  name_prefix: gvsp
+
+transport:
+  plugin_endpoint:
+    enabled: false
+
+preview:
+  enabled: false

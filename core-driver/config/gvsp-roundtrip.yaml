@@ -1,0 +1,24 @@
+# Full round-trip: the patched emitter replays known frames + injected timestamps,
+# our pipeline records; tools/gvsp-chunk-emitter/roundtrip_test.py then diffs the
+# recording against the ground truth (lossless frames + timestamp fidelity).
+camera:
+  fake: false
+  camera_id: null
+  pixel_format: Mono8
+  frame_rate: 25.0
+  packet_size: 0
+  timestamp_source: ptp_chunk
+  ptp_enable: false        # skip the PTP-lock wait; chunk timestamps are used regardless
+
+recording:
+  enabled: true
+  encoder: ffv1
+  output_dir: /data/recordings
+  name_prefix: rt
+
+transport:
+  plugin_endpoint:
+    enabled: false
+
+preview:
+  enabled: false

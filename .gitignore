@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Recordings & sidecar outputs
+recordings/
+*.mkv
+*.csv
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Claude Code local (machine-specific permission grants)
+.claude/settings.local.json

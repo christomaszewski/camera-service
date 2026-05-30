@@ -1,0 +1,6 @@
+# Python deps installed via pip inside the container.
+#
+# IMPORTANT: PyGObject (gi), GStreamer bindings, and the Aravis bindings come
+# from the system / container (apt + the Aravis source build in the Dockerfile),
+# NOT from pip. Do not add pygobject / gstreamer here.
+PyYAML>=6.0

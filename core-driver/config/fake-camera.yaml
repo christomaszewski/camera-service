@@ -1,0 +1,37 @@
+# Test config: Aravis in-process "Fake" camera. No hardware or network needed.
+#
+# Exercises the full chain (Aravis stream -> feeder -> appsrc -> tee -> recorder
+# -> CSV). The fake camera has NO chunk/PTP support, so the timestamp source
+# gracefully falls back to 'camera' (host realtime) -- you'll see that in the log.
+# Defaults: Mono8, 512x512, 25 fps. frame_id increments 1..65535.
+#
+# Run:  docker compose run --rm core-driver -c config/fake-camera.yaml
+camera:
+  fake: true
+  camera_id: Fake_1
+  pixel_format: Mono8
+  frame_rate: 25.0
+  timestamp_source: ptp_chunk    # will fall back to 'camera' on the fake (expected)
+  ptp_enable: true
+
+recording:
+  enabled: true
+  encoder: ffv1                  # CPU + robust for a first smoke test (no NVENC dependency).
+                                 # Switch to 'auto' / 'hw-hevc-lossless' to validate the NVENC path.
+  output_dir: /data/recordings
+  name_prefix: fake
+  segment_seconds: 30
+
+preview:
+  enabled: false
+
+transport:
+  plugin_endpoint:            # exercise the header endpoint when testing with the fake camera
+    enabled: true
+    socket_path: /tmp/gige/frames
+    max_rate_hz: 0
+  raw_endpoint:
+    enabled: false
+    socket_path: /tmp/gige/raw
+
+plugins: []                   # none spawned in the fake smoke test

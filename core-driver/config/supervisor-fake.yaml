@@ -1,0 +1,24 @@
+# Supervisor smoke test: core (fake camera) + a lightweight in-image "probe" plugin
+# launched by explicit `command:` (stands in for a real plugin; needs no ROS2).
+#   python3 supervisor.py -c config/supervisor-fake.yaml
+camera:
+  fake: true
+  camera_id: Fake_1
+  pixel_format: Mono8
+  frame_rate: 25.0
+
+recording:
+  enabled: true
+  encoder: ffv1
+  output_dir: /data/recordings
+  name_prefix: fake
+
+transport:
+  plugin_endpoint:
+    enabled: true
+    socket_path: /tmp/gige/frames
+
+plugins:
+  - name: probe
+    enabled: true
+    command: ["python3", "tools/shm_probe.py", "--socket", "/tmp/gige/frames", "--count", "1000000", "--timeout", "30"]

@@ -1,0 +1,26 @@
+# Dev/test image: the full producer pipeline WITHOUT the Jetson HW stack (no NVENC).
+#
+# Runs on any Docker host (x86 or arm64). Ubuntu 22.04 mirrors JetPack 6's userspace
+# (GStreamer 1.20 + Aravis 0.8), so behaviour closely matches the Orin minus the
+# NVIDIA hardware elements. Use it to exercise capture + timestamps + sidecar + the
+# software (FFV1) recorder + the shm transport against the Aravis *fake* camera.
+#
+# Build (from repo root):  docker build -f core-driver/Dockerfile.dev -t gige-dev .
+# Iterate with live code:  docker run --rm -v "$PWD/core-driver:/app" gige-dev ...
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-gi python3-yaml \
+      gir1.2-glib-2.0 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gir1.2-aravis-0.8 \
+      gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+      gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
+      aravis-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY core-driver/ /app/
+ENV GIGE_CONFIG=/app/config/fake-camera.yaml
+
+# Default: the fake-camera smoke test (capture -> timestamp -> FFV1 record -> shm).
+CMD ["python3", "main.py", "-c", "config/fake-camera.yaml", "-v"]

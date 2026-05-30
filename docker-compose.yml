@@ -1,0 +1,48 @@
+# Per-sensor stack: the core (capture + timestamp + record + publish, run via the
+# supervisor) plus the ros2-bridge consuming the shm transport. They share the shm
+# transport via `ipc: host` (shared /dev/shm) + a shared socket volume.
+#
+# Jetson notes: the core uses host networking (GigE Vision discovery) + the nvidia
+# container runtime; the bridge joins the host ROS2 graph. Host prep (NIC MTU 9000,
+# net.core.rmem_max, ptp4l/phc2sys) is in the README. One sensor = one of these stacks.
+#
+# No-Jetson testing uses the gige-dev / ros2-bridge images directly -- see
+# core-driver/tools/{dev_test,supervisor_test}.sh and plugins/ros2-bridge/tools/bridge_test.sh.
+services:
+  core-driver:
+    build:
+      context: .
+      dockerfile: core-driver/Dockerfile
+      args:
+        L4T_TAG: r36.4.0
+    init: true                 # tini reaps orphans; the supervisor manages its own children
+    network_mode: host         # GigE Vision broadcast discovery
+    ipc: host                  # share /dev/shm so consumers can read the shm transport
+    runtime: nvidia
+    volumes:
+      - ./core-driver/config:/app/config:ro
+      - ./recordings:/data/recordings
+      - gige_sock:/tmp/gige     # shm control socket, shared with consumers
+    environment:
+      - GIGE_CONFIG=/app/config/camera.yaml
+    # default command = the supervisor (spawns the core + any in-image plugins in `plugins:`)
+    restart: unless-stopped
+
+  ros2-bridge:
+    build:
+      context: .
+      dockerfile: plugins/ros2-bridge/Dockerfile
+    init: true
+    network_mode: host         # join the host ROS2 graph
+    ipc: host                  # share /dev/shm with the core
+    volumes:
+      - gige_sock:/tmp/gige
+    command: >
+      ros2 run gige_ros2_bridge gige_ros2_bridge --ros-args
+      -p socket_path:=/tmp/gige/frames -p topic:=/image_raw -p frame_id:=camera
+    depends_on:
+      - core-driver
+    restart: unless-stopped
+
+volumes:
+  gige_sock:

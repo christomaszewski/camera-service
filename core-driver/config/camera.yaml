@@ -1,0 +1,55 @@
+# GigE Vision core driver configuration.
+#
+# Recording encoder guidance (Jetson AGX Orin):
+#   Mono8 / Bayer*8  + encoder: auto  -> hardware HEVC lossless (NVENC, temporal). Recommended default.
+#   Mono16 / Bayer*16 + encoder: auto -> FFV1 (lossless, high-bit-depth, INTRA-only).
+#   For 10/12-bit WITH temporal compression, set encoder: x265-lossless (CPU-bound).
+
+camera:
+  camera_id: null              # null = first device found; else serial or "Vendor-Model-Serial"
+  pixel_format: Mono8          # see guidance above
+  # roi: { x: 0, y: 0, width: 1920, height: 1080 }
+  frame_rate: null             # null = camera default
+  packet_size: 9000            # jumbo frames; requires host NIC MTU >= 9000. 0 = auto-negotiate.
+  packet_delay: null           # GevSCPD ticks; raise (e.g. 9500) for multi-camera links
+  n_stream_buffers: 20
+
+  timestamp_source: ptp_chunk  # ptp_chunk (primary) | camera | system (host-arrival fallback)
+  ptp_enable: true             # camera slaves to the Jetson PTP grandmaster
+  ptp_mode: SlaveOnly
+  ptp_lock_timeout_s: 10.0
+  chunk_selectors: "Timestamp,FrameID"   # GenICam selector names (no 'Chunk' prefix)
+  chunk_timestamp_name: ChunkTimestamp   # chunk feature node name (with prefix)
+  chunk_frame_id_name: ChunkFrameID
+
+recording:
+  enabled: true
+  encoder: auto                # auto | hw-hevc-lossless | ffv1 | x265-lossless
+  output_dir: /data/recordings
+  name_prefix: gige
+  segment_seconds: 60
+  bayer_pattern: null          # set when recording raw Bayer (e.g. rggb) for post-debayer
+
+preview:
+  enabled: false
+  sink: "fakesink sync=false"  # on a display: "nv3dsink" (Jetson) or "autovideosink"
+
+transport:
+  # `application/x-gige-frame` endpoint (36-byte header + frame) for our plugins:
+  plugin_endpoint:
+    enabled: true
+    socket_path: /tmp/gige/frames
+    max_rate_hz: 0             # 0 = every frame; e.g. 10 caps publishing at 10 Hz
+  # optional clean `video/x-raw` shm for generic same-host tools (no metadata):
+  raw_endpoint:
+    enabled: false
+    socket_path: /tmp/gige/raw
+
+plugins: []                   # IN-IMAGE plugins the supervisor spawns as separate processes.
+# The ros2-bridge is heavy (ROS2/DDS) and runs as a SIBLING CONTAINER (see docker-compose.yml),
+# so it is not listed here. Add lightweight in-image plugins, e.g.:
+#   - name: my-tap
+#     command: ["python3", "/app/plugins/my_tap.py"]
+#     restart: true
+# (A plugin named `ros2-bridge` is spawnable in-image too, but only in a combined core+ROS2
+#  image; by default the bridge is a sibling container.)
