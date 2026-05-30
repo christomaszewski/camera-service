@@ -31,6 +31,8 @@ Cross-container and cross-GStreamer-version (1.20↔1.24) shm both work.
   GVSP → recording, byte-compared (lossless + timestamp fidelity; random-noise frames)
 - `plugins/webrtc-bridge/tools/webrtc_test.sh` — WebRTC egress: raw shm → `webrtcsink` → signalling →
   `webrtcsrc` decode, frames counted (headless, no browser)
+- `tools/orchestration_test.sh` — config-driven multi-sensor deploy: `gige-up` profile selection, two
+  cameras side by side as isolated projects, cross-stack shm read (no Jetson, no camera)
 - `python3 core-driver/tests/test_*.py` — pure-logic unit tests (transport wire format, config, timestamp ladder)
 
 ## Still needs the Orin / a real Blackfly S
@@ -63,4 +65,8 @@ Cross-container and cross-GStreamer-version (1.20↔1.24) shm both work.
 - SEI declined (use the CSV sidecar; RTP header extension for the streaming path).
 - WebRTC egress = gst-plugins-rs `webrtcsink` (built from source), sibling container on the raw shm
   endpoint; encodes internally; needs `gstreamer1.0-nice` + `shmsrc do-timestamp` + I420 conversion.
+- Deployment = one **sensor config** per camera + **`gige-up`** (Compose `include` + profiles); plugins
+  split by `isolation` (process → supervisor, container → compose profile); multi-camera = multiple
+  Compose projects; shm shared as an external named volume + `ipc:host` (not pod-scoped). No generated
+  compose. Podman/pods rejected (would wall off the shm). `service:` tag reserved for a future fleet launcher.
 - Zenoh kept as the future data-fabric transport (swappable in).

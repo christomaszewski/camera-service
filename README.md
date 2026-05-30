@@ -75,11 +75,11 @@ sudo sysctl -w net.core.rmem_max=33554432      # larger socket receive buffers
 #   sudo ptp4l -i <cam-iface> -m   &&   sudo phc2sys -a -r
 ```
 
-Build & run:
+Build & run — one **sensor config** drives one camera's stack via `gige-up`:
 ```bash
 mkdir -p recordings
-docker compose up --build core-driver
-# edit core-driver/config/camera.yaml for your camera / format / encoder
+cp core-driver/config/sensors/cam_a.yaml core-driver/config/sensors/my-cam.yaml   # then edit it
+./gige-up config/sensors/my-cam.yaml             # brings up core + the plugins the config enables
 ```
 
 ## Testing without a camera
@@ -148,18 +148,35 @@ Both are configured under `transport:` in the camera config. The `plugins:` list
 
 ## Per-sensor deployment
 
-One sensor = one stack. The **supervisor** ([supervisor.py](core-driver/supervisor.py)) is the core
-container's entrypoint: it reads the config, spawns the core + each enabled *in-image* plugin as its own
-process (crash-isolated, restarted on failure), and on shutdown sends SIGINT so the core finalizes its
-recording. Run it under an init (`docker run --init` / compose `init: true`) for orphan reaping.
-
-Heavy plugins with their own runtime (the ROS2 bridge) run as **sibling containers** sharing the shm
-transport (`ipc: host` + a shared socket volume), not in-image. `docker compose up` brings up the whole
-per-sensor stack (core + ros2-bridge).
+One sensor = one config under [core-driver/config/sensors/](core-driver/config/sensors/) — the single
+source of truth. **[`gige-up`](gige-up)** reads it, turns the enabled `isolation: container` plugins into
+Docker Compose **profiles**, and brings up that sensor's stack:
 
 ```bash
-docker compose up --build                # on the Jetson
-./core-driver/tools/supervisor_test.sh   # validate the supervisor without a Jetson
+./gige-up config/sensors/cam_a.yaml          # Jetson: l4t core, nvidia runtime, host networking
+./gige-up --dev config/sensors/cam_a.yaml    # no Jetson (laptop/CI): gige-dev core, no NVIDIA
+./gige-up config/sensors/cam_a.yaml down     # tear it down
+```
+
+- **Each heavy plugin is its own compose fragment** (`plugins/<x>/compose.yml`), pulled into
+  [docker-compose.yml](docker-compose.yml) via `include:` and run only when its profile is on. Adding a
+  plugin to a sensor = flipping `enabled: true` in the config, not editing compose. (Needs Compose ≥ 2.20.)
+- **Two plugin homes:** lightweight plugins (`isolation: process`) run in-image, spawned by the
+  **supervisor** ([supervisor.py](core-driver/supervisor.py)) — the core container's entrypoint, which also
+  forwards shutdown so the core finalizes its recording. Heavy ones (`isolation: container` — ros2-bridge,
+  webrtc-bridge) are compose siblings.
+- **Multiple cameras** = the same files run as multiple projects. `gige-up cam_a` and `gige-up cam_b`
+  coexist — each its own compose project, shm volume, ROS namespace, and WebRTC port, all derived from the
+  per-sensor config (host networking is shared, so ports/topics are namespaced per camera).
+- **shm is a host-level interface, not stack-scoped:** the transport is a stable external volume
+  (`gige_<name>_sock`) + `ipc: host`, so *other* sensor or autonomy stacks read a sensor's frames by
+  mounting that volume + `--ipc=host`.
+- `service: gige-vision` in each config is a hook for a future machine-level launcher that scans
+  `config/sensors/` and routes each config to its stack — `gige-up` is the per-sensor unit it would call.
+
+```bash
+./tools/orchestration_test.sh            # validate the whole model without a Jetson or camera
+./core-driver/tools/supervisor_test.sh   # validate the in-image supervisor path
 ```
 
 ## Status & roadmap
@@ -186,6 +203,7 @@ chunk-parse path** via a patched chunk-emitting GV camera:
 - [tools/gvsp-chunk-emitter/gvsp_test.sh](tools/gvsp-chunk-emitter) — **real GVSP + chunk-timestamp extraction** (patched Aravis fake camera)
 - [tools/gvsp-chunk-emitter/roundtrip_test.sh](tools/gvsp-chunk-emitter) — **full input→output round-trip**: known frames+timestamps → GVSP → recording, then byte-compared (lossless + timestamp fidelity)
 - [plugins/webrtc-bridge/tools/webrtc_test.sh](plugins/webrtc-bridge/tools/webrtc_test.sh) — **WebRTC egress**: raw shm → `webrtcsink` → `webrtcsrc` decode (headless, no browser)
+- [tools/orchestration_test.sh](tools/orchestration_test.sh) — **config-driven multi-sensor deploy**: `gige-up` profile selection, two cameras side by side (isolated projects), cross-stack shm read
 
 ### Still needs the Orin / a real Blackfly S
 - the **NVENC HW recorder** (`nvv4l2h265enc enable-lossless`, NVMM caps) — the software FFV1 path is validated;

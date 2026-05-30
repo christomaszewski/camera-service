@@ -1,0 +1,15 @@
+# Dev override (no Jetson) — applied by `gige-up --dev`. Runs the core from the gige-dev image
+# (Ubuntu + GStreamer + Aravis, NO NVIDIA stack) instead of the l4t image, with the source
+# mounted for live iteration. The heavy plugins (ros2-bridge / webrtc-bridge) aren't l4t images,
+# so they run unchanged from their normal definitions. gige-up --dev also sets GIGE_NETWORK=bridge.
+services:
+  core-driver:
+    image: gige-dev
+    build:
+      context: .
+      dockerfile: core-driver/Dockerfile.dev
+    runtime: runc                       # no nvidia runtime on a laptop / CI
+    entrypoint: ["python3"]             # gige-dev's default CMD is main.py; force the supervisor
+    command: ["supervisor.py"]
+    volumes:
+      - ./core-driver:/app              # gige-dev expects the code mounted (live edits, no rebuild)

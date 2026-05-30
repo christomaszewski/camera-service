@@ -1,0 +1,32 @@
+# webrtc-bridge — heavy plugin, runs as its own container (gst-plugins-rs webrtcsink, built
+# from source). Pulled into the per-sensor stack via the top-level `include:`, activated only
+# when the `webrtc-bridge` profile is enabled. Geometry/port come from the sensor config
+# (shm carries no caps; with host networking each sensor needs a distinct signalling port).
+services:
+  webrtc-bridge:
+    profiles: ["webrtc-bridge"]
+    image: webrtc-bridge
+    build:
+      context: ../..
+      dockerfile: plugins/webrtc-bridge/Dockerfile
+    init: true
+    network_mode: ${GIGE_NETWORK:-host}     # host = expose signalling + WebRTC media to viewers
+    ipc: host                               # share /dev/shm with the core (raw endpoint)
+    volumes:
+      - gige_sock:/tmp/gige
+    environment:
+      - GIGE_SHM_SOCKET=/tmp/gige/raw
+      - GIGE_WIDTH=${GIGE_WIDTH:-512}
+      - GIGE_HEIGHT=${GIGE_HEIGHT:-512}
+      - GIGE_FORMAT=${GIGE_FORMAT:-GRAY8}
+      - GIGE_FPS=${GIGE_FPS:-25}
+      - SIGNALLING_PORT=${GIGE_SIGNALLING_PORT:-8443}
+    command: ["bash", "run.sh"]
+    depends_on:
+      - core-driver
+    restart: unless-stopped
+
+volumes:
+  gige_sock:
+    external: true
+    name: ${GIGE_SOCK_VOLUME:-gige_sock}

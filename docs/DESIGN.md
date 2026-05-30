@@ -88,6 +88,26 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
   in-image plugins as managed processes; heavy plugins (ROS2/DDS) run as **sibling containers**
   sharing the shm transport (`ipc: host` + a socket volume). Same plugin code either way.
 
+- **Config-driven multi-sensor orchestration (`gige-up` + Compose `include`/profiles).** Deployment is
+  driven by one **sensor config** (`config/sensors/<name>.yaml`) — never hand-edited compose. `gige-up`
+  reads the config and turns its enabled `isolation: container` plugins into Compose **profiles**; each
+  heavy plugin owns a `plugins/<x>/compose.yml` fragment that the top compose pulls in via **`include`**
+  (Compose ≥ 2.20, verified present on JP6's `docker compose` v2). A plugin is thus added to a sensor by
+  flipping `enabled` in the config, and the compose files stay static — **no generated compose artifact**
+  (a step the user explicitly didn't want). The `plugins[]` list now feeds two consumers, split by
+  `isolation`: `process` → the in-image supervisor; `container` → a compose profile (the supervisor skips
+  those). **Multiple cameras** run the same files as separate Compose **projects** (`gige-up cam_a` /
+  `cam_b`), each with its own project name, shm volume, ROS namespace, and signalling port derived from
+  the config; because GigE forces host networking, those ports/topics must be namespaced per camera.
+  **shm is a host-level interface, not pod/project-scoped:** a stable **external** named volume
+  (`gige_<name>_sock`) + `ipc: host` lets any other sensor/autonomy stack read a sensor's frames by
+  mounting that volume + `--ipc=host` (validated: a container in neither project read cam_a's stream).
+  Podman pods were weighed and rejected for exactly this reason — pod-scoped IPC would wall the shm off
+  from other stacks. `service: gige-vision` in each config is the routing hook for a future machine-level
+  launcher (scan `config/sensors/`, dispatch each to its stack); `gige-up` is deliberately the reusable
+  per-sensor unit that layer would call. A dev override (`docker-compose.dev.yml`, `gige-up --dev`) swaps
+  the l4t core for the `gige-dev` image so the whole model runs on a laptop/CI.
+
 - **SEI timestamp injection — considered, declined as primary.** `user_data_unregistered` SEI is the
   standards-correct in-bitstream hook and is lossless-safe (non-VCL), but `nvv4l2*` can't inject
   arbitrary SEI (NVENC-SDK path is Thor/JP7 only), no off-the-shelf GStreamer element inserts it, and

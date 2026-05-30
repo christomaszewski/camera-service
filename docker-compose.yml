@@ -1,72 +1,43 @@
-# Per-sensor stack: the core (capture + timestamp + record + publish, run via the
-# supervisor) plus the ros2-bridge consuming the shm transport. They share the shm
-# transport via `ipc: host` (shared /dev/shm) + a shared socket volume.
+# Per-sensor stack — ONE config drives ONE sensor. Don't run this directly; run `./gige-up
+# <sensor-config>`, which reads the config (the single source of truth), turns its enabled
+# `isolation: container` plugins into COMPOSE_PROFILES, and parameterizes the stack below.
 #
-# Jetson notes: the core uses host networking (GigE Vision discovery) + the nvidia
-# container runtime; the bridge joins the host ROS2 graph. Host prep (NIC MTU 9000,
-# net.core.rmem_max, ptp4l/phc2sys) is in the README. One sensor = one of these stacks.
+# Each heavy plugin lives in its own plugins/<x>/compose.yml and is pulled in via `include:`;
+# the active set is chosen by profiles, so adding a plugin to a sensor = flipping it on in the
+# config, not editing this file. Multiple cameras = the same files run as multiple projects
+# (gige-up sets COMPOSE_PROJECT_NAME / the socket volume / ports per sensor).
 #
-# No-Jetson testing uses the gige-dev / ros2-bridge images directly -- see
-# core-driver/tools/{dev_test,supervisor_test}.sh and plugins/ros2-bridge/tools/bridge_test.sh.
+# The shm transport is a stable EXTERNAL named volume (${GIGE_SOCK_VOLUME}) + ipc:host, so other
+# sensor or autonomy stacks attach to a sensor's frames by mounting that volume + --ipc=host —
+# it is not scoped to this compose project.
+#
+# Requires Docker Compose >= 2.20 (the `include:` element) — the v2 `docker compose` plugin.
+include:
+  - plugins/ros2-bridge/compose.yml
+  - plugins/webrtc-bridge/compose.yml
+
 services:
   core-driver:
+    image: gige-core
     build:
       context: .
       dockerfile: core-driver/Dockerfile
       args:
         L4T_TAG: r36.4.0
-    init: true                 # tini reaps orphans; the supervisor manages its own children
-    network_mode: host         # GigE Vision broadcast discovery
-    ipc: host                  # share /dev/shm so consumers can read the shm transport
+    init: true                          # tini reaps orphans; the supervisor manages its children
+    network_mode: ${GIGE_NETWORK:-host} # GigE Vision broadcast discovery needs host networking
+    ipc: host                           # publish /dev/shm so consumers can read the transport
     runtime: nvidia
+    command: ["supervisor.py"]          # reads GIGE_CONFIG; spawns core + in-image (process) plugins
     volumes:
       - ./core-driver/config:/app/config:ro
       - ./recordings:/data/recordings
-      - gige_sock:/tmp/gige     # shm control socket, shared with consumers
-    environment:
-      - GIGE_CONFIG=/app/config/camera.yaml
-    # default command = the supervisor (spawns the core + any in-image plugins in `plugins:`)
-    restart: unless-stopped
-
-  ros2-bridge:
-    build:
-      context: .
-      dockerfile: plugins/ros2-bridge/Dockerfile
-    init: true
-    network_mode: host         # join the host ROS2 graph
-    ipc: host                  # share /dev/shm with the core
-    volumes:
-      - gige_sock:/tmp/gige
-    command: >
-      ros2 run gige_ros2_bridge gige_ros2_bridge --ros-args
-      -p socket_path:=/tmp/gige/frames -p topic:=/image_raw -p frame_id:=camera
-    depends_on:
-      - core-driver
-    restart: unless-stopped
-
-  # Remote viewing: consumes the core's raw shm endpoint and serves it to browsers via
-  # webrtcsink (lossy, low-latency, congestion-controlled). Enable transport.raw_endpoint
-  # in the core config first, and set the geometry below to match the camera (shm has no caps).
-  webrtc-bridge:
-    build:
-      context: .
-      dockerfile: plugins/webrtc-bridge/Dockerfile
-    init: true
-    network_mode: host         # expose the signalling server (:8443) + WebRTC media to viewers
-    ipc: host                  # share /dev/shm with the core (raw shm endpoint)
-    volumes:
       - gige_sock:/tmp/gige
     environment:
-      - GIGE_SHM_SOCKET=/tmp/gige/raw
-      - GIGE_WIDTH=2048          # <-- set to your camera's geometry / format / rate
-      - GIGE_HEIGHT=1536
-      - GIGE_FORMAT=GRAY8
-      - GIGE_FPS=30
-      # - VIDEO_CAPS=video/x-h264   # optional: pin codec (most browser-compatible)
-      # On Jetson, prefer the HW encoder:  GST_PLUGIN_FEATURE_RANK=nvv4l2h264enc:MAX
-    depends_on:
-      - core-driver
+      - GIGE_CONFIG=${GIGE_CONFIG:-config/sensors/camera.yaml}
     restart: unless-stopped
 
 volumes:
   gige_sock:
+    external: true                      # created by gige-up so it has a stable cross-stack name
+    name: ${GIGE_SOCK_VOLUME:-gige_sock}

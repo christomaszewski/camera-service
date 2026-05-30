@@ -81,6 +81,9 @@ class PluginConfig:
     enabled: bool = True
     command: Optional[list] = None    # explicit launch command (list of args); else resolved by name
     restart: bool = True              # restart this plugin if it exits unexpectedly
+    # "process" = lightweight, spawned in-image by the supervisor; "container" = a heavy
+    # plugin with its own image, run as a compose sibling (the launcher maps it to a profile).
+    isolation: str = "process"
     params: dict = field(default_factory=dict)   # plugin-specific (e.g. ROS params); consumed by the supervisor
 
 
@@ -129,10 +132,11 @@ def parse_config(raw: dict) -> AppConfig:
     for p in (raw.get("plugins") or []):
         if not isinstance(p, dict) or "name" not in p:
             continue
-        reserved = ("name", "enabled", "command", "restart")
+        reserved = ("name", "enabled", "command", "restart", "isolation")
         plugins.append(PluginConfig(
             name=p["name"], enabled=bool(p.get("enabled", True)),
             command=p.get("command"), restart=bool(p.get("restart", True)),
+            isolation=str(p.get("isolation", "process")),
             params={k: v for k, v in p.items() if k not in reserved}))
 
     return AppConfig(

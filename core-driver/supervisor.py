@@ -84,6 +84,10 @@ class Supervisor:
         for p in self.cfg.plugins:
             if not p.enabled:
                 continue
+            if p.isolation != "process":
+                # heavy plugin with its own image — a compose sibling, not ours to spawn
+                log.info("plugin %r: isolation=%s -> managed by compose, skipping", p.name, p.isolation)
+                continue
             cmd = self._resolve(p)
             if cmd:
                 self.services.append(Service(p.name, cmd, critical=False, restart=p.restart))

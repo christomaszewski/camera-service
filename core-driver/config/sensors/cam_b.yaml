@@ -1,0 +1,42 @@
+# A second camera on the same machine — same files, different config. gige-up runs it as its own
+# compose project (gige_cam_b) with its own shm volume + signalling port, so it coexists with cam_a.
+service: gige-vision
+name: cam_b
+
+camera:
+  fake: true
+  camera_id: Fake_1       # Aravis fake device id (fixed); real cameras use distinct serials
+  pixel_format: Mono8
+  frame_rate: 25.0
+  timestamp_source: ptp_chunk
+  ptp_enable: false
+
+recording:
+  enabled: false
+
+transport:
+  plugin_endpoint:
+    enabled: true
+    socket_path: /tmp/gige/frames
+  raw_endpoint:
+    enabled: true
+    socket_path: /tmp/gige/raw
+
+# cam_b runs a different plugin than cam_a (webrtc instead of ros2) to show per-sensor selection.
+# Distinct signalling port (8444) because host networking means ports are shared across sensors.
+plugins:
+  - name: ros2-bridge
+    enabled: false
+    isolation: container
+    params:
+      topic: image_raw
+      frame_id: cam_b
+  - name: webrtc-bridge
+    enabled: true
+    isolation: container
+    params:
+      width: 512
+      height: 512
+      format: GRAY8
+      fps: 25
+      port: 8444

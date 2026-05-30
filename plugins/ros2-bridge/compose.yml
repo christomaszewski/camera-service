@@ -1,0 +1,34 @@
+# ros2-bridge — heavy plugin, runs as its own container (ROS2/DDS on a jazzy base).
+# Pulled into the per-sensor stack by the top-level docker-compose.yml via `include:`, and
+# activated only when the `ros2-bridge` profile is enabled (gige-up derives the profile set
+# from the sensor config's enabled `isolation: container` plugins).
+#
+# Note: with `include`, relative paths here resolve relative to THIS file's directory, so the
+# build context climbs to the repo root (../..).
+services:
+  ros2-bridge:
+    profiles: ["ros2-bridge"]
+    image: ros2-bridge
+    build:
+      context: ../..
+      dockerfile: plugins/ros2-bridge/Dockerfile
+    init: true
+    network_mode: ${GIGE_NETWORK:-host}     # host = join the host ROS2 graph
+    ipc: host                               # share /dev/shm with the core
+    volumes:
+      - gige_sock:/tmp/gige
+    # __ns namespaces the node per sensor, so topics land under /<instance>/...
+    command: >
+      ros2 run gige_ros2_bridge gige_ros2_bridge --ros-args
+      -r __ns:=/${GIGE_INSTANCE:-camera}
+      -p socket_path:=/tmp/gige/frames
+      -p topic:=${GIGE_ROS_TOPIC:-image_raw}
+      -p frame_id:=${GIGE_FRAME_ID:-camera}
+    depends_on:
+      - core-driver
+    restart: unless-stopped
+
+volumes:
+  gige_sock:
+    external: true
+    name: ${GIGE_SOCK_VOLUME:-gige_sock}

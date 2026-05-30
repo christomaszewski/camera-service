@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# gige-up [--dev] <sensor-config.yaml> [docker-compose subcommand + args...]
+#
+# Bring up ONE GigE sensor's stack from ONE config (the single source of truth). Reads the
+# config, turns its enabled `isolation: container` plugins into compose profiles, parameterizes
+# the stack (project name, shared shm volume, per-plugin env), and runs `docker compose`.
+# It SELECTS + PARAMETERIZES — it never generates a compose file.
+#
+#   gige-up config/sensors/cam_a.yaml             # prod: l4t core, nvidia runtime, host net (foreground up)
+#   gige-up --dev config/sensors/cam_a.yaml       # dev (no Jetson): gige-dev core, bridge net
+#   gige-up --dev config/sensors/cam_a.yaml up -d # detached
+#   gige-up --dev config/sensors/cam_a.yaml down  # tear the sensor down
+#   gige-up --dev config/sensors/cam_a.yaml config  # just render the merged compose
+#
+# Multiple cameras = run it per config; each is its own compose project + shm volume + ports.
+# Another stack reads a sensor's frames by mounting its volume (gige_<name>_sock) + --ipc=host.
+set -euo pipefail
+REPO="$(cd "$(dirname "$0")" && pwd)"
+PYTHON="${GIGE_PYTHON:-python3}"
+
+DEV=0
+if [ "${1:-}" = "--dev" ]; then DEV=1; shift; fi
+CONFIG="${1:?usage: gige-up [--dev] <sensor-config.yaml> [compose args...]}"; shift || true
+[ -f "$CONFIG" ] || { echo "gige-up: config not found: $CONFIG" >&2; exit 1; }
+
+if ! docker compose version >/dev/null 2>&1; then
+  echo "gige-up: needs the Docker Compose v2 plugin ('docker compose'); 'include' needs >= 2.20" >&2
+  exit 1
+fi
+
+# config -> env (selection + parameterization). Values are simple tokens (no spaces).
+eval "$("$PYTHON" "$REPO/tools/sensor_env.py" "$CONFIG" | sed 's/^/export /')"
+export GIGE_CONFIG="config/sensors/$(basename "$CONFIG")"   # in-container path (config dir is mounted)
+export GIGE_NETWORK="${GIGE_NETWORK:-host}"
+[ "$DEV" = 1 ] && export GIGE_NETWORK=bridge
+
+# shm transport = a stable EXTERNAL volume, so sibling and other-stack containers can attach
+docker volume create "$GIGE_SOCK_VOLUME" >/dev/null
+
+FILES=(-f "$REPO/docker-compose.yml")
+[ "$DEV" = 1 ] && FILES+=(-f "$REPO/docker-compose.dev.yml")
+
+ARGS=("$@"); [ ${#ARGS[@]} -eq 0 ] && ARGS=(up)
+echo "gige-up: project=$COMPOSE_PROJECT_NAME profiles=[${COMPOSE_PROFILES:-<none>}] sock=$GIGE_SOCK_VOLUME net=$GIGE_NETWORK config=$GIGE_CONFIG" >&2
+exec docker compose "${FILES[@]}" "${ARGS[@]}"

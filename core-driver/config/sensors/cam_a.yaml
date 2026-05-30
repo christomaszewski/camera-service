@@ -1,0 +1,42 @@
+# One sensor = one config (the single source of truth). `gige-up config/sensors/cam_a.yaml`
+# brings up this camera's stack; `service` + `name` let a future machine-level launcher route it.
+service: gige-vision      # which stack handles this config (registry key for a future fleet launcher)
+name: cam_a               # instance id -> compose project (gige_cam_a), shm volume (gige_cam_a_sock), ROS ns (/cam_a)
+
+camera:
+  fake: true              # demo/dev: in-process fake camera (real deploy sets a serial + drops fake)
+  camera_id: Fake_1       # the Aravis fake device is always "Fake_1"; real cameras use distinct serials
+  pixel_format: Mono8
+  frame_rate: 25.0
+  timestamp_source: ptp_chunk
+  ptp_enable: false
+
+recording:
+  enabled: false          # focus the demo on transport + plugins
+
+transport:
+  plugin_endpoint:
+    enabled: true
+    socket_path: /tmp/gige/frames   # header endpoint (ros2-bridge reads this)
+  raw_endpoint:
+    enabled: true
+    socket_path: /tmp/gige/raw      # raw video (webrtc-bridge reads this)
+
+# Heavy plugins (own image) -> compose siblings, selected as profiles by gige-up.
+# Lightweight in-image plugins would use `isolation: process` and be spawned by the supervisor.
+plugins:
+  - name: ros2-bridge
+    enabled: true
+    isolation: container
+    params:
+      topic: image_raw    # published as /cam_a/image_raw (node namespaced by `name`)
+      frame_id: cam_a
+  - name: webrtc-bridge
+    enabled: false
+    isolation: container
+    params:
+      width: 512
+      height: 512
+      format: GRAY8
+      fps: 25
+      port: 8443
