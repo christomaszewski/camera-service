@@ -35,7 +35,7 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
                      appsrc ─► tee ─┬─► recorder (lossless, temporal) ─► splitmuxsink .mkv + .csv/.json
                                     ├─► shm publish (application/x-gige-frame header endpoint) ─► plugins
                                     ├─► (optional) raw video/x-raw shm endpoint ─► generic tools
-                                    └─► (P4) webrtcsink (lossy, low-latency) ─► remote viewers
+                                    └─► webrtcsink (lossy, low-latency) ─► remote viewers
 ```
 
 ## Key decisions (and why)
@@ -94,6 +94,24 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
   ffmpeg's `hevc_metadata` has no SEI option. It's also stripped by any re-encode. The CSV sidecar is
   simpler, universal, and we'd keep it regardless — so SEI would be pure addition. For the **streaming**
   path use an **RTP header extension** (abs-capture-time / RFC 6051 `rtphdrextntp64`), not SEI.
+
+- **WebRTC egress via `webrtcsink` (gst-plugins-rs), built from source.** `webrtcsink` isn't packaged
+  for Ubuntu — it's the Rust `gst-plugin-webrtc`, built with `cargo cinstall` in the plugin image
+  (LTO-off + limited jobs to dodge the Docker OOM-on-link). It takes **raw video and encodes
+  internally** — zerolatency/CBR/keyframe tuning, GCC congestion control, FEC/RTX, multi-viewer
+  fan-out — so the bridge just feeds it frames; no hand-rolled encoder. It runs as a **sibling
+  container** consuming the **raw shm endpoint** (the Rust toolchain doesn't belong in the core image;
+  same model as ros2-bridge). Two non-obvious gotchas the container tests caught: (1) webrtcsink/
+  webrtcsrc need the **GStreamer libnice elements** (`gstreamer1.0-nice`, a separate package from the
+  libnice C library) or `webrtcbin` fails ICE with "libnice elements are not available"; (2)
+  shm-sourced buffers must be **re-timestamped** (`shmsrc do-timestamp=true`) and **converted to I420**
+  before webrtcsink — shm drops PTS (which RTP needs) and the encoders want YUV, not a mono camera's
+  GRAY8. Without either, the producer reaches PLAYING but never announces a negotiable stream, so a
+  consumer's `connect-to-first-producer` silently never latches. Validated headlessly (no browser) via
+  a `webrtcsink → gst-webrtc-signalling-server → webrtcsrc` loopback. Carrying the capture PTP time
+  through WebRTC (`webrtcsink do-clock-signalling=true` + the `ntp-64` RTP header extension →
+  `GstReferenceTimestampMeta` on a `webrtcsrc` consumer) is a future upgrade that would also require
+  consuming the header endpoint (for geometry + timestamp) instead of the raw endpoint.
 
 - **Zenoh as the future data fabric.** Eclipse Zenoh (mature, v1.x; pub/sub, same-host SHM with
   transparent network fallback, per-message "attachments" ideal for ts+frame_id; `rmw_zenoh` is a

@@ -1,0 +1,23 @@
+# Core config for the WebRTC round-trip test (no Jetson, no camera).
+# Fake camera -> raw shm endpoint, which the webrtc-bridge container consumes.
+# Recording + plugin (header) endpoint are off here; this exercises only the raw->webrtc path.
+camera:
+  fake: true
+  camera_id: Fake_1
+  pixel_format: Mono8
+  frame_rate: 25.0
+  timestamp_source: ptp_chunk     # fake camera has no chunks -> falls back to camera/system (expected)
+  ptp_enable: false
+
+recording:
+  enabled: false
+
+preview:
+  enabled: false
+
+transport:
+  plugin_endpoint:
+    enabled: false
+  raw_endpoint:
+    enabled: true
+    socket_path: /tmp/gige/raw     # webrtc-bridge reads video/x-raw GRAY8 512x512@25 from here

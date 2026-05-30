@@ -11,7 +11,7 @@ Where the project is, what's validated, what's left, and how to resume. Pair wit
 | **P1** | Timestamp spine — Aravis appsrc, PTP via `GevIEEE1588`, chunk `Timestamp`/`FrameID`, fallback ladder, sidecar CSV + JSON | ✅ done |
 | **P2** | Pluggable lossless recorder (HW HEVC-lossless / FFV1 / x265), `splitmuxsink` | ✅ done (FFV1 path validated; NVENC needs hardware) |
 | **P3** | Transport (shm header + optional raw endpoint), C++ `rclcpp` ros2-bridge (raw + lazy compressed `Image`), per-sensor supervisor | ✅ done |
-| **P4** | **WebRTC** consumer (`webrtcsink`, lossy low-latency, remote viewing) | ⏳ in progress |
+| **P4** | **WebRTC** consumer (`webrtcsink`, lossy low-latency, remote viewing) | ✅ done (headless loopback validated; browser viewing + HW encoder need a Jetson) |
 | **P5** | Hardening (reconnect, disk-full, NVENC session budget, NIC/PTP tuning) + on-Jetson / on-camera validation | ⬜ todo |
 
 ## Validated by actually running it (containers, no hardware)
@@ -19,7 +19,8 @@ Where the project is, what's validated, what's left, and how to resume. Pair wit
 Capture → PTP/chunk timestamping (**real Aravis chunk-parse path**) → **lossless** recording
 (proven bit-exact via the round-trip) → shm transport with header → **C++ ROS2 bridge** (raw +
 compressed `Image`, capture time in `header.stamp`) → **per-sensor supervisor** (spawn / manage /
-clean teardown). Cross-container and cross-GStreamer-version (1.20↔1.24) shm both work.
+clean teardown) → **WebRTC egress** (raw shm → `webrtcsink` → `webrtcsrc`, decoded frames counted).
+Cross-container and cross-GStreamer-version (1.20↔1.24) shm both work.
 
 **Test inventory** (each runs without a Jetson or camera):
 - `core-driver/tools/dev_test.sh` — producer: fake camera → timestamp → FFV1 → shm
@@ -28,6 +29,8 @@ clean teardown). Cross-container and cross-GStreamer-version (1.20↔1.24) shm b
 - `tools/gvsp-chunk-emitter/gvsp_test.sh` — real GVSP + chunk-timestamp extraction (patched Aravis)
 - `tools/gvsp-chunk-emitter/roundtrip_test.sh` — full input→output round-trip: known frames+timestamps →
   GVSP → recording, byte-compared (lossless + timestamp fidelity; random-noise frames)
+- `plugins/webrtc-bridge/tools/webrtc_test.sh` — WebRTC egress: raw shm → `webrtcsink` → signalling →
+  `webrtcsrc` decode, frames counted (headless, no browser)
 - `python3 core-driver/tests/test_*.py` — pure-logic unit tests (transport wire format, config, timestamp ladder)
 
 ## Still needs the Orin / a real Blackfly S
@@ -45,8 +48,8 @@ clean teardown). Cross-container and cross-GStreamer-version (1.20↔1.24) shm b
 ## How to resume (for a future session)
 
 1. Read [DESIGN.md](DESIGN.md) (architecture + decisions) and this file.
-2. Build + run the test suites above to confirm the current state is green (`docker build` the three
-   images: `gige-dev`, `ros2-bridge`, `gige-chunks`, then the `*_test.sh` scripts).
+2. Build + run the test suites above to confirm the current state is green (`docker build` the four
+   images: `gige-dev`, `ros2-bridge`, `gige-chunks`, `webrtc-bridge`, then the `*_test.sh` scripts).
 3. Recalled memory (this machine's Claude) holds the same facts in condensed form; the in-repo docs
    are canonical and shareable.
 
@@ -58,4 +61,6 @@ clean teardown). Cross-container and cross-GStreamer-version (1.20↔1.24) shm b
 - Transport = shm + 36-byte header (shm drops PTS/metas); optional raw endpoint; `unixfd`/Zenoh later.
 - Python core + C++ ros2-bridge; one container per sensor; supervisor spawns plugins.
 - SEI declined (use the CSV sidecar; RTP header extension for the streaming path).
+- WebRTC egress = gst-plugins-rs `webrtcsink` (built from source), sibling container on the raw shm
+  endpoint; encodes internally; needs `gstreamer1.0-nice` + `shmsrc do-timestamp` + I420 conversion.
 - Zenoh kept as the future data-fabric transport (swappable in).

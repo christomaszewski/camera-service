@@ -27,8 +27,8 @@ fans the stream out to consumer "plugins" (ROS2, WebRTC, MQTT, ...).
 
 ```
 Aravis stream  ──►  [feeder: read frame_id + PTP ChunkTimestamp;        ──► appsrc ──► tee ──┬─► recorder (lossless, temporal) ─► splitmuxsink .mkv
- (FLIR BFS,           set PTS = ts − base; write CSV row]                                     ├─► (later) shm / unixfd transport ─► plugins
-  PTP slave)                                                                                  └─► (later) webrtcsink (lossy, low-latency)
+ (FLIR BFS,           set PTS = ts − base; write CSV row]                                     ├─► shm transport (unixfd later) ─► plugins (ROS2, ...)
+  PTP slave)                                                                                  └─► webrtcsink (lossy, low-latency) ─► remote viewers
 ```
 
 The recorder is **pluggable / capability-detecting**:
@@ -171,7 +171,10 @@ docker compose up --build                # on the Jetson
   `rclcpp` **ros2-bridge** ([plugins/ros2-bridge](plugins/ros2-bridge); raw + lazy compressed `Image` with the
   capture time in `header.stamp`), and the config-driven **per-sensor supervisor**
   ([supervisor.py](core-driver/supervisor.py)). All validated end-to-end in containers.
-- [ ] **P4** WebRTC consumer (`webrtcsink`, lossy low-latency)
+- [x] **P4** WebRTC consumer — gst-plugins-rs `webrtcsink` (lossy low-latency, encodes internally,
+  congestion-controlled, multi-viewer) as a sibling container on the raw shm endpoint
+  ([plugins/webrtc-bridge](plugins/webrtc-bridge)). Headless `webrtcsink → webrtcsrc` loopback validated in
+  containers; browser viewing + the HW encoder path need a Jetson.
 - [ ] **P5** hardening (reconnect, disk-full, NVENC budget) + Thor/JP7 portability (`nvunixfd` zero-copy, sm_110 rebuild)
 
 ### Testing tools (no Jetson, no camera)
@@ -182,6 +185,7 @@ chunk-parse path** via a patched chunk-emitting GV camera:
 - [core-driver/tools/supervisor_test.sh](core-driver/tools/supervisor_test.sh) — supervisor spawn / manage / clean teardown
 - [tools/gvsp-chunk-emitter/gvsp_test.sh](tools/gvsp-chunk-emitter) — **real GVSP + chunk-timestamp extraction** (patched Aravis fake camera)
 - [tools/gvsp-chunk-emitter/roundtrip_test.sh](tools/gvsp-chunk-emitter) — **full input→output round-trip**: known frames+timestamps → GVSP → recording, then byte-compared (lossless + timestamp fidelity)
+- [plugins/webrtc-bridge/tools/webrtc_test.sh](plugins/webrtc-bridge/tools/webrtc_test.sh) — **WebRTC egress**: raw shm → `webrtcsink` → `webrtcsrc` decode (headless, no browser)
 
 ### Still needs the Orin / a real Blackfly S
 - the **NVENC HW recorder** (`nvv4l2h265enc enable-lossless`, NVMM caps) — the software FFV1 path is validated;

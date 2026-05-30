@@ -44,5 +44,29 @@ services:
       - core-driver
     restart: unless-stopped
 
+  # Remote viewing: consumes the core's raw shm endpoint and serves it to browsers via
+  # webrtcsink (lossy, low-latency, congestion-controlled). Enable transport.raw_endpoint
+  # in the core config first, and set the geometry below to match the camera (shm has no caps).
+  webrtc-bridge:
+    build:
+      context: .
+      dockerfile: plugins/webrtc-bridge/Dockerfile
+    init: true
+    network_mode: host         # expose the signalling server (:8443) + WebRTC media to viewers
+    ipc: host                  # share /dev/shm with the core (raw shm endpoint)
+    volumes:
+      - gige_sock:/tmp/gige
+    environment:
+      - GIGE_SHM_SOCKET=/tmp/gige/raw
+      - GIGE_WIDTH=2048          # <-- set to your camera's geometry / format / rate
+      - GIGE_HEIGHT=1536
+      - GIGE_FORMAT=GRAY8
+      - GIGE_FPS=30
+      # - VIDEO_CAPS=video/x-h264   # optional: pin codec (most browser-compatible)
+      # On Jetson, prefer the HW encoder:  GST_PLUGIN_FEATURE_RANK=nvv4l2h264enc:MAX
+    depends_on:
+      - core-driver
+    restart: unless-stopped
+
 volumes:
   gige_sock:
