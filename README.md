@@ -6,6 +6,8 @@ from GigE Vision cameras (e.g. FLIR Blackfly S), extracts **hardware PTP timesta
 from the GVSP chunk data, records a **lossless, temporally-compressed** video file, and
 fans the stream out to consumer "plugins" (ROS2, WebRTC, MQTT, ...).
 
+> **Design & decisions** → [docs/DESIGN.md](docs/DESIGN.md) · **Status & roadmap** → [docs/ROADMAP.md](docs/ROADMAP.md) · **PTP experiment** → [docs/ptp-timestamp-experiment.md](docs/ptp-timestamp-experiment.md)
+
 ## Why it's built this way
 
 - **The hardware timestamp is the pipeline's time base.** Each frame's PTP timestamp
