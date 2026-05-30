@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from typing import Optional
 
@@ -60,6 +61,11 @@ class CapturePipeline:
         self.loop: Optional[GLib.MainLoop] = None
         self._base_ts: Optional[int] = None
         self._last_pub_ts: Optional[int] = None
+        self._last_pts: Optional[int] = None        # for the monotonic-PTS guard
+        self._frame_interval_ns = 1_000_000         # set in build() from frame_rate
+        self._last_buf_t = 0.0                       # monotonic time of the last buffer (liveness)
+        self._reconnecting = False
+        self._stop_event = threading.Event()         # wakes the reconnect backoff on shutdown
         self._n_pushed = 0
         self._gst_format = "GRAY8"
         self._bits = 8
@@ -92,6 +98,7 @@ class CapturePipeline:
 
         fps = self.cfg.camera.frame_rate
         framerate = f"{int(round(fps))}/1" if fps else "0/1"
+        self._frame_interval_ns = int(1_000_000_000 / fps) if fps else 1_000_000
         caps = (f"video/x-raw,format={self._gst_format},width={self._width},"
                 f"height={self._height},framerate={framerate}")
         self._image_size = self._width * self._height * (2 if self._bits > 8 else 1)
@@ -160,6 +167,7 @@ class CapturePipeline:
         buf = stream.try_pop_buffer()
         if buf is None:
             return
+        self._last_buf_t = time.monotonic()   # any buffer (even non-SUCCESS) => the stream is alive
         if self._stopping:
             stream.push_buffer(buf)   # draining for EOS; stop feeding the pipeline
             return
@@ -172,8 +180,16 @@ class CapturePipeline:
                 self._base_ts = stamp.timestamp_ns
                 self._write_header()
             pts = stamp.timestamp_ns - self._base_ts
+            if self._last_pts is not None and pts <= self._last_pts:
+                # Non-monotonic timestamp (e.g. the camera clock reset across a reconnect).
+                # Rebase so the muxer keeps a strictly-increasing PTS; the true timestamp is
+                # still recorded per-frame in the sidecar CSV, so absolute time is recoverable.
+                self._base_ts = stamp.timestamp_ns - (self._last_pts + self._frame_interval_ns)
+                pts = self._last_pts + self._frame_interval_ns
+                log.warning("timestamp discontinuity (ts went backward); rebased PTS to stay monotonic")
             if pts < 0:
                 pts = 0
+            self._last_pts = pts
 
             data = buf.get_data()
             if not data:
@@ -233,6 +249,7 @@ class CapturePipeline:
         if self._stopping:
             return
         self._stopping = True
+        self._stop_event.set()   # wake the reconnect backoff, if one is in progress
         log.info("stop requested: stopping acquisition + sending EOS to finalize recording")
         self.camera.stop()
         for src in (self.appsrc, self.transport_src):
@@ -254,16 +271,62 @@ class CapturePipeline:
 
         self.loop = GLib.MainLoop()
         self.pipeline.set_state(Gst.State.PLAYING)
-
-        stream = self.camera.stream
-        stream.set_emit_signals(True)
-        stream.connect("new-buffer", self.on_new_buffer)
-        self.camera.start()
+        self._attach_and_start()
+        if self.cfg.camera.reconnect:
+            GLib.timeout_add_seconds(1, self._watchdog)
         log.info("running")
         try:
             self.loop.run()
         finally:
             self.shutdown()
+
+    def _attach_and_start(self) -> None:
+        """Wire the (possibly new) Aravis stream's new-buffer signal to the feeder and start
+        acquisition. Used at start-up and after every reconnect."""
+        stream = self.camera.stream
+        stream.set_emit_signals(True)
+        stream.connect("new-buffer", self.on_new_buffer)
+        self._last_buf_t = time.monotonic()   # reset liveness so the watchdog ignores spin-up
+        self.camera.start()
+
+    def _watchdog(self) -> bool:
+        """Runs on the main loop ~1 Hz: detect a disconnect (control-lost or no frames) and
+        kick off a reconnect in its own thread (so backoff doesn't block the pipeline)."""
+        if self._stopping:
+            return False   # remove the watchdog
+        if self._reconnecting:
+            return True
+        since = time.monotonic() - self._last_buf_t
+        if self.camera.control_lost or since > self.cfg.camera.reconnect_timeout_s:
+            log.warning("camera disconnect (control_lost=%s, %.1fs since last frame) -> reconnecting",
+                        self.camera.control_lost, since)
+            self._reconnecting = True
+            threading.Thread(target=self._reconnect, name="reconnect", daemon=True).start()
+        return True
+
+    def _reconnect(self) -> None:
+        """Backoff loop (own thread): re-open the camera until it returns, then re-arm the
+        feeder. The GStreamer pipeline stays PLAYING throughout -- the appsrc just idles, so
+        the recording isn't finalized and consumers keep their shm connection."""
+        self.camera.stop()   # best-effort: drop the dead acquisition
+        backoff = self.cfg.camera.reconnect_backoff_s
+        attempt = 0
+        while not self._stopping:
+            attempt += 1
+            try:
+                self.camera.reopen(self.cfg.camera.n_stream_buffers)
+            except Exception as e:   # noqa: BLE001 - never let the reconnect thread die
+                log.warning("reconnect attempt %d failed: %s (retry in %.1fs)", attempt, e, backoff)
+                if self._stop_event.wait(backoff):
+                    break            # stop requested mid-backoff
+                backoff = min(backoff * 2, self.cfg.camera.reconnect_backoff_max_s)
+                continue
+            self.extractor.set_chunk_parser(self.camera.chunk_parser, self.camera.tick_frequency_hz)
+            self._attach_and_start()
+            log.info("camera reconnected after %d attempt(s); resuming capture", attempt)
+            self._reconnecting = False
+            return
+        self._reconnecting = False
 
     def _on_bus(self, _bus, msg) -> None:
         if msg.type == Gst.MessageType.ERROR:

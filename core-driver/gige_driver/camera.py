@@ -34,6 +34,7 @@ class GigECamera:
         self.tick_frequency_hz: int = 0
         self.ptp_locked: bool = False
         self.chunks_enabled: bool = False
+        self.control_lost: bool = False   # set by the device "control-lost" signal
 
     # ---- feature helpers ---------------------------------------------------
     def _has(self, feature: str) -> bool:
@@ -74,9 +75,43 @@ class GigECamera:
         except GLib.Error as e:
             raise CameraError(f"failed to open camera {cam_id!r}: {e}") from e
         self.device = self.camera.get_device()
+        self.control_lost = False   # fresh device -> control channel is up
+        try:
+            self.device.connect("control-lost", self._on_control_lost)
+        except (GLib.Error, TypeError) as e:
+            log.debug("control-lost signal unavailable: %s", e)
         log.info("opened %s %s (sn %s)",
                  self.camera.get_vendor_name(), self.camera.get_model_name(),
                  self.camera.get_device_serial_number())
+
+    def _on_control_lost(self, _device) -> None:
+        log.error("camera control channel lost (%s)", self.cfg.camera_id or "device")
+        self.control_lost = True
+
+    def _release(self) -> None:
+        """Drop the old stream/camera so their GVSP sockets + receive thread close before a
+        reopen -- otherwise a new stream can't bind the receive port and gets no frames."""
+        self.stream = None
+        self.camera = None
+        self.device = None
+        self.chunk_parser = None
+        import gc
+        gc.collect()
+
+    def reopen(self, n_buffers: int) -> None:
+        """Full re-setup after a disconnect: release the dead stream, then open + configure +
+        chunks/PTP + a new stream (NOT started -- the caller attaches the new-buffer handler,
+        then starts). Raises CameraError/GLib.Error if the camera isn't back yet, so the
+        caller can back off and retry."""
+        self._release()
+        self.open()
+        self.configure()
+        want_ptp = self.cfg.timestamp_source == "ptp_chunk"
+        if want_ptp:
+            self.enable_chunks()
+        if want_ptp and self.cfg.ptp_enable:
+            self.enable_ptp(self.cfg.ptp_lock_timeout_s)
+        self.create_stream(n_buffers)
 
     def configure(self) -> None:
         c, cfg = self.camera, self.cfg

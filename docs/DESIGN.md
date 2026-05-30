@@ -108,6 +108,22 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
   per-sensor unit that layer would call. A dev override (`docker-compose.dev.yml`, `gige-up --dev`) swaps
   the l4t core for the `gige-dev` image so the whole model runs on a laptop/CI.
 
+- **Camera reconnect/backoff (a watchdog + a backoff thread, not a pipeline restart).** A GigE camera
+  dropping off the link is the most common field failure, so the core recovers without dying or
+  corrupting the recording. The validated signal-driven feeder is kept; reconnect is *additive*: a 1 Hz
+  watchdog on the main loop trips on either the Aravis `control-lost` signal or "no buffer for
+  `reconnect_timeout_s`" and spawns a backoff thread that re-opens the camera (exponential, capped).
+  Crucially the **GStreamer pipeline stays PLAYING** throughout — the live `appsrc` just idles — so the
+  recording isn't finalized and shm consumers keep their connection; only the camera half is rebuilt.
+  Two subtleties the container test surfaced: (1) the **old stream's GVSP receive socket must be released
+  before reopen** (drop + gc the old stream/camera) or the new stream binds nothing and gets no frames —
+  the bug showed up as a *second* disconnect 3 s after a "successful" reconnect; (2) a reconnected camera's
+  clock can **reset**, so a **monotonic-PTS guard** rebases the PTS to stay strictly increasing for the
+  muxer — the true (possibly discontinuous) timestamp is still logged per-frame in the sidecar CSV, so
+  absolute time stays recoverable. Validated with the GVSP emitter killed + restarted mid-stream
+  (`reconnect_test.sh`): detect → back off → reconnect → frames resume (336 recorded across the outage) →
+  valid lossless recording, process never dies.
+
 - **SEI timestamp injection — considered, declined as primary.** `user_data_unregistered` SEI is the
   standards-correct in-bitstream hook and is lossless-safe (non-VCL), but `nvv4l2*` can't inject
   arbitrary SEI (NVENC-SDK path is Thor/JP7 only), no off-the-shelf GStreamer element inserts it, and

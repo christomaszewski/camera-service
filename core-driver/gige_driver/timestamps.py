@@ -67,6 +67,13 @@ class TimestampExtractor:
         self._active: Optional[TimestampSource] = None
         self._ptp_locked = False
 
+    def set_chunk_parser(self, parser, tick_frequency_hz: Optional[int] = None) -> None:
+        """Swap in a fresh chunk parser after a camera reconnect (the old parser belonged
+        to the disconnected device). Keeps the already-resolved active source."""
+        self._parser = parser
+        if tick_frequency_hz is not None:
+            self._tick_hz = tick_frequency_hz
+
     @property
     def ptp_locked(self) -> bool:
         return self._ptp_locked

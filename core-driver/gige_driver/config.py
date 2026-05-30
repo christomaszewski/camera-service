@@ -40,6 +40,13 @@ class CameraConfig:
     chunk_timestamp_name: str = "ChunkTimestamp"
     chunk_frame_id_name: str = "ChunkFrameID"
 
+    # Reconnect/backoff: recover from a camera dropping off the link without dying or
+    # corrupting the recording. The pipeline stays up; a watchdog re-opens the camera.
+    reconnect: bool = True
+    reconnect_timeout_s: float = 3.0        # no buffer for this long => treat as disconnected
+    reconnect_backoff_s: float = 1.0        # initial delay between re-open attempts
+    reconnect_backoff_max_s: float = 30.0   # exponential backoff cap
+
 
 @dataclass
 class RecordingConfig:

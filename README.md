@@ -192,7 +192,9 @@ Docker Compose **profiles**, and brings up that sensor's stack:
   congestion-controlled, multi-viewer) as a sibling container on the raw shm endpoint
   ([plugins/webrtc-bridge](plugins/webrtc-bridge)). Headless `webrtcsink → webrtcsrc` loopback validated in
   containers; browser viewing + the HW encoder path need a Jetson.
-- [ ] **P5** hardening (reconnect, disk-full, NVENC budget) + Thor/JP7 portability (`nvunixfd` zero-copy, sm_110 rebuild)
+- [ ] **P5** hardening *(in progress)* — **camera reconnect/backoff** ✅ (watchdog + `control-lost`,
+  pipeline stays up, monotonic-PTS guard); disk-full + NVENC budget next — then Thor/JP7 portability
+  (`nvunixfd` zero-copy, sm_110 rebuild)
 
 ### Testing tools (no Jetson, no camera)
 The data path is validated by actually running it in containers — including the **real Aravis
@@ -204,6 +206,7 @@ chunk-parse path** via a patched chunk-emitting GV camera:
 - [tools/gvsp-chunk-emitter/roundtrip_test.sh](tools/gvsp-chunk-emitter) — **full input→output round-trip**: known frames+timestamps → GVSP → recording, then byte-compared (lossless + timestamp fidelity)
 - [plugins/webrtc-bridge/tools/webrtc_test.sh](plugins/webrtc-bridge/tools/webrtc_test.sh) — **WebRTC egress**: raw shm → `webrtcsink` → `webrtcsrc` decode (headless, no browser)
 - [tools/orchestration_test.sh](tools/orchestration_test.sh) — **config-driven multi-sensor deploy**: `gige-up` profile selection, two cameras side by side (isolated projects), cross-stack shm read
+- [tools/gvsp-chunk-emitter/reconnect_test.sh](tools/gvsp-chunk-emitter) — **camera reconnect/backoff**: kill the GVSP emitter mid-stream, restart it; the core detects, backs off, reconnects, resumes, and finalizes a valid recording
 
 ### Still needs the Orin / a real Blackfly S
 - the **NVENC HW recorder** (`nvv4l2h265enc enable-lossless`, NVMM caps) — the software FFV1 path is validated;
