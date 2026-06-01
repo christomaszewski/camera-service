@@ -213,3 +213,7 @@ chunk-parse path** via a patched chunk-emitting GV camera:
 - **Camera-specific PTP/chunk behaviour** — the exact chunk node names (`arv-tool-0.8 features`) and which of
   `chunk_ns`/`camera_ns`/`system_ns` is the authoritative PTP capture time (the [PTP experiment](docs/ptp-timestamp-experiment.md));
 - **packed pixel formats** (Mono10p/Mono12Packed) need an unpack step not yet implemented.
+
+## License
+
+[Apache-2.0](LICENSE).
