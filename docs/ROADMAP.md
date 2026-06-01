@@ -28,7 +28,8 @@ Cross-container and cross-GStreamer-version (1.20↔1.24) shm both work.
 - `core-driver/tools/supervisor_test.sh` — supervisor spawn / manage / teardown
 - `tools/gvsp-chunk-emitter/gvsp_test.sh` — real GVSP + chunk-timestamp extraction (patched Aravis)
 - `tools/gvsp-chunk-emitter/roundtrip_test.sh` — full input→output round-trip: known frames+timestamps →
-  GVSP → recording, byte-compared (lossless + timestamp fidelity; random-noise frames)
+  GVSP → recording, compared bit-exact against the exact transmitted bytes (lossless + timestamp fidelity).
+  Random-noise frames by default; `roundtrip_test.sh <video>` round-trips a real decoded file
 - `plugins/webrtc-bridge/tools/webrtc_test.sh` — WebRTC egress: raw shm → `webrtcsink` → signalling →
   `webrtcsrc` decode, frames counted (headless, no browser)
 - `tools/orchestration_test.sh` — config-driven multi-sensor deploy: `gige-up` profile selection, two
