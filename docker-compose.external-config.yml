@@ -1,0 +1,15 @@
+# Overlay added automatically by gige-up when the sensor config lives OUTSIDE this repo's
+# core-driver/config/sensors/ (e.g. a vehicle-level config inventory managed by `rig`). It
+# bind-mounts that single external file at GIGE_CONFIG -- an absolute in-container path that is
+# deliberately OUTSIDE the read-only /app/config mount (Docker can't create a nested mount point
+# inside a :ro mount), so the core/supervisor loads it via that absolute path.
+#
+# One file is enough because a sensor config is self-contained -- config.load_config() reads a
+# single YAML and fills the rest from dataclass defaults (it does NOT merge camera.yaml). If
+# sensor configs ever reference other external files, mount the parent dir here instead.
+#
+# gige-up sets GIGE_CONFIG_HOST (abs host path) + GIGE_CONFIG (=/run/gige-sensor.yaml for externals).
+services:
+  core-driver:
+    volumes:
+      - ${GIGE_CONFIG_HOST}:${GIGE_CONFIG}:ro

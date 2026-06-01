@@ -171,8 +171,13 @@ Docker Compose **profiles**, and brings up that sensor's stack:
 - **shm is a host-level interface, not stack-scoped:** the transport is a stable external volume
   (`gige_<name>_sock`) + `ipc: host`, so *other* sensor or autonomy stacks read a sensor's frames by
   mounting that volume + `--ipc=host`.
-- `service: gige-vision` in each config is a hook for a future machine-level launcher that scans
-  `config/sensors/` and routes each config to its stack — `gige-up` is the per-sensor unit it would call.
+- **Drops into a vehicle-level orchestrator** (e.g. `rig`) without coupling this repo to it. `gige-up`
+  accepts a config from **any host path** (a vehicle-wide inventory, not only `core-driver/config/sensors/`
+  — it auto-mounts an out-of-repo config into the container); exposes `up -d` / `down` / `ps` / `logs` on
+  one config; passes `ROS_DOMAIN_ID` / `RMW_IMPLEMENTATION` through so every stack shares one DDS graph;
+  and ships a [`deploy.yaml`](deploy.yaml) descriptor telling the orchestrator how to invoke it. The
+  dependency is one-way — this repo stays fully standalone. (`service:` + `name:` are the routing keys;
+  the core exposes a health check so `rig status` is real.) See [DESIGN.md](docs/DESIGN.md).
 
 ```bash
 ./tools/orchestration_test.sh            # validate the whole model without a Jetson or camera

@@ -17,6 +17,12 @@ services:
     ipc: host                               # share /dev/shm with the core
     volumes:
       - gige_sock:/tmp/gige
+    environment:
+      # Join the vehicle-wide DDS graph. `rig` exports these before calling gige-up so every
+      # stack shares one graph; the defaults are also correct standalone (gige joins whatever
+      # domain the host sets). rmw_fastrtps_cpp is the ROS 2 default RMW, in ros-base already.
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
     # __ns namespaces the node per sensor, so topics land under /<instance>/...
     command: >
       ros2 run gige_ros2_bridge gige_ros2_bridge --ros-args

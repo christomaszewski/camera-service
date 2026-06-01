@@ -1,0 +1,12 @@
+# Descriptor for the "rig" vehicle-level orchestrator: how to invoke this service's per-sensor
+# launcher. Descriptive metadata ONLY -- this repo does not depend on rig, and rig depends on
+# this repo (one-way). rig invokes:  <launcher> <config> <mapped-verb>   e.g.  gige-up <config> up -d
+service: gige-vision
+launcher: gige-up
+verbs:
+  up: "up -d"
+  down: "down"
+  status: "ps"       # rig may append `--format json` to parse `docker compose ps`
+  logs: "logs"
+  config: "config"
+ros_distro: lyrical

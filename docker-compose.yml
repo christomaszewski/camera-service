@@ -35,6 +35,14 @@ services:
       - gige_sock:/tmp/gige
     environment:
       - GIGE_CONFIG=${GIGE_CONFIG:-config/sensors/camera.yaml}
+    healthcheck:
+      # `rig status` (docker compose ps) then reports real health, not "n/a": the core reached
+      # PLAYING and its shm transport socket exists (a stack that feeds consumers has one enabled).
+      test: ["CMD-SHELL", "test -S /tmp/gige/frames || test -S /tmp/gige/raw"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 25s     # allow Aravis discovery + (optional) PTP lock wait + pipeline start
     restart: unless-stopped
 
 volumes:

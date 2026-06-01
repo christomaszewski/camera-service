@@ -124,6 +124,33 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
   (`reconnect_test.sh`): detect → back off → reconnect → frames resume (336 recorded across the outage) →
   valid lossless recording, process never dies.
 
+- **"rig-compatible" launcher contract (vehicle-level orchestration, one-way dependency).** A separate
+  machine-level tool, **`rig`**, brings up every sensor stack on one vehicle by looping over a manifest
+  and DELEGATING to each service's own per-sensor launcher — it never reimplements per-stack logic.
+  gige-vision is one such service and **`gige-up` is its launcher** — and the exemplar of the contract
+  (read one config → derive instance identity → select+parameterize a STATIC compose via profiles →
+  create the external shm volume → run it). The dependency is strictly **one-way**: rig depends on this
+  repo; this repo stays fully usable standalone and never imports or knows about rig. `gige-up` stays
+  gige-specific (it only brings up gige camera stacks; it is not generalized to other services). The
+  contract is four small things:
+  (1) `gige-up <config> {up -d | down | ps | logs | config}` operates on ONE sensor config;
+  (2) the config may live at an **arbitrary host path** — gige-up auto-detects a config outside
+  `core-driver/config/sensors/`, and a small overlay (`docker-compose.external-config.yml`) bind-mounts
+  that single (self-contained) file at an absolute in-container path (`/run/gige-sensor.yaml`), pointing
+  `GIGE_CONFIG` there. It mounts OUTSIDE the read-only `/app/config` mount on purpose: Docker can't
+  create a nested mount point inside a `:ro` mount. In-repo configs take no overlay and are byte-for-byte
+  unchanged. One file suffices because a sensor config is self-contained (`load_config` reads one YAML +
+  dataclass defaults; it doesn't merge `camera.yaml`);
+  (3) the ros2-bridge passes through **`ROS_DOMAIN_ID` / `RMW_IMPLEMENTATION`** so every stack shares one
+  DDS graph (rig exports them; the defaults — domain 0, `rmw_fastrtps_cpp`, the ROS 2 default RMW — are
+  correct standalone too);
+  (4) a repo-root **`deploy.yaml`** descriptor tells rig how to invoke the launcher (logical verbs →
+  compose subcommands, `ros_distro`) — descriptive metadata only, not code this repo runs.
+  A core-driver **HEALTHCHECK** (the shm transport socket exists) makes `rig status` (= `docker compose
+  ps`) report real health instead of "n/a". Invariants kept throughout: `ipc:host` + the external
+  `gige_<name>_sock` volume + host networking, so other stacks still read a camera's frames by mounting
+  that volume + `--ipc=host`; static compose + profiles (no generated compose, no pod-scoping).
+
 - **SEI timestamp injection — considered, declined as primary.** `user_data_unregistered` SEI is the
   standards-correct in-bitstream hook and is lossless-safe (non-VCL), but `nvv4l2*` can't inject
   arbitrary SEI (NVENC-SDK path is Thor/JP7 only), no off-the-shelf GStreamer element inserts it, and

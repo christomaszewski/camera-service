@@ -11,6 +11,7 @@
 #   gige-up --dev config/sensors/cam_a.yaml up -d # detached
 #   gige-up --dev config/sensors/cam_a.yaml down  # tear the sensor down
 #   gige-up --dev config/sensors/cam_a.yaml config  # just render the merged compose
+#   gige-up /any/host/path/cam_front.yaml up -d      # config from an arbitrary path (e.g. via `rig`)
 #
 # Multiple cameras = run it per config; each is its own compose project + shm volume + ports.
 # Another stack reads a sensor's frames by mounting its volume (gige_<name>_sock) + --ipc=host.
@@ -22,6 +23,8 @@ DEV=0
 if [ "${1:-}" = "--dev" ]; then DEV=1; shift; fi
 CONFIG="${1:?usage: gige-up [--dev] <sensor-config.yaml> [compose args...]}"; shift || true
 [ -f "$CONFIG" ] || { echo "gige-up: config not found: $CONFIG" >&2; exit 1; }
+CONFIG_ABS="$(cd "$(dirname "$CONFIG")" && pwd)/$(basename "$CONFIG")"
+SENSORS_DIR="$(cd "$REPO/core-driver/config/sensors" && pwd)"
 
 if ! docker compose version >/dev/null 2>&1; then
   echo "gige-up: needs the Docker Compose v2 plugin ('docker compose'); 'include' needs >= 2.20" >&2
@@ -39,7 +42,15 @@ docker volume create "$GIGE_SOCK_VOLUME" >/dev/null
 
 FILES=(-f "$REPO/docker-compose.yml")
 [ "$DEV" = 1 ] && FILES+=(-f "$REPO/docker-compose.dev.yml")
+# Config from an arbitrary host path (e.g. a vehicle-level config managed by `rig`): bind-mount
+# that single file into the container so the core/supervisor loads it. In-repo configs (under
+# core-driver/config/sensors/) already live in the mounted config dir, so no overlay is needed.
+if [ "$(dirname "$CONFIG_ABS")" != "$SENSORS_DIR" ]; then
+  export GIGE_CONFIG_HOST="$CONFIG_ABS"
+  export GIGE_CONFIG="/run/gige-sensor.yaml"   # mount target OUTSIDE the read-only /app/config mount
+  FILES+=(-f "$REPO/docker-compose.external-config.yml")
+fi
 
 ARGS=("$@"); [ ${#ARGS[@]} -eq 0 ] && ARGS=(up)
-echo "gige-up: project=$COMPOSE_PROJECT_NAME profiles=[${COMPOSE_PROFILES:-<none>}] sock=$GIGE_SOCK_VOLUME net=$GIGE_NETWORK config=$GIGE_CONFIG" >&2
+echo "gige-up: project=$COMPOSE_PROJECT_NAME profiles=[${COMPOSE_PROFILES:-<none>}] sock=$GIGE_SOCK_VOLUME net=$GIGE_NETWORK config=$GIGE_CONFIG${GIGE_CONFIG_HOST:+ (external: $GIGE_CONFIG_HOST)}" >&2
 exec docker compose "${FILES[@]}" "${ARGS[@]}"
