@@ -3,7 +3,9 @@
 A C++ `rclcpp` node that consumes the core's `application/x-gige-frame` shm endpoint and
 republishes each frame as `sensor_msgs/Image`, stamping `header.stamp` from the per-frame
 hardware (PTP) timestamp carried in the 36-byte header. It's a normal ROS 2 graph member,
-so it works with the default DDS RMW or `rmw_zenoh`.
+so it works with the default DDS RMW or `rmw_zenoh`, and honors `ROS_DOMAIN_ID` /
+`RMW_IMPLEMENTATION` from the environment — so it joins whatever DDS graph the host (or a
+vehicle-level orchestrator) sets.
 
 The wire-format contract is [`core-driver/gige_driver/transport.py`](../../core-driver/gige_driver/transport.py);
 the C++ `FrameHeader` mirrors it exactly, guarded by a `static_assert` on the 36-byte size.
@@ -48,4 +50,4 @@ sibling process in the same container (shm is then free).
 
 Runs the dev producer + bridge and checks the `/image_raw` rate (~25 Hz) and that the
 `Image` header carries the capture timestamp + correct geometry/encoding. Confirmed working
-across containers and across GStreamer 1.20 (producer) ↔ 1.24 (bridge).
+across containers and across GStreamer versions (older producer ↔ newer bridge).

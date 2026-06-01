@@ -26,7 +26,8 @@ Four edits to Aravis 0.8.36, gated on a new `ChunkModeActive` register (0x140):
 ```bash
 docker build -f tools/gvsp-chunk-emitter/Dockerfile -t gige-chunks .   # patched Aravis + our code
 ./tools/gvsp-chunk-emitter/gvsp_test.sh                                  # chunk extraction over GVSP
-./tools/gvsp-chunk-emitter/roundtrip_test.sh                            # full input->output round-trip
+./tools/gvsp-chunk-emitter/roundtrip_test.sh [video]                     # round-trip vs exact bytes (noise, or a real file)
+./tools/gvsp-chunk-emitter/reconnect_test.sh                             # camera reconnect/backoff (kill + restart emitter)
 ```
 
 The patch also supports **frame replay** via env vars (`ARV_REPLAY_FRAMES` = raw GRAY8 frames,
@@ -47,14 +48,15 @@ image+chunks, so the pipeline now slices to the image size before encoding.
 
 ## Round-trip test (`roundtrip_test.py`)
 
-Generates N self-identifying GRAY8 frames — each embeds its index + injected timestamp, the rest
-**deterministic random noise** (seeded by index, so it's reproducible but near-incompressible).
-Replays them through the emitter, records via the real pipeline, then decodes the recording and
-verifies **per frame**: decoded pixels are bit-exact vs. the regenerated input (lossless) AND the
-sidecar `chunk_ns` equals the embedded/injected timestamp (timestamp fidelity). Self-aligning by
-embedded index, so dropped frames don't desync.
+Builds N self-identifying GRAY8 frames — each stamps its index + injected timestamp over the
+content, which is either **deterministic random noise** (seeded by index — near-incompressible, so
+the codec can't cheat) or, with `roundtrip_test.sh <video>`, a **real decoded video** (any
+gst-decodable file, scaled to GRAY8 512×512 and cycled to N). Replays them through the emitter,
+records via the real pipeline, then decodes the recording and verifies **per frame**: decoded pixels
+are bit-exact vs. **the exact bytes we transmitted** — read back from the replay file at the embedded
+index, not regenerated — AND the sidecar `chunk_ns` equals the embedded/injected timestamp.
+Self-aligning by embedded index, so dropped frames don't desync.
 
-Result: **118/118 frames bit-exact, 118/118 timestamps match**, with the FFV1 recording at ~1.02×
-raw size — random noise barely compresses, so that ratio proves full entropy was stored losslessly
-(a gradient would compress to a fraction and prove little). Lossless recording + end-to-end timestamp
-fidelity, against known ground truth, over real GVSP, no hardware.
+Result: **bit-exact frames + matching timestamps** on both inputs — random noise records at ~1.02×
+raw (incompressible, so that ratio proves full entropy was stored losslessly), and a real clip at
+~0.01× (highly compressible) yet still perfectly lossless. Known ground truth, real GVSP, no hardware.
