@@ -1,4 +1,4 @@
-# ros2-bridge — heavy plugin, runs as its own container (ROS2/DDS on a jazzy base).
+# ros2-bridge — heavy plugin, runs as its own container (ROS2/DDS on a Lyrical Luth LTS base).
 # Pulled into the per-sensor stack by the top-level docker-compose.yml via `include:`, and
 # activated only when the `ros2-bridge` profile is enabled (gige-up derives the profile set
 # from the sensor config's enabled `isolation: container` plugins).

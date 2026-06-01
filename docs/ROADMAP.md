@@ -68,6 +68,10 @@ Cross-container and cross-GStreamer-version (1.20↔1.24) shm both work.
 - SEI declined (use the CSV sidecar; RTP header extension for the streaming path).
 - WebRTC egress = gst-plugins-rs `webrtcsink` (built from source), sibling container on the raw shm
   endpoint; encodes internally; needs `gstreamer1.0-nice` + `shmsrc do-timestamp` + I420 conversion.
+- ROS2 standardized on **Lyrical Luth** (LTS, May 2026 → 2031). `ament_target_dependencies` was removed
+  in Lyrical → use modern `target_link_libraries` with exported targets (works on Jazzy too). The bridge
+  Dockerfile takes a `ROS_DISTRO` build-arg (`--build-arg ROS_DISTRO=jazzy` for a fallback). Note:
+  third-party hardware drivers (NovAtel/SBG, for the fleet) will lag a fresh LTS → expect source builds.
 - Camera reconnect = keep the signal-driven feeder; add a watchdog (no-frame timeout) + `control-lost`
   detection → backoff reconnect in its own thread while the pipeline stays PLAYING (recording not
   finalized, consumers keep shm). Release the old stream's socket before reopen; monotonic-PTS guard

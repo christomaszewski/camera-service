@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end test: dev producer (gige-dev) + C++ ros2-bridge over shm -> sensor_msgs/Image.
 # No Jetson required -- validates the full camera -> timestamp -> shm+header -> ROS2 path,
-# across containers (--ipc=host) and across GStreamer versions (1.20 producer / 1.24 bridge).
+# across containers (--ipc=host) and across GStreamer versions (older producer / newer bridge).
 #
 # Prereq:
 #   docker build -f core-driver/Dockerfile.dev      -t gige-dev   .
@@ -9,7 +9,7 @@
 # Run (from anywhere):  ./plugins/ros2-bridge/tools/bridge_test.sh
 set -u
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
-SRC="source /opt/ros/jazzy/setup.bash && source /ws/install/setup.bash"
+SRC="source /opt/ros/*/setup.bash && source /ws/install/setup.bash"   # distro-agnostic (one distro per image)
 
 cleanup() { docker rm -f gige_producer gige_bridge >/dev/null 2>&1; docker volume rm gige_sock >/dev/null 2>&1; }
 trap cleanup EXIT

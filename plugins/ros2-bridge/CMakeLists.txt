@@ -17,8 +17,13 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(GST REQUIRED IMPORTED_TARGET gstreamer-1.0 gstreamer-app-1.0)
 
 add_executable(gige_ros2_bridge src/gige_ros2_bridge.cpp)
-target_link_libraries(gige_ros2_bridge PkgConfig::GST)
-ament_target_dependencies(gige_ros2_bridge rclcpp sensor_msgs image_transport)
+# Modern CMake linkage (works on Jazzy + Lyrical). `ament_target_dependencies` was removed
+# in Lyrical; link the exported targets directly -- they carry their include dirs transitively.
+target_link_libraries(gige_ros2_bridge
+  PkgConfig::GST
+  rclcpp::rclcpp
+  ${sensor_msgs_TARGETS}
+  image_transport::image_transport)
 
 install(TARGETS gige_ros2_bridge DESTINATION lib/${PROJECT_NAME})
 

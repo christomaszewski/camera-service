@@ -1,10 +1,13 @@
 # C++ rclcpp bridge: shm `application/x-gige-frame` -> sensor_msgs/Image.
 #
-# ROS 2 Jazzy (Ubuntu 24.04). GStreamer dev + the shm plugin come from apt. The node
-# is a normal ROS 2 graph member, so it works with the default DDS RMW or rmw_zenoh.
+# ROS 2 Lyrical Luth (LTS, May 2026 -> May 2031). GStreamer dev + the shm plugin come
+# from apt. The node is a normal ROS 2 graph member (default DDS RMW or rmw_zenoh).
+# Everything below is distro-agnostic via ${ROS_DISTRO}; only this FROM pins the distro.
 #
 # Build (from repo root):  docker build -f plugins/ros2-bridge/Dockerfile -t ros2-bridge .
-FROM ros:jazzy-ros-base
+# Fallback to the prior LTS:  docker build --build-arg ROS_DISTRO=jazzy ...
+ARG ROS_DISTRO=lyrical
+FROM ros:${ROS_DISTRO}-ros-base
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
