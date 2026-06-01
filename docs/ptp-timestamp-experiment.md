@@ -1,6 +1,6 @@
-# Experiment: which hardware timestamp to trust (FLIR Blackfly S + PTP)
+# Experiment: which hardware timestamp to trust (PTP + GVSP chunk data)
 
-**Status: TODO — run once a real GigE Vision camera (FLIR Blackfly S) is available.**
+**Status: TODO — run once a real PTP-capable GigE Vision camera is available.**
 The Aravis *fake* camera cannot drive this (no chunk/PTP support), so this must be
 done on hardware.
 
@@ -16,7 +16,7 @@ The three candidates (all logged every frame — see "Data" below):
 
 | Column | Source | Notes |
 |---|---|---|
-| `chunk_ns`  | `ChunkTimestamp` from the GVSP chunk trailer (`ArvChunkParser`) | FLIR docs: PTP-synced, **end-of-exposure**. Our **primary**. Tick-converted to ns. |
+| `chunk_ns`  | `ChunkTimestamp` from the GVSP chunk trailer (`ArvChunkParser`) | Per camera docs (e.g. FLIR): PTP-synced, **end-of-exposure**. Our **primary**. Tick-converted to ns. |
 | `camera_ns` | `arv_buffer_get_timestamp()` — the GVSP **leader-packet** timestamp | Same device clock; PTP when locked. Aravis already converts to ns. Our **fallback**. |
 | `system_ns` | `arv_buffer_get_system_timestamp()` — host arrival (`CLOCK_REALTIME`) | What we'd get if we naively timestamped on arrival. The thing we're trying to beat. |
 
@@ -73,7 +73,7 @@ With frame period `T = 1e9 / fps` (ns):
 
 ## Expected outcome (hypothesis)
 
-On a PTP-locked Blackfly S we expect: `Status=Slave`, `TickFrequency=1e9`, `chunk_ns`
+On a PTP-locked camera we expect: `Status=Slave`, `TickFrequency=1e9`, `chunk_ns`
 and `camera_ns` equal or a small constant apart, `Δchunk` std ≪ frame period, and a
 `system_ns − chunk_ns` gap of order ~0.1–a few ms with visible jitter. That would
 confirm the current implementation (chunk primary, camera fallback, tick-aware) is

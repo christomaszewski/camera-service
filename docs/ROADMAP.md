@@ -39,11 +39,11 @@ Cross-container and cross-GStreamer-version (1.20↔1.24) shm both work.
   finalizes a non-corrupt lossless recording
 - `python3 core-driver/tests/test_*.py` — pure-logic unit tests (transport wire format, config, timestamp ladder)
 
-## Still needs the Orin / a real Blackfly S
+## Still needs the Orin / a real camera
 
 - **NVENC HW recorder** — `nvv4l2h265enc enable-lossless`, NV24/NVMM caps, bit-exact round trip
   (`ffmpeg framemd5`/PSNR=inf). Software FFV1 is validated; HW path is written but unrun. (8-bit only.)
-- **FLIR-specific PTP/chunk behaviour** — the [PTP timestamp experiment](ptp-timestamp-experiment.md):
+- **Camera-specific PTP/chunk behaviour** — the [PTP timestamp experiment](ptp-timestamp-experiment.md):
   confirm `GevIEEE1588Status=Slave`, `GevTimestampTickFrequency`, which of `chunk_ns`/`camera_ns`/`system_ns`
   is the authoritative capture time, and the real arrival jitter. Verify the exact chunk node names
   (`arv-tool-0.8 features`).

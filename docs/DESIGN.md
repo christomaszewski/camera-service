@@ -8,8 +8,8 @@ file plus ROADMAP.md should get you oriented without re-deriving anything.
 ## Goal & context
 
 A **generic GigE Vision (GVSP) camera driver** on **GStreamer + Aravis**, deployed on **NVIDIA
-Jetson** (AGX Orin now; portable to Thor / JetPack 7). Target cameras include the **FLIR Blackfly
-S**. It must: extract **per-frame hardware (PTP) timestamps** so we record true sensor-capture time
+Jetson** (AGX Orin now; portable to Thor / JetPack 7). It works with any GVSP-compliant
+camera. It must: extract **per-frame hardware (PTP) timestamps** so we record true sensor-capture time
 (not arrival time, which carries network + processing latency/jitter); record **losslessly with
 temporal compression**; and **distribute** frames to consumer "plugins" (ROS2, WebRTC, MQTT, …).
 Dev happens on macOS; everything actually runs on the Jetson in Docker (and in CI-style container
@@ -158,10 +158,11 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
 
 ## Platform constraints (hard facts that shaped the design)
 
-- **Aravis/FLIR:** FLIR exposes PTP via the legacy `GevIEEE1588*` names (not SFNC `Ptp*`). Aravis
-  **cannot decode** FLIR's proprietary on-camera compression or standard GEV JPEG/H.264 payloads →
-  run uncompressed on the wire (`ImageCompressionMode=Off`, jumbo frames). Need **Aravis ≥0.8.23**
-  (prefer ≥0.8.32) for FLIR extended-chunk support. `arv_buffer_get_data()` returns image **+ chunks**
+- **Aravis / camera quirks:** cameras vary, so the driver handles the common ones generically (FLIR
+  cited as a frequent example). Some cameras expose PTP via the legacy `GevIEEE1588*` names rather than
+  SFNC `Ptp*` — we try both. Aravis **cannot decode** vendor-proprietary on-camera compression or
+  standard GEV JPEG/H.264 payloads → run uncompressed on the wire (`ImageCompressionMode=Off`, jumbo
+  frames). Need **Aravis ≥0.8.23** (prefer ≥0.8.32) for extended-chunk support. `arv_buffer_get_data()` returns image **+ chunks**
   when chunk mode is on — slice to the image size (a real bug the chunk emitter test caught).
 - **Jetson encode:** Orin HW lossless is **8-bit only** (no 10/12-bit HW lossless, no AV1 lossless).
   Orin Nano has **no NVENC** (software only); AGX Orin / Orin NX have it. **Thor (JP7) keeps NVENC+NVDEC**

@@ -2,7 +2,7 @@
 #
 # The l4t-jetpack base brings CUDA + the NVIDIA GStreamer stack (nvv4l2h265enc,
 # nvvidconv, ...) which are injected at runtime by the nvidia container runtime.
-# We add Aravis built from source (>= 0.8.32, required for FLIR extended-chunk
+# We add Aravis built from source (>= 0.8.32, required for extended-chunk
 # payloads) plus its GStreamer plugin and GObject-introspection bindings.
 #
 # NOTE: build/run on the Jetson (arm64) under `runtime: nvidia`. The Aravis

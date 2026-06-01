@@ -7,8 +7,8 @@ over **real GVSP on localhost**, two chunks per frame:
 - `ChunkTimestamp` (ChunkID `0xa001`, 8 bytes BE) = the buffer timestamp (system time, ns)
 - `ChunkFrameID`   (ChunkID `0xa002`, 8 bytes BE) = the frame id
 
-This validates the pipeline's **real Aravis chunk-parse path** with no FLIR camera. (It covers
-the Aravis chunk *mechanics*; FLIR's exact PTP/chunk behaviour still needs the actual camera.)
+This validates the pipeline's **real Aravis chunk-parse path** with no real camera. (It covers
+the Aravis chunk *mechanics*; a real camera's exact PTP/chunk behaviour still needs the hardware.)
 
 ## What the patch does (`apply_chunk_patch.py`)
 

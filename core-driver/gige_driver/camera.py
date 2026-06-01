@@ -1,11 +1,11 @@
 """Aravis camera setup: discovery, feature configuration, PTP, chunk mode, stream.
 
-Key facts baked in here (see project research):
-  * FLIR's on-camera compression is proprietary and Aravis can't decode it ->
-    force ImageCompressionMode=Off.
-  * FLIR exposes PTP via the legacy GevIEEE1588* feature names, not the SFNC
-    Ptp* names -> we try both.
-  * Requires Aravis >= 0.8.23 (prefer >= 0.8.32) for FLIR extended-chunk payloads.
+Camera-quirk facts this handles generically (FLIR cited as a common example):
+  * Vendor on-camera compression is often proprietary and Aravis can't decode it ->
+    force ImageCompressionMode=Off when the feature is present.
+  * Some cameras (e.g. FLIR) expose PTP via the legacy GevIEEE1588* feature names
+    rather than the SFNC Ptp* names -> we try both.
+  * Extended-chunk payloads need Aravis >= 0.8.23 (prefer >= 0.8.32).
 """
 from __future__ import annotations
 

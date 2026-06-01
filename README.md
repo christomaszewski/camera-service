@@ -2,7 +2,7 @@
 
 A generic GigE Vision (GVSP) camera driver built on **GStreamer + Aravis**, targeting
 **NVIDIA Jetson** (AGX Orin today; portable to Jetson Thor / JetPack 7). It captures
-from GigE Vision cameras (e.g. FLIR Blackfly S), extracts **hardware PTP timestamps**
+from any GigE Vision (GVSP) camera, extracts **hardware PTP timestamps**
 from the GVSP chunk data, records a **lossless, temporally-compressed** video file, and
 fans the stream out to consumer "plugins" (ROS2, WebRTC, MQTT, ...).
 
@@ -27,7 +27,7 @@ fans the stream out to consumer "plugins" (ROS2, WebRTC, MQTT, ...).
 
 ```
 Aravis stream  ──►  [feeder: read frame_id + PTP ChunkTimestamp;        ──► appsrc ──► tee ──┬─► recorder (lossless, temporal) ─► splitmuxsink .mkv
- (FLIR BFS,           set PTS = ts − base; write CSV row]                                     ├─► shm transport (unixfd later) ─► plugins (ROS2, ...)
+ (GigE cam,           set PTS = ts − base; write CSV row]                                     ├─► shm transport (unixfd later) ─► plugins (ROS2, ...)
   PTP slave)                                                                                  └─► webrtcsink (lossy, low-latency) ─► remote viewers
 ```
 
@@ -50,7 +50,7 @@ core-driver/            # the producer service
   main.py               # entry point
   config/camera.yaml    # camera + recording + preview settings
   Dockerfile
-plugins/                # consumer applications (ros2-bridge, mqtt-telemetry, webrtc, ...)
+plugins/                # consumer apps: ros2-bridge, webrtc-bridge (mqtt-telemetry, ... as examples)
 docker-compose.yml
 ```
 
@@ -208,8 +208,8 @@ chunk-parse path** via a patched chunk-emitting GV camera:
 - [tools/orchestration_test.sh](tools/orchestration_test.sh) — **config-driven multi-sensor deploy**: `gige-up` profile selection, two cameras side by side (isolated projects), cross-stack shm read
 - [tools/gvsp-chunk-emitter/reconnect_test.sh](tools/gvsp-chunk-emitter) — **camera reconnect/backoff**: kill the GVSP emitter mid-stream, restart it; the core detects, backs off, reconnects, resumes, and finalizes a valid recording
 
-### Still needs the Orin / a real Blackfly S
+### Still needs the Orin / a real camera
 - the **NVENC HW recorder** (`nvv4l2h265enc enable-lossless`, NVMM caps) — the software FFV1 path is validated;
-- **FLIR-specific PTP/chunk behaviour** — the exact chunk node names (`arv-tool-0.8 features`) and which of
+- **Camera-specific PTP/chunk behaviour** — the exact chunk node names (`arv-tool-0.8 features`) and which of
   `chunk_ns`/`camera_ns`/`system_ns` is the authoritative PTP capture time (the [PTP experiment](docs/ptp-timestamp-experiment.md));
 - **packed pixel formats** (Mono10p/Mono12Packed) need an unpack step not yet implemented.
