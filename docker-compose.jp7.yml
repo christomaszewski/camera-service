@@ -1,0 +1,12 @@
+# JetPack 7 override (applied by `gige-up --jp7`). JP7 replaced JP6's CSV-mount model with CDI,
+# so the core gets the NVIDIA multimedia stack (nvv4l2*/nvvidconv/NvBufSurface/nvunixfd + the
+# /dev/v4l2-nvenc|nvdec nodes) via a CDI device, NOT via `runtime: nvidia`.
+#
+# Prereq on the host (once):  sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+# Build the core on a 24.04 base:  GIGE_CORE_BASE=ubuntu:24.04 (CUDA base only if you need CUDA).
+# `kmod` is baked into the core image (libnvtvmr runs lsmod during NVENC init).
+services:
+  core-driver:
+    runtime: runc                 # CDI is handled by Docker's native --device, not the nvidia runtime
+    devices:
+      - nvidia.com/gpu=all

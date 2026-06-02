@@ -8,6 +8,7 @@
 #
 #   gige-up config/sensors/cam_a.yaml             # prod: l4t core, nvidia runtime, host net (foreground up)
 #   gige-up --dev config/sensors/cam_a.yaml       # dev (no Jetson): gige-dev core, bridge net
+#   gige-up --jp7 config/sensors/cam_a.yaml up -d # JetPack 7 Orin: NVENC via CDI device (docs/jetpack7-bringup.md)
 #   gige-up --dev config/sensors/cam_a.yaml up -d # detached
 #   gige-up --dev config/sensors/cam_a.yaml down  # tear the sensor down
 #   gige-up --dev config/sensors/cam_a.yaml config  # just render the merged compose
@@ -19,9 +20,13 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")" && pwd)"
 PYTHON="${GIGE_PYTHON:-python3}"
 
-DEV=0
-if [ "${1:-}" = "--dev" ]; then DEV=1; shift; fi
-CONFIG="${1:?usage: gige-up [--dev] <sensor-config.yaml> [compose args...]}"; shift || true
+DEV=0; JP7=0
+while :; do case "${1:-}" in
+  --dev) DEV=1; shift;;
+  --jp7) JP7=1; shift;;       # JetPack 7 (Orin): add the CDI-device overlay so the core gets NVENC
+  *) break;;
+esac; done
+CONFIG="${1:?usage: gige-up [--dev|--jp7] <sensor-config.yaml> [compose args...]}"; shift || true
 [ -f "$CONFIG" ] || { echo "gige-up: config not found: $CONFIG" >&2; exit 1; }
 CONFIG_ABS="$(cd "$(dirname "$CONFIG")" && pwd)/$(basename "$CONFIG")"
 SENSORS_DIR="$(cd "$REPO/core-driver/config/sensors" && pwd)"
@@ -42,6 +47,7 @@ docker volume create "$GIGE_SOCK_VOLUME" >/dev/null
 
 FILES=(-f "$REPO/docker-compose.yml")
 [ "$DEV" = 1 ] && FILES+=(-f "$REPO/docker-compose.dev.yml")
+[ "$JP7" = 1 ] && FILES+=(-f "$REPO/docker-compose.jp7.yml")
 # Config from an arbitrary host path (e.g. a vehicle-level config managed by `rig`): bind-mount
 # that single file into the container so the core/supervisor loads it. In-repo configs (under
 # core-driver/config/sensors/) already live in the mounted config dir, so no overlay is needed.

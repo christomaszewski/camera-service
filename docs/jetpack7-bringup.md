@@ -39,8 +39,8 @@ may be older than 0.8.32, so chunk/PTP needs the core image in L2 — that's fin
 Build the **core** image — it builds Aravis 0.8.34 from source (full extended-chunk support). Builds on any
 24.04 base; the build does **not** need `nvv4l2` (that's runtime-only):
 ```bash
-JP7_BASE=nvcr.io/nvidia/cuda:13.0.0-devel-ubuntu24.04     # adjust if NVIDIA's JP7 base differs (see notes)
-docker build -f core-driver/Dockerfile -t gige-core --build-arg BASE_IMAGE="$JP7_BASE" .
+# A plain 24.04 base is enough -- NVENC goes through the v4l2/CDI path, not CUDA (confirmed on JP7.2).
+docker build -f core-driver/Dockerfile -t gige-core --build-arg BASE_IMAGE=ubuntu:24.04 .
 docker run --rm gige-core gst-inspect-1.0 aravissrc | head -1    # Aravis built OK
 ```
 Point a config at your camera with the **software** recorder (decouples this from the NVENC unknown):
@@ -57,29 +57,35 @@ This is the **highest-value on-hardware test** and the [PTP timestamp experiment
   (which is the authoritative capture time, and the real `system_ns − chunk_ns` arrival jitter);
 - the FFV1 `*.mkv` decodes losslessly. None of this needs NVENC.
 
-## L3 — NVENC HW lossless recorder (THE JP7-specific validation)
-The one thing that genuinely needs verifying on JP7. **Key check — does `nvv4l2` reach the container?**
+## L3 — NVENC HW lossless recorder (CONFIRMED on a JP7.2 Orin AGX)
+JP7 replaced JP6's CSV-mount model with **CDI**. One-time host setup, then the encoder is reachable in any
+24.04 container via a CDI device (validated on JP7.2 — `nvv4l2h265enc`, `nvvidconv`, NvBufSurface,
+`/dev/v4l2-nvenc`, and even `nvunixfd` are all injected, into the standard plugin dir):
 ```bash
-docker run --rm --runtime nvidia gige-core gst-inspect-1.0 nvv4l2h265enc
+sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml      # once (re-run after a JetPack update)
+docker run --rm --device nvidia.com/gpu=all gige-core gst-inspect-1.0 nvv4l2h265enc | head -3   # "V4L2 H.265 Encoder"
 ```
-- **Found** → switch the config to `recording.encoder: auto` (8-bit → `hw-hevc-lossless`, NV24/NVMM) and
-  re-run L2's command. Then prove bit-exact: decode the mkv and check `ffmpeg ... -lavfi psnr` = `inf`
-  (or `framemd5` equality). That closes the NVENC on-hardware TODO.
-- **NOT found** → JP7 plumbs multimedia differently than JP6's CSV mounts. Don't block: stay on
-  `encoder: ffv1` (L2 already validated the whole pipeline). To fix the HW path, check on the device:
-  - is there a JP7 `l4t-base`/`l4t-jetpack` image (r39.x) that ships/mounts the multimedia stack? try it
-    as `BASE_IMAGE`;
-  - did the toolkit move to **CDI** (`nvidia-ctk cdi generate` + `--device nvidia.com/gpu=all`) instead of
-    `--runtime nvidia`?
-  - what `gst-inspect-1.0 nvv4l2h265enc` reports on the **host** vs in the container tells you what mount/
-    package is missing. Report findings and we'll pin the right JP7 base + runtime invocation.
+Then run the HW lossless recorder — set `recording.encoder: auto` (8-bit → `hw-hevc-lossless`, NV24/NVMM)
+and run the core with the CDI device (`--device nvidia.com/gpu=all`, **not** `--runtime nvidia` — the
+nvidia runtime no longer injects multimedia on JP7):
+```bash
+docker run --rm --device nvidia.com/gpu=all --network host --ipc=host \
+  -v "$PWD/core-driver/config:/app/config:ro" -v "$PWD/recordings:/data/recordings" \
+  gige-core supervisor.py -c config/<my-cam>.yaml -v
+```
+Prove bit-exact: decode the mkv and check `ffmpeg … -lavfi psnr` = `inf` (or `framemd5` equality).
+Baked-in gotchas: the core image installs `kmod` (libnvtvmr runs `lsmod` during NVENC init, else it
+aborts with a generic error), and the plugin lands in the standard gstreamer dir so no `GST_PLUGIN_PATH`
+change is needed. (Harmless `(Argus) … nvargus-daemon failed` lines during plugin scan are the unused CSI
+camera plugin — ignore them.)
 
 ## L4 — Full per-sensor stack
-Once the core image is good, the rest is unchanged from the validated container model:
+`gige-up --jp7` adds the CDI-device overlay (`docker-compose.jp7.yml`) so the composed core gets NVENC
+the same way the manual L3 run does. Build the core with a 24.04 base, then:
 ```bash
-GIGE_CORE_BASE="$JP7_BASE" docker build ...      # (gige-up/compose build the core with this base)
-./gige-up config/sensors/<my-cam>.yaml up -d
-./gige-up config/sensors/<my-cam>.yaml ps        # health column should read 'healthy'
+GIGE_CORE_BASE=ubuntu:24.04 docker compose -f docker-compose.yml build core-driver   # build once with the JP7 base
+./gige-up --jp7 config/sensors/<my-cam>.yaml up -d
+./gige-up --jp7 config/sensors/<my-cam>.yaml ps        # health column should read 'healthy'
 ```
 The plugins (ros2-bridge on Lyrical, webrtc-bridge) already run on Ubuntu 24.04, so they're unaffected by
 the host JetPack and now match the core's userspace.
@@ -93,9 +99,12 @@ the host JetPack and now match the core's userspace.
   goal, no longer Thor-gated. Biggest payoff for high-resolution multi-consumer setups.
 Both are follow-ups to evaluate after the core pipeline is validated on JP7; ask and we'll prototype them.
 
-## Notes / unknowns to confirm on the device
-- **Base image:** `cuda:13.0.0-devel-ubuntu24.04` is the working assumption; NVIDIA's exact JP7 base for
-  Jetson multimedia may be an `l4t-*` r39.x image — `BASE_IMAGE` / `GIGE_CORE_BASE` is a one-flag swap.
+## Notes (resolved on a JP7.2 Orin AGX, driver R595.78)
+- **Base image:** a plain `ubuntu:24.04` works — the NVENC path is v4l2/CDI, not CUDA. Use a CUDA base
+  (`nvcr.io/nvidia/cuda:13.x-devel-ubuntu24.04`) only if you add custom CUDA processing. `BASE_IMAGE` /
+  `GIGE_CORE_BASE` is a one-flag swap.
+- **GPU/multimedia injection:** **CDI**, not the JP6 CSV mounts (the old `l4t.csv` is gone). `nvidia-ctk
+  cdi generate` once, then run with `--device nvidia.com/gpu=all` (Docker's native CDI; default `runc`
+  runtime). The generated spec carries the full multimedia stack incl. `nvunixfd`.
 - **sm arch:** Orin stays **sm_87** under JP7 (no rebuild). `sm_110` is a Thor/Blackwell concern only — and
   this repo ships no custom CUDA anyway.
-- **CUDA driver:** JP7.2 needs R595+ for SBSA CUDA on Orin (per NVIDIA) — already on the flashed image.
