@@ -1,12 +1,12 @@
 # gige-vision-service
 
 A generic GigE Vision (GVSP) camera driver built on **GStreamer + Aravis**, targeting
-**NVIDIA Jetson** (AGX Orin today; portable to Jetson Thor / JetPack 7). It captures
+**NVIDIA Jetson** (AGX Orin on JetPack 6 or 7; portable to Jetson Thor). It captures
 from any GigE Vision (GVSP) camera, extracts **hardware PTP timestamps**
 from the GVSP chunk data, records a **lossless, temporally-compressed** video file, and
 fans the stream out to consumer "plugins" (ROS2, WebRTC, MQTT, ...).
 
-> **Design & decisions** → [docs/DESIGN.md](docs/DESIGN.md) · **Status & roadmap** → [docs/ROADMAP.md](docs/ROADMAP.md) · **PTP experiment** → [docs/ptp-timestamp-experiment.md](docs/ptp-timestamp-experiment.md)
+> **Design & decisions** → [docs/DESIGN.md](docs/DESIGN.md) · **Status & roadmap** → [docs/ROADMAP.md](docs/ROADMAP.md) · **PTP experiment** → [docs/ptp-timestamp-experiment.md](docs/ptp-timestamp-experiment.md) · **JetPack 7 (Orin) bring-up** → [docs/jetpack7-bringup.md](docs/jetpack7-bringup.md)
 
 ## Why it's built this way
 
@@ -198,8 +198,9 @@ Docker Compose **profiles**, and brings up that sensor's stack:
   ([plugins/webrtc-bridge](plugins/webrtc-bridge)). Headless `webrtcsink → webrtcsrc` loopback validated in
   containers; browser viewing + the HW encoder path need a Jetson.
 - [ ] **P5** hardening *(in progress)* — **camera reconnect/backoff** ✅ (watchdog + `control-lost`,
-  pipeline stays up, monotonic-PTS guard); disk-full + NVENC budget next — then Thor/JP7 portability
-  (`nvunixfd` zero-copy, sm_110 rebuild)
+  pipeline stays up, monotonic-PTS guard); disk-full + NVENC budget next — then **JetPack 7** (now
+  runnable on the Orin via JP7.2: Ubuntu 24.04 / GStreamer 1.24, unlocking `unixfd` + `nvunixfd` zero-copy)
+  and Thor portability (sm_110 rebuild). See [docs/jetpack7-bringup.md](docs/jetpack7-bringup.md).
 
 ### Testing tools (no Jetson, no camera)
 The data path is validated by actually running it in containers — including the **real Aravis

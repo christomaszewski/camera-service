@@ -8,7 +8,7 @@ file plus ROADMAP.md should get you oriented without re-deriving anything.
 ## Goal & context
 
 A **generic GigE Vision (GVSP) camera driver** on **GStreamer + Aravis**, deployed on **NVIDIA
-Jetson** (AGX Orin now; portable to Thor / JetPack 7). It works with any GVSP-compliant
+Jetson** (AGX Orin on JetPack 6 or 7; also Thor). It works with any GVSP-compliant
 camera. It must: extract **per-frame hardware (PTP) timestamps** so we record true sensor-capture time
 (not arrival time, which carries network + processing latency/jitter); record **losslessly with
 temporal compression**; and **distribute** frames to consumer "plugins" (ROS2, WebRTC, MQTT, …).
@@ -69,7 +69,8 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
   That's an inherent shm limitation (a generic consumer would get arrival-time anyway), so: our
   plugins know the header; for generic tools there's an **optional clean `video/x-raw` shm endpoint**;
   and the real interop surface is the **egress layer** (WebRTC / Zenoh), not raw shm. The clean
-  "standard payload + metadata together" only arrives with **`unixfd`** (GStreamer ≥1.24, so JP7/Thor)
+  "standard payload + metadata together" only arrives with **`unixfd`** (GStreamer ≥1.24 — i.e. JP7, now
+  runnable on the Orin via JP7.2)
   or **Zenoh attachments** — the transport is a swappable sink so that upgrade is localized.
 
 - **Language: Python core + C++ ROS2 bridge.** GStreamer is C; you build/control pipelines from any
@@ -192,17 +193,25 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
   frames). Need **Aravis ≥0.8.23** (prefer ≥0.8.32) for extended-chunk support. `arv_buffer_get_data()` returns image **+ chunks**
   when chunk mode is on — slice to the image size (a real bug the chunk emitter test caught).
 - **Jetson encode:** Orin HW lossless is **8-bit only** (no 10/12-bit HW lossless, no AV1 lossless).
-  Orin Nano has **no NVENC** (software only); AGX Orin / Orin NX have it. **Thor (JP7) keeps NVENC+NVDEC**
-  (the "Blackwell removed NVENC" rumor is about datacenter GPUs) **but removes AV1 hardware encode** →
-  design on HEVC/H.264. JP7 = Ubuntu 24.04 / GStreamer 1.24 / CUDA 13 / sm_110; use `--runtime=nvidia`
-  (not `--gpus=all`).
-- **Containers on Jetson:** `nvv4l2*`/`nvvidconv` are injected from the host BSP via the nvidia
-  runtime's CSV mounts → the base image must match host L4T (`l4t-jetpack:r36.x`), and the container's
-  GStreamer is effectively pinned to 1.20 (so no `unixfd`, which needs 1.24, until JP7). GigE needs
-  **host networking** (broadcast discovery; the `docker0` bridge breaks Aravis discovery) and **no
-  `/dev` passthrough**. PTP daemons run on the host; containers share `CLOCK_REALTIME`.
-- **Zero-copy GPU sharing across containers** is effectively a JP7/Thor capability (`nvunixfd` needs
-  DeepStream 8 / JP7; CUDA IPC is unsupported on Orin). On JP6 it's prototype-grade.
+  Orin Nano has **no NVENC** (software only); AGX Orin / Orin NX have it. Both Orin and **Thor** keep
+  NVENC+NVDEC (the "Blackwell removed NVENC" rumor is about datacenter GPUs); **Thor removes AV1 hardware
+  encode** → design on HEVC/H.264. Use `--runtime=nvidia` (not `--gpus=all`).
+- **JetPack generations (updated 2026-06 — this corrects an earlier "JP7 = Thor only" assumption).**
+  **JP6** = L4T r36.x / Ubuntu 22.04 / GStreamer 1.20 / CUDA 12. **JP7** = Ubuntu 24.04 / GStreamer 1.24 /
+  CUDA 13 — and as of **JP7.2 (~June 2026, L4T r39.x)** it runs on the **AGX Orin / Orin NX**, not just
+  Thor. On Orin the GPU arch stays **sm_87** (Ampere) under JP7, so the **sm_110 rebuild is a Thor
+  (Blackwell) concern**, not an Orin one. JP7 also flips two things from "later" to "available on the Orin
+  today": **`unixfd`** (GStreamer ≥1.24 — carries PTS/meta natively, so the 36-byte header becomes optional
+  for same-host consumers) and **`nvunixfd` zero-copy GPU sharing** across containers (the original
+  zero-copy goal — no longer Thor-gated).
+- **Containers on Jetson:** on **JP6**, `nvv4l2*`/`nvvidconv` are injected from the host BSP via the nvidia
+  runtime's CSV mounts → the base image must match host L4T (`l4t-jetpack:r36.x`) and the container's
+  GStreamer is pinned to 1.20. **JP7** moved to a **cloud-native** model: Orin uses standard **ARM SBSA
+  CUDA images** (`nvcr.io/nvidia/cuda:13.x-devel-ubuntu24.04`) rather than `l4t-jetpack`. The load-bearing
+  unknown for the NVENC recorder on JP7 is **how the multimedia stack (`nvv4l2*`) reaches the container**
+  (CSV vs CDI) — confirm on-device (see [jetpack7-bringup.md](jetpack7-bringup.md)); the software (FFV1)
+  path doesn't depend on it. Either generation: GigE needs **host networking** (the `docker0` bridge
+  breaks Aravis discovery) and **no `/dev` passthrough**; PTP daemons run on the host (shared `CLOCK_REALTIME`).
 
 ## Testing strategy
 

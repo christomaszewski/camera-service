@@ -23,7 +23,9 @@ services:
       context: .
       dockerfile: core-driver/Dockerfile
       args:
-        L4T_TAG: r36.4.0
+        # JP6 default; for JetPack 7 (Orin via JP7.2) set GIGE_CORE_BASE to a 24.04/CUDA-13 base,
+        # e.g. GIGE_CORE_BASE=nvcr.io/nvidia/cuda:13.0.0-devel-ubuntu24.04 (verify on-device).
+        BASE_IMAGE: ${GIGE_CORE_BASE:-nvcr.io/nvidia/l4t-jetpack:r36.4.0}
     init: true                          # tini reaps orphans; the supervisor manages its children
     network_mode: ${GIGE_NETWORK:-host} # GigE Vision broadcast discovery needs host networking
     ipc: host                           # publish /dev/shm so consumers can read the transport

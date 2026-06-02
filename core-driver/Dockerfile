@@ -1,21 +1,21 @@
-# Core GigE Vision driver for Jetson AGX Orin (JetPack 6 / L4T r36.x).
+# Core GigE Vision driver for Jetson AGX Orin. The base image is a build-arg (BASE_IMAGE):
+#   default = JetPack 6 (l4t-jetpack / L4T r36.x / Ubuntu 22.04 / GStreamer 1.20)
+#   JetPack 7 (Orin via JP7.2: Ubuntu 24.04 / GStreamer 1.24 / CUDA 13) -- pass a 24.04 base, e.g.
+#     docker build --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda:13.0.0-devel-ubuntu24.04 ...   (verify on-device)
 #
-# The l4t-jetpack base brings CUDA + the NVIDIA GStreamer stack (nvv4l2h265enc,
-# nvvidconv, ...) which are injected at runtime by the nvidia container runtime.
-# We add Aravis built from source (>= 0.8.32, required for extended-chunk
-# payloads) plus its GStreamer plugin and GObject-introspection bindings.
-#
-# NOTE: build/run on the Jetson (arm64) under `runtime: nvidia`. The Aravis
-# release tarball URL and meson options may need minor adjustment for the exact
-# version; verify `gst-inspect-1.0 aravissrc` and `python3 -c "import gi; gi.require_version('Aravis','0.8')"`.
-ARG L4T_TAG=r36.4.0
-FROM nvcr.io/nvidia/l4t-jetpack:${L4T_TAG}
+# The NVIDIA GStreamer stack (nvv4l2h265enc, nvvidconv, ...) is injected at runtime by the nvidia
+# container runtime. On JP7 confirm it reaches the container (docs/jetpack7-bringup.md); the software
+# FFV1 recorder path does NOT depend on it. We add Aravis from source (>= 0.8.32, for extended-chunk
+# payloads) + its GStreamer plugin + introspection. Build/run on the Jetson (arm64) under `runtime: nvidia`;
+# verify `gst-inspect-1.0 aravissrc` and `python3 -c "import gi; gi.require_version('Aravis','0.8')"`.
+ARG BASE_IMAGE=nvcr.io/nvidia/l4t-jetpack:r36.4.0
+FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 ARG ARAVIS_VERSION=0.8.34
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 python3-gi python3-yaml python3-pip \
+      python3 python3-gi python3-yaml \
       gir1.2-glib-2.0 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
       gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
       gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
@@ -41,8 +41,9 @@ ENV GI_TYPELIB_PATH=/usr/local/lib/aarch64-linux-gnu/girepository-1.0:/usr/lib/a
     GST_PLUGIN_PATH=/usr/local/lib/aarch64-linux-gnu/gstreamer-1.0
 
 WORKDIR /app
-COPY core-driver/requirements.txt /app/requirements.txt
-RUN pip3 install --no-cache-dir -r /app/requirements.txt
+# The only Python dep is PyYAML, provided by apt python3-yaml above -- so no pip step (which would
+# also hit PEP 668 / externally-managed-environment on Ubuntu 24.04 / JP7). gi/GStreamer/Aravis are
+# system bindings, never pip. See requirements.txt for the (documentation-only) dep list.
 COPY core-driver/ /app/
 
 ENV GIGE_CONFIG=/app/config/camera.yaml
