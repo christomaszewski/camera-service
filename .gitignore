@@ -17,3 +17,4 @@ recordings/
 
 # Claude Code local (machine-specific permission grants)
 .claude/settings.local.json
+dist/
