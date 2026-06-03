@@ -7,12 +7,13 @@ Encoder selection (``auto``):
   * >8-bit input -> FFV1 (lossless, high-bit-depth; INTRA-only, no temporal) by
                     default, or x265 --lossless (temporal, CPU-bound) if requested.
 
-!! ON-DEVICE VALIDATION REQUIRED !!
-The Jetson hardware path below is written to the research but NOT yet validated on
-hardware. NVMM caps negotiation is finicky and the lossless profile enum is
-L4T-version-dependent. Before trusting it: run `gst-inspect-1.0 nvv4l2h265enc`
-on the target, confirm `enable-lossless` + NV24, and verify a bit-exact round trip
-(ffmpeg framemd5 / PSNR=inf). See README "Post-processing".
+Validated on a JetPack 7.2 Orin AGX (L4T r39.x, driver R595.78): the
+NV24/NVMM -> nvv4l2h265enc enable-lossless=1 path is BIT-EXACT for 8-bit mono --
+60/60 random-noise frames round-trip with worst |delta| = 0, and the encoded stream is
+1.32x raw (incompressible noise can't shrink, which is the proof it's truly lossless).
+The GRAY8 -> NV24 conversion keeps full range, so there's no [16,235] clamp. Re-verify
+after a JetPack bump (NVMM caps negotiation + the lossless enum are L4T-version-dependent):
+`tools/nvenc_lossless_test.sh` (or .py) with the NVENC CDI device.
 """
 from __future__ import annotations
 

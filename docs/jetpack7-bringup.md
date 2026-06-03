@@ -63,7 +63,9 @@ JP7 replaced JP6's CSV-mount model with **CDI**. One-time host setup, then the e
 `/dev/v4l2-nvenc`, and even `nvunixfd` are all injected, into the standard plugin dir):
 ```bash
 sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml      # once (re-run after a JetPack update)
-docker run --rm --device nvidia.com/gpu=all gige-core gst-inspect-1.0 nvv4l2h265enc | head -3   # "V4L2 H.265 Encoder"
+# NB: the gige-core ENTRYPOINT is python3 (it's a supervisor runner), so non-python tools need
+# --entrypoint to bypass it -- else `gige-core gst-inspect-1.0 ...` runs `python3 gst-inspect-1.0`.
+docker run --rm --device nvidia.com/gpu=all --entrypoint gst-inspect-1.0 gige-core nvv4l2h265enc | head -3   # "V4L2 H.265 Encoder"
 ```
 Then run the HW lossless recorder — set `recording.encoder: auto` (8-bit → `hw-hevc-lossless`, NV24/NVMM)
 and run the core with the CDI device (`--device nvidia.com/gpu=all`, **not** `--runtime nvidia` — the
@@ -73,7 +75,11 @@ docker run --rm --device nvidia.com/gpu=all --network host --ipc=host \
   -v "$PWD/core-driver/config:/app/config:ro" -v "$PWD/recordings:/data/recordings" \
   gige-core supervisor.py -c config/<my-cam>.yaml -v
 ```
-Prove bit-exact: decode the mkv and check `ffmpeg … -lavfi psnr` = `inf` (or `framemd5` equality).
+Prove bit-exact (the part that matters — a "lossless" codec over a range-scaled Y plane is *not*
+lossless): `./core-driver/tools/nvenc_lossless_test.sh` pushes known random GRAY8 frames through the
+exact HW encode fragment, decodes them, and compares byte-for-byte. **Validated on a JP7.2 Orin AGX
+(driver R595.78): `NVENC LOSSLESS PASS` — 60/60 frames bit-exact, worst |Δ| = 0, 1.32× raw** (noise
+is incompressible, so >1× is itself proof nothing was discarded; full [0,255] range survives NV24).
 Baked-in gotchas: the core image installs `kmod` (libnvtvmr runs `lsmod` during NVENC init, else it
 aborts with a generic error), and the plugin lands in the standard gstreamer dir so no `GST_PLUGIN_PATH`
 change is needed. (Harmless `(Argus) … nvargus-daemon failed` lines during plugin scan are the unused CSI
