@@ -10,11 +10,16 @@ ARG ROS_DISTRO=lyrical
 FROM ros:${ROS_DISTRO}-ros-base
 
 ENV DEBIAN_FRONTEND=noninteractive
+# plugins-bad is here only for `shmsrc`. On 24.04 it also ships the GStreamer `onnx` inference element
+# (libgstonnx -> onnxruntime) which we never use; GStreamer's registry scan loads it anyway and its
+# arm64 init misbehaves ("Unknown CPU Vendor" CPUID probe + a prime suspect for the in-process heap
+# corruption). Strip the plugin (and the heavy onnxruntime lib it pulls in) so it's never loaded.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential pkg-config \
       libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
       gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
       ros-${ROS_DISTRO}-image-transport ros-${ROS_DISTRO}-compressed-image-transport \
+    && rm -f /usr/lib/*/gstreamer-1.0/libgstonnx.so /usr/lib/*/libonnxruntime.so* \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /ws
