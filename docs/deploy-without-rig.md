@@ -32,23 +32,32 @@ git clone https://github.com/christomaszewski/gige-vision-service && cd gige-vis
 - Skip the slow webrtc build: `IMAGES="gige-core ros2-bridge" ./tools/build-images.sh registry.lan:5000`
 - Cross-build from x86: `PLATFORM_FLAG=--platform=linux/arm64 ./tools/build-images.sh …` (needs qemu binfmt; slow)
 - JP6 images: `BASE_IMAGE=nvcr.io/nvidia/l4t-jetpack:r36.4.0 ./tools/build-images.sh registry.lan:5000 jp6`
+  — match the `r36.x` tag to the vehicle's L4T (r36.4.0 = JP6.2), and `docker login nvcr.io` first if the base
+  pull is denied. Only `gige-core` differs by platform (it needs the l4t/GStreamer-1.20 base for CSV-injected
+  NVENC); the plugins are platform-agnostic, so you can re-tag instead of rebuilding them:
+  `for p in ros2-bridge webrtc-bridge; do docker tag registry.lan:5000/$p:jp7 registry.lan:5000/$p:jp6 && docker push registry.lan:5000/$p:jp6; done`
 
 ## 2. New vehicle — one-time prep (no source tree)
 ```bash
-# a) trust the registry IF it's HTTP/insecure (skip if it has TLS)
+# trust the registry IF it's HTTP/insecure (skip if it has TLS)
 sudo tee /etc/docker/daemon.json >/dev/null <<'JSON'
 { "insecure-registries": ["registry.lan:5000"] }
 JSON
 sudo systemctl restart docker
 
-# b) host deps gige-up shells out to: docker compose v2 plugin + PyYAML (sensor_env.py runs on the host)
+# host deps gige-up shells out to: docker compose v2 plugin + PyYAML (sensor_env.py runs on the host)
 sudo apt-get update && sudo apt-get install -y docker-compose-plugin python3-yaml
-
-# c) NVENC via CDI (JP7) — once; re-run after a JetPack update
-sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
-
-# d) the launch-surface bundle from step 1 — scp it over and extract (this is the ONLY gige code on the vehicle)
-#    from your workstation:  scp <build-host>:gige-vision-service/dist/gige-vision-launch.tar.gz <vehicle>:~
+```
+**Make NVENC reachable in containers — this is the one step that differs by JetPack** (gige-up applies the
+matching compose wiring automatically once it detects the platform):
+- **JP7 → CDI:** `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` (re-run after a JetPack update).
+- **JP6 → nvidia runtime + CSV, _no_ CDI:** make sure `nvidia-container-toolkit` is installed (ships with
+  JP6) and the nvidia runtime is registered — `docker info | grep -i runtimes` should list `nvidia`; if not,
+  `sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker`. (gige-up detects
+  `jp6` → skips the jp7 overlay → the base compose's `runtime: nvidia` does the CSV injection.)
+```bash
+# the launch-surface bundle from step 1 — scp it over, extract (the ONLY gige code on the vehicle)
+#   from your workstation:  scp <build-host>:gige-vision-service/dist/gige-vision-launch.tar.gz <vehicle>:~
 mkdir -p ~/gige && tar -xzf ~/gige-vision-launch.tar.gz -C ~/gige && cd ~/gige
 ```
 If `docker` needs sudo: `sudo usermod -aG docker $USER && newgrp docker`.
