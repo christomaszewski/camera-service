@@ -5,7 +5,7 @@
 services:
   webrtc-bridge:
     profiles: ["webrtc-bridge"]
-    image: webrtc-bridge
+    image: ${GIGE_WEBRTC_IMAGE:-webrtc-bridge}     # registry tag for pull-based deploys (gige-up sets it from GIGE_REGISTRY)
     build:
       context: ../..
       dockerfile: plugins/webrtc-bridge/Dockerfile

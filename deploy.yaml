@@ -15,6 +15,11 @@ platform:                                # JP6 vs JP7 is a HOST fact; gige-up au
   auto_detect: /etc/nv_tegra_release     #   R36 -> jp6 (l4t + nvidia runtime); R38+ -> jp7 (runc + CDI)
   override_env: GIGE_PLATFORM            #   rig may set this per host to {jp6|jp7} to pin instead of detect
 
+images:                                  # pull-based deploy: gige-up points images at a registry (docs/deploy-without-rig.md)
+  registry_env: GIGE_REGISTRY            #   set -> <registry>/<name>:<platform> for every image; then `pull` + `up`
+  tag_env: GIGE_IMAGE_TAG                #   default tag = detected platform (jp6/jp7); set to pin a release
+  per_image_env: [GIGE_CORE_IMAGE, GIGE_ROS2_IMAGE, GIGE_WEBRTC_IMAGE]   # override a single image
+
 launch_surface:                          # the files rig copies to the vehicle (NOT the source/build context)
   - gige-up
   - tools/sensor_env.py
