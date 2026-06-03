@@ -33,6 +33,12 @@ while :; do case "${1:-}" in
   *) break;;
 esac; done
 CONFIG="${1:?usage: gige-up [--dev|--jp6|--jp7] <sensor-config.yaml> [compose args...]}"; shift || true
+# Accept the config as given (abs / cwd-relative -- e.g. a rig-supplied vehicle path), or fall back to
+# the documented short form resolved against the in-repo config dir (config/sensors/foo.yaml lives
+# under core-driver/, which isn't the repo root) so `gige-up config/sensors/foo.yaml` works anywhere.
+if [ ! -f "$CONFIG" ] && [ -f "$REPO/core-driver/$CONFIG" ]; then
+  CONFIG="$REPO/core-driver/$CONFIG"
+fi
 [ -f "$CONFIG" ] || { echo "gige-up: config not found: $CONFIG" >&2; exit 1; }
 CONFIG_ABS="$(cd "$(dirname "$CONFIG")" && pwd)/$(basename "$CONFIG")"
 # Tolerate a missing sensors dir: a VENDORED launch surface (rig deploy) doesn't ship it, so this
