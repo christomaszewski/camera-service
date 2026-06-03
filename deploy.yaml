@@ -11,12 +11,17 @@ verbs:
   config: "config"
 ros_distro: lyrical
 
+platform:                                # JP6 vs JP7 is a HOST fact; gige-up auto-detects it per host
+  auto_detect: /etc/nv_tegra_release     #   R36 -> jp6 (l4t + nvidia runtime); R38+ -> jp7 (runc + CDI)
+  override_env: GIGE_PLATFORM            #   rig may set this per host to {jp6|jp7} to pin instead of detect
+
 launch_surface:                          # the files rig copies to the vehicle (NOT the source/build context)
   - gige-up
   - tools/sensor_env.py
   - docker-compose.yml
   - docker-compose.dev.yml
   - docker-compose.external-config.yml
+  - docker-compose.jp7.yml                # the JP7 (runc + CDI NVENC) overlay; gige-up applies it per host
   - plugins/ros2-bridge/compose.yml
   - plugins/webrtc-bridge/compose.yml
 

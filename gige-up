@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# gige-up [--dev] <sensor-config.yaml> [docker-compose subcommand + args...]
+# gige-up [--dev|--jp6|--jp7] <sensor-config.yaml> [docker-compose subcommand + args...]
 #
 # Bring up ONE GigE sensor's stack from ONE config (the single source of truth). Reads the
 # config, turns its enabled `isolation: container` plugins into compose profiles, parameterizes
 # the stack (project name, shared shm volume, per-plugin env), and runs `docker compose`.
 # It SELECTS + PARAMETERIZES — it never generates a compose file.
 #
-#   gige-up config/sensors/cam_a.yaml             # prod: l4t core, nvidia runtime, host net (foreground up)
+#   gige-up config/sensors/cam_a.yaml             # prod: auto-detects the JP6/JP7 host, host net (foreground up)
 #   gige-up --dev config/sensors/cam_a.yaml       # dev (no Jetson): gige-dev core, bridge net
-#   gige-up --jp7 config/sensors/cam_a.yaml up -d # JetPack 7 Orin: NVENC via CDI device (docs/jetpack7-bringup.md)
+#   gige-up --jp7 config/sensors/cam_a.yaml up -d # force JetPack 7 (Orin): runc + CDI NVENC device
+#   gige-up --jp6 config/sensors/cam_a.yaml up -d # force JetPack 6: l4t base + nvidia runtime (CSV)
 #   gige-up --dev config/sensors/cam_a.yaml up -d # detached
 #   gige-up --dev config/sensors/cam_a.yaml down  # tear the sensor down
 #   gige-up --dev config/sensors/cam_a.yaml config  # just render the merged compose
@@ -16,17 +17,22 @@
 #
 # Multiple cameras = run it per config; each is its own compose project + shm volume + ports.
 # Another stack reads a sensor's frames by mounting its volume (gige_<name>_sock) + --ipc=host.
+#
+# Platform (JP6/JP7) is auto-detected per host from /etc/nv_tegra_release; override with --jp6/--jp7
+# or GIGE_PLATFORM={jp6,jp7}. It's a HOST fact (same for every sensor on the box), so rig pins it
+# per host (env), never per sensor.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")" && pwd)"
 PYTHON="${GIGE_PYTHON:-python3}"
 
-DEV=0; JP7=0
+DEV=0; PLATFORM="${GIGE_PLATFORM:-auto}"   # auto -> detect JP6/JP7 from the host; jp6|jp7 to pin
 while :; do case "${1:-}" in
   --dev) DEV=1; shift;;
-  --jp7) JP7=1; shift;;       # JetPack 7 (Orin): add the CDI-device overlay so the core gets NVENC
+  --jp7) PLATFORM=jp7; shift;;   # force JetPack 7 (Orin): runc + the CDI NVENC device overlay
+  --jp6) PLATFORM=jp6; shift;;   # force JetPack 6: l4t base + nvidia runtime (CSV mounts)
   *) break;;
 esac; done
-CONFIG="${1:?usage: gige-up [--dev|--jp7] <sensor-config.yaml> [compose args...]}"; shift || true
+CONFIG="${1:?usage: gige-up [--dev|--jp6|--jp7] <sensor-config.yaml> [compose args...]}"; shift || true
 [ -f "$CONFIG" ] || { echo "gige-up: config not found: $CONFIG" >&2; exit 1; }
 CONFIG_ABS="$(cd "$(dirname "$CONFIG")" && pwd)/$(basename "$CONFIG")"
 SENSORS_DIR="$(cd "$REPO/core-driver/config/sensors" && pwd)"
@@ -45,9 +51,22 @@ export GIGE_NETWORK="${GIGE_NETWORK:-host}"
 # shm transport = a stable EXTERNAL volume, so sibling and other-stack containers can attach
 docker volume create "$GIGE_SOCK_VOLUME" >/dev/null
 
+# Resolve auto -> jp6/jp7 from the L4T release line (R36 = JP6; R38+ = JP7). Skipped under --dev
+# (non-Jetson host); a missing release file falls back to jp6 (the conservative l4t/nvidia path).
+if [ "$DEV" = 0 ] && [ "$PLATFORM" = auto ]; then
+  REL=""; [ -r /etc/nv_tegra_release ] && REL="$(sed -n 's/^# R\([0-9][0-9]*\).*/\1/p' /etc/nv_tegra_release)"
+  if [ "${REL:-0}" -ge 38 ] 2>/dev/null; then PLATFORM=jp7; else PLATFORM=jp6; fi
+fi
+
 FILES=(-f "$REPO/docker-compose.yml")
 [ "$DEV" = 1 ] && FILES+=(-f "$REPO/docker-compose.dev.yml")
-[ "$JP7" = 1 ] && FILES+=(-f "$REPO/docker-compose.jp7.yml")
+# One host fact drives both axes. JP7: the runc + CDI-device overlay, and default the build base to
+# 24.04. JP6: the base compose's nvidia runtime + l4t base (its existing defaults). The image TAG
+# stays ${GIGE_CORE_IMAGE:-gige-core}; set GIGE_CORE_IMAGE to a registry tag for pull-based deploys.
+if [ "$DEV" = 0 ] && [ "$PLATFORM" = jp7 ]; then
+  FILES+=(-f "$REPO/docker-compose.jp7.yml")
+  export GIGE_CORE_BASE="${GIGE_CORE_BASE:-ubuntu:24.04}"
+fi
 # Config from an arbitrary host path (e.g. a vehicle-level config managed by `rig`): bind-mount
 # that single file into the container so the core/supervisor loads it. In-repo configs (under
 # core-driver/config/sensors/) already live in the mounted config dir, so no overlay is needed.
@@ -58,5 +77,6 @@ if [ "$(dirname "$CONFIG_ABS")" != "$SENSORS_DIR" ]; then
 fi
 
 ARGS=("$@"); [ ${#ARGS[@]} -eq 0 ] && ARGS=(up)
-echo "gige-up: project=$COMPOSE_PROJECT_NAME profiles=[${COMPOSE_PROFILES:-<none>}] sock=$GIGE_SOCK_VOLUME net=$GIGE_NETWORK config=$GIGE_CONFIG${GIGE_CONFIG_HOST:+ (external: $GIGE_CONFIG_HOST)}" >&2
+PLAT_LABEL="$([ "$DEV" = 1 ] && echo dev || echo "$PLATFORM")"
+echo "gige-up: project=$COMPOSE_PROJECT_NAME platform=$PLAT_LABEL profiles=[${COMPOSE_PROFILES:-<none>}] sock=$GIGE_SOCK_VOLUME net=$GIGE_NETWORK config=$GIGE_CONFIG${GIGE_CONFIG_HOST:+ (external: $GIGE_CONFIG_HOST)}" >&2
 exec docker compose "${FILES[@]}" "${ARGS[@]}"

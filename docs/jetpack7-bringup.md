@@ -86,12 +86,14 @@ change is needed. (Harmless `(Argus) … nvargus-daemon failed` lines during plu
 camera plugin — ignore them.)
 
 ## L4 — Full per-sensor stack
-`gige-up --jp7` adds the CDI-device overlay (`docker-compose.jp7.yml`) so the composed core gets NVENC
-the same way the manual L3 run does. Build the core with a 24.04 base, then:
+On a JP7 host `gige-up` **auto-detects** JetPack 7 (`/etc/nv_tegra_release` shows R39) and applies the
+runc + CDI overlay (`docker-compose.jp7.yml`) plus the 24.04 build base — so plain `gige-up <config> up -d`
+already does the right thing. `--jp7` only *forces* it, and `GIGE_PLATFORM=jp7` pins it (how rig selects
+per host). Build *through* gige-up so the base is set for you, then bring it up:
 ```bash
-GIGE_CORE_BASE=ubuntu:24.04 docker compose -f docker-compose.yml build core-driver   # build once with the JP7 base
-./gige-up --jp7 config/sensors/<my-cam>.yaml up -d
-./gige-up --jp7 config/sensors/<my-cam>.yaml ps        # health column should read 'healthy'
+./gige-up config/sensors/<my-cam>.yaml build core-driver   # JP7 host -> auto GIGE_CORE_BASE=ubuntu:24.04
+./gige-up config/sensors/<my-cam>.yaml up -d
+./gige-up config/sensors/<my-cam>.yaml ps                  # health column should read 'healthy'
 ```
 The plugins (ros2-bridge on Lyrical, webrtc-bridge) already run on Ubuntu 24.04, so they're unaffected by
 the host JetPack and now match the core's userspace.

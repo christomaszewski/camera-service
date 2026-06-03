@@ -18,13 +18,15 @@ include:
 
 services:
   core-driver:
-    image: gige-core
+    # gige-up auto-detects the host (JP6/JP7) and sets GIGE_CORE_BASE to match; GIGE_CORE_IMAGE lets
+    # pull-based deploys point at a per-platform registry tag (e.g. registry/gige-core:jp7).
+    image: ${GIGE_CORE_IMAGE:-gige-core}
     build:
       context: .
       dockerfile: core-driver/Dockerfile
       args:
-        # JP6 default; for JetPack 7 (Orin via JP7.2) set GIGE_CORE_BASE to a 24.04/CUDA-13 base,
-        # e.g. GIGE_CORE_BASE=nvcr.io/nvidia/cuda:13.0.0-devel-ubuntu24.04 (verify on-device).
+        # JP6 default (l4t r36 / 22.04). On a JP7 host gige-up sets this to ubuntu:24.04; use a CUDA
+        # base (nvcr.io/nvidia/cuda:13.x-devel-ubuntu24.04) only if you add custom CUDA processing.
         BASE_IMAGE: ${GIGE_CORE_BASE:-nvcr.io/nvidia/l4t-jetpack:r36.4.0}
     init: true                          # tini reaps orphans; the supervisor manages its children
     network_mode: ${GIGE_NETWORK:-host} # GigE Vision broadcast discovery needs host networking

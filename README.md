@@ -153,11 +153,14 @@ source of truth. **[`gige-up`](gige-up)** reads it, turns the enabled `isolation
 Docker Compose **profiles**, and brings up that sensor's stack:
 
 ```bash
-./gige-up config/sensors/cam_a.yaml          # Jetson: l4t core, nvidia runtime, host networking
+./gige-up config/sensors/cam_a.yaml          # Jetson: auto-detects JP6 (l4t/nvidia) or JP7 (runc/CDI), host net
 ./gige-up --dev config/sensors/cam_a.yaml    # no Jetson (laptop/CI): gige-dev core, no NVIDIA
 ./gige-up config/sensors/cam_a.yaml down     # tear it down
 ```
 
+- **JP6/JP7 is auto-detected per host** (`/etc/nv_tegra_release`): a JetPack 7 Orin gets the runc + CDI
+  NVENC overlay automatically, JetPack 6 the l4t base + nvidia runtime. Override with `--jp6`/`--jp7` or
+  `GIGE_PLATFORM`. It's a host fact, so `rig` pins it per host, never per sensor.
 - **Each heavy plugin is its own compose fragment** (`plugins/<x>/compose.yml`), pulled into
   [docker-compose.yml](docker-compose.yml) via `include:` and run only when its profile is on. Adding a
   plugin to a sensor = flipping `enabled: true` in the config, not editing compose. (Needs Compose ≥ 2.20.)
