@@ -11,15 +11,103 @@ generate a compose file. It emits `KEY=value` lines:
   + per-plugin env       (ros2 topic/frame_id, webrtc geometry/port)
 
 Only plugins with `isolation: container` become compose profiles; `isolation: process` plugins are
-the supervisor's (in-image) and are ignored here. Needs PyYAML (apt: python3-yaml).
+the supervisor's (in-image) and are ignored here.
+
+Uses PyYAML when it's importable; otherwise falls back to a tiny built-in parser that covers the
+(simple, fixed) sensor-config schema, so a vehicle host needs nothing but stock python3.
 """
 import sys
 
 try:
     import yaml
+    _HAVE_YAML = True
 except ImportError:  # pragma: no cover
-    sys.stderr.write("sensor_env: PyYAML required on the host (apt install python3-yaml)\n")
-    sys.exit(2)
+    _HAVE_YAML = False
+
+
+def _scalar(tok):
+    """Resolve a YAML scalar the way safe_load would for the value kinds our configs use."""
+    t = tok.strip()
+    if t == "" or t in ("~", "null", "Null", "NULL"):
+        return None
+    if len(t) >= 2 and t[0] in ("'", '"') and t[-1] == t[0]:
+        return t[1:-1]
+    low = t.lower()
+    if low in ("true", "yes", "on"):
+        return True
+    if low in ("false", "no", "off"):
+        return False
+    try:
+        return int(t)
+    except ValueError:
+        pass
+    try:
+        return float(t)
+    except ValueError:
+        pass
+    return t
+
+
+def _decomment(raw):
+    """Strip a full-line or ` #...` inline comment (our configs never put '#' inside a value)."""
+    if raw.lstrip().startswith("#"):
+        return ""
+    h = raw.find(" #")
+    return (raw[:h] if h != -1 else raw).rstrip()
+
+
+def _load_fallback(text):
+    """Stdlib-only parser for OUR sensor-config subset, used only when PyYAML is absent: top-level
+    `name`, and a `plugins` list of maps with scalar keys + a nested `params` map. Indent-width
+    agnostic; '#' comments; scalar leaves. NOT general YAML — it only needs to feed main()."""
+    cfg = {"name": None, "plugins": []}
+    in_plugins = False
+    cur = None          # current plugin map
+    key_indent = None   # indent of the current plugin's direct keys
+    in_params = False
+    for raw in text.splitlines():
+        line = _decomment(raw)
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip())
+        s = line.strip()
+
+        if indent == 0:                                  # top-level key
+            in_plugins = (s == "plugins:")
+            cur = None; key_indent = None; in_params = False
+            if not in_plugins and ":" in s:
+                k, _, v = s.partition(":")
+                if k.strip() == "name" and v.strip():
+                    cfg["name"] = _scalar(v)
+            continue
+        if not in_plugins:                               # ignore camera/recording/transport bodies
+            continue
+        if s.startswith("- "):                           # new plugin list item
+            cur = {"params": {}}
+            cfg["plugins"].append(cur)
+            key_indent = None; in_params = False
+            rest = s[2:].strip()                         # usually "name: <x>" inline
+            if ":" in rest:
+                k, _, v = rest.partition(":")
+                cur[k.strip()] = _scalar(v)
+            continue
+        if cur is None:
+            continue
+        if key_indent is None:
+            key_indent = indent
+        if indent > key_indent:                          # deeper than plugin keys -> a params entry
+            if in_params:
+                k, _, v = s.partition(":")
+                cur["params"][k.strip()] = _scalar(v)
+            continue
+        in_params = False                                # a direct plugin key
+        k, _, v = s.partition(":")
+        k = k.strip()
+        if k == "params" and v.strip() == "":
+            in_params = True
+        else:
+            cur[k] = _scalar(v)
+    return cfg
 
 
 def main() -> int:
@@ -27,7 +115,8 @@ def main() -> int:
         sys.stderr.write("usage: sensor_env.py <sensor-config.yaml>\n")
         return 2
     with open(sys.argv[1]) as f:
-        cfg = yaml.safe_load(f) or {}
+        text = f.read()
+    cfg = (yaml.safe_load(text) or {}) if _HAVE_YAML else _load_fallback(text)
 
     name = str(cfg.get("name") or "camera")
     plugins = [p for p in (cfg.get("plugins") or [])

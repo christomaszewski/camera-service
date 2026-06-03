@@ -45,8 +45,9 @@ sudo tee /etc/docker/daemon.json >/dev/null <<'JSON'
 JSON
 sudo systemctl restart docker
 
-# host deps gige-up shells out to: docker compose v2 plugin + PyYAML (sensor_env.py runs on the host)
-sudo apt-get update && sudo apt-get install -y docker-compose-plugin python3-yaml
+# host deps: the docker compose v2 plugin. (PyYAML is OPTIONAL — sensor_env.py falls back to a stdlib
+# parser, so stock python3 is enough; add python3-yaml only if you want the full YAML parser.)
+sudo apt-get update && sudo apt-get install -y docker-compose-plugin
 ```
 **Make NVENC reachable in containers — this is the one step that differs by JetPack** (gige-up applies the
 matching compose wiring automatically once it detects the platform):
