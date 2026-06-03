@@ -72,8 +72,9 @@ int bayer_code(const std::string& enc) {
   return 0;
 }
 
-// Option B (params.debayer): a cheap 2x2-cell demosaic -- correct colors, half-res detail. For full
-// quality, leave debayer off (option A: publish the bayer_* encoding and let image_proc demosaic).
+// Option B (params.debayer): a cheap 2x2-cell demosaic -- correct colors, half-res detail. INTERIM:
+// retired by the unixfd transport, where B becomes an in-pipeline `bayer2rgb` (docs/unixfd-migration.md).
+// For full quality TODAY, leave debayer off (option A: publish bayer_* and let image_proc demosaic).
 std::vector<uint8_t> demosaic_rgb8(const uint8_t* m, int w, int h, int code) {
   int rr, rc, br, bc;                          // R and B positions within the 2x2 cell
   switch (code) {
