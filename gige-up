@@ -35,7 +35,10 @@ esac; done
 CONFIG="${1:?usage: gige-up [--dev|--jp6|--jp7] <sensor-config.yaml> [compose args...]}"; shift || true
 [ -f "$CONFIG" ] || { echo "gige-up: config not found: $CONFIG" >&2; exit 1; }
 CONFIG_ABS="$(cd "$(dirname "$CONFIG")" && pwd)/$(basename "$CONFIG")"
-SENSORS_DIR="$(cd "$REPO/core-driver/config/sensors" && pwd)"
+# Tolerate a missing sensors dir: a VENDORED launch surface (rig deploy) doesn't ship it, so this
+# cd would die under `set -e`. Empty SENSORS_DIR => every config is treated as external (correct --
+# rig always supplies the config from outside the repo), so the external-config overlay kicks in.
+SENSORS_DIR="$(cd "$REPO/core-driver/config/sensors" 2>/dev/null && pwd || true)"
 
 if ! docker compose version >/dev/null 2>&1; then
   echo "gige-up: needs the Docker Compose v2 plugin ('docker compose'); 'include' needs >= 2.20" >&2
