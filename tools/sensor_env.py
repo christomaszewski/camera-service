@@ -8,7 +8,7 @@ generate a compose file. It emits `KEY=value` lines:
   COMPOSE_PROFILES       <enabled container plugins, comma-separated>
   GIGE_INSTANCE          <name>                 (ROS namespace, labels)
   GIGE_SOCK_VOLUME       gige_<name>_sock       (stable shm volume name; other stacks attach to it)
-  + per-plugin env       (ros2 topic/frame_id, webrtc geometry/port)
+  + per-plugin env       (ros2 topic/frame_id/encoding/debayer, webrtc geometry/port)
 
 Only plugins with `isolation: container` become compose profiles; `isolation: process` plugins are
 the supervisor's (in-image) and are ignored here.
@@ -23,6 +23,21 @@ try:
     _HAVE_YAML = True
 except ImportError:  # pragma: no cover
     _HAVE_YAML = False
+
+_BAYER = {"RG": "rggb", "GR": "grbg", "GB": "gbrg", "BG": "bggr"}
+
+
+def ros_bayer_encoding(pixel_format: str) -> str:
+    """ROS image encoding for a Bayer pixel format, so the ros2-bridge labels the raw mosaic and a
+    downstream image_proc can debayer it. Returns '' for mono/unknown -> the bridge derives
+    mono8/mono16 from the frame header instead."""
+    pf = pixel_format or ""
+    if not pf.startswith("Bayer") or len(pf) < 7:
+        return ""
+    pat = _BAYER.get(pf[5:7].upper())
+    if not pat:
+        return ""
+    return "bayer_" + pat + ("16" if any(t in pf for t in ("16", "12", "10")) else "8")
 
 
 def _scalar(tok):
@@ -58,12 +73,12 @@ def _decomment(raw):
 
 def _load_fallback(text):
     """Stdlib-only parser for OUR sensor-config subset, used only when PyYAML is absent: top-level
-    `name`, and a `plugins` list of maps with scalar keys + a nested `params` map. Indent-width
-    agnostic; '#' comments; scalar leaves. NOT general YAML — it only needs to feed main()."""
-    cfg = {"name": None, "plugins": []}
-    in_plugins = False
-    cur = None          # current plugin map
-    key_indent = None   # indent of the current plugin's direct keys
+    `name`, the `camera` map (flat scalars), and a `plugins` list of maps with scalar keys + a nested
+    `params` map. Indent-width agnostic; '#' comments; scalar leaves. NOT general YAML."""
+    cfg = {"name": None, "camera": {}, "plugins": []}
+    section = None       # current top-level section name
+    cur = None           # current plugin map
+    key_indent = None    # indent of the current plugin's direct keys
     in_params = False
     for raw in text.splitlines():
         line = _decomment(raw)
@@ -72,21 +87,30 @@ def _load_fallback(text):
         indent = len(line) - len(line.lstrip())
         s = line.strip()
 
-        if indent == 0:                                  # top-level key
-            in_plugins = (s == "plugins:")
+        if indent == 0:                                  # top-level: a `key:` section, or a scalar
             cur = None; key_indent = None; in_params = False
-            if not in_plugins and ":" in s:
+            if s.endswith(":"):
+                section = s[:-1].strip()
+            else:
+                section = None
                 k, _, v = s.partition(":")
                 if k.strip() == "name" and v.strip():
                     cfg["name"] = _scalar(v)
             continue
-        if not in_plugins:                               # ignore camera/recording/transport bodies
+
+        if section == "camera":                          # flat scalar keys (pixel_format, ...)
+            k, _, v = s.partition(":")
+            if v.strip():
+                cfg["camera"][k.strip()] = _scalar(v)
             continue
+        if section != "plugins":                         # ignore recording/transport/etc. bodies
+            continue
+
         if s.startswith("- "):                           # new plugin list item
             cur = {"params": {}}
             cfg["plugins"].append(cur)
             key_indent = None; in_params = False
-            rest = s[2:].strip()                         # usually "name: <x>" inline
+            rest = s[2:].strip()
             if ":" in rest:
                 k, _, v = rest.partition(":")
                 cur[k.strip()] = _scalar(v)
@@ -119,6 +143,7 @@ def main() -> int:
     cfg = (yaml.safe_load(text) or {}) if _HAVE_YAML else _load_fallback(text)
 
     name = str(cfg.get("name") or "camera")
+    cam = cfg.get("camera") or {}
     plugins = [p for p in (cfg.get("plugins") or [])
                if isinstance(p, dict) and p.get("name")
                and p.get("enabled", True)
@@ -136,6 +161,10 @@ def main() -> int:
     if ros is not None:
         env["GIGE_ROS_TOPIC"] = str(ros.get("topic", "image_raw"))
         env["GIGE_FRAME_ID"] = str(ros.get("frame_id", name))
+        # A: label a Bayer stream so image_proc can debayer it ('' = mono, derived from the header).
+        env["GIGE_ROS_ENCODING"] = ros_bayer_encoding(str(cam.get("pixel_format") or ""))
+        # B: optional in-bridge demosaic to rgb8.
+        env["GIGE_DEBAYER"] = "true" if ros.get("debayer", False) else "false"
 
     web = by_name.get("webrtc-bridge")
     if web is not None:

@@ -18,6 +18,12 @@ services:
     volumes:
       - gige_sock:/tmp/gige
     environment:
+      # Bayer color: sensor_env derives these from the camera pixel_format + the plugin's `debayer`
+      # param. GIGE_ROS_ENCODING labels a mosaic stream (e.g. bayer_rggb8) so image_proc can debayer
+      # downstream (option A; '' = mono, derived from the header). GIGE_DEBAYER=true makes the bridge
+      # demosaic to rgb8 in-process (option B). The bridge reads both as parameter defaults.
+      - GIGE_ROS_ENCODING=${GIGE_ROS_ENCODING:-}
+      - GIGE_DEBAYER=${GIGE_DEBAYER:-false}
       # Join the vehicle-wide DDS graph. `rig` exports these before calling gige-up so every
       # stack shares one graph; the defaults are also correct standalone (gige joins whatever
       # domain the host sets). rmw_fastrtps_cpp is the ROS 2 default RMW, in ros-base already.

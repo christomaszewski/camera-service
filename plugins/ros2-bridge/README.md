@@ -17,7 +17,21 @@ the C++ `FrameHeader` mirrors it exactly, guarded by a `static_assert` on the 36
 | `socket_path` | `/tmp/gige/frames` | the core's plugin shm endpoint |
 | `topic` | `image_raw` | output `sensor_msgs/Image` topic |
 | `frame_id` | `camera` | `header.frame_id` (TF frame) |
-| `encoding` | `""` | override ROS encoding; empty = derive from pixfmt (`mono8`/`mono16`). Set e.g. `bayer_rggb8` for a raw-Bayer source. |
+| `encoding` | `""` (`$GIGE_ROS_ENCODING`) | override ROS encoding; empty = derive `mono8`/`mono16` from the frame header. **Auto-set by `gige-up`**: a Bayer `camera.pixel_format` (e.g. `BayerRG8`) yields `bayer_rggb8`. |
+| `debayer` | `false` (`$GIGE_DEBAYER`) | option B: demosaic an 8-bit Bayer mosaic to `rgb8` in-process. Set via the plugin's `params.debayer`. |
+
+## Color (Bayer cameras)
+
+The core ships the raw single-channel mosaic; color is a choice here:
+
+- **Option A (default, recommended):** `gige-up` derives `encoding` from `camera.pixel_format`, so a
+  `BayerRG8` stream is published as **`bayer_rggb8`** — the raw mosaic, correctly labeled. Run a
+  standard `image_proc` debayer node to get `rgb8` **on demand** (lazy; 1-channel on the wire).
+- **Option B (`params.debayer: true`):** the bridge demosaics to **`rgb8`** itself (a cheap 2×2-cell
+  demosaic — correct colors, half-res detail; 3× the bandwidth). Convenient when you don't want an
+  `image_proc` node; use A for full quality. (8-bit only; 16-bit Bayer always takes option A.)
+
+A `mono8`/`mono16` camera is unaffected — `encoding` stays empty and the bridge publishes mono.
 
 ## Compressed images
 

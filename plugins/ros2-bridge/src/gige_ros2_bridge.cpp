@@ -6,10 +6,12 @@
 // 36 bytes, little-endian). Jetson (arm64) and x86 are both little-endian, so a packed
 // struct maps the wire bytes directly; the static_assert guards against drift.
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
@@ -55,6 +57,50 @@ bool pixfmt_info(uint32_t code, PixInfo& out) {
   }
 }
 
+const char* env_or(const char* key, const char* def) {
+  const char* v = std::getenv(key);
+  return (v && *v) ? v : def;
+}
+
+// A ROS bayer_* encoding -> a small CFA code (0 = not bayer). gige-up/sensor_env sets the encoding
+// from the camera pixel format, so we never have to guess the pattern.
+int bayer_code(const std::string& enc) {
+  if (enc.rfind("bayer_rggb", 0) == 0) return 1;
+  if (enc.rfind("bayer_grbg", 0) == 0) return 2;
+  if (enc.rfind("bayer_gbrg", 0) == 0) return 3;
+  if (enc.rfind("bayer_bggr", 0) == 0) return 4;
+  return 0;
+}
+
+// Option B (params.debayer): a cheap 2x2-cell demosaic -- correct colors, half-res detail. For full
+// quality, leave debayer off (option A: publish the bayer_* encoding and let image_proc demosaic).
+std::vector<uint8_t> demosaic_rgb8(const uint8_t* m, int w, int h, int code) {
+  int rr, rc, br, bc;                          // R and B positions within the 2x2 cell
+  switch (code) {
+    case 1: rr = 0; rc = 0; br = 1; bc = 1; break;  // rggb
+    case 2: rr = 0; rc = 1; br = 1; bc = 0; break;  // grbg
+    case 3: rr = 1; rc = 0; br = 0; bc = 1; break;  // gbrg
+    default: rr = 1; rc = 1; br = 0; bc = 0; break; // bggr (code 4)
+  }
+  int g1r = 0, g1c = 1, g2r = 1, g2c = 0;      // the two greens = the cell's other two positions
+  if ((rr == 0 && rc == 1) || (rr == 1 && rc == 0)) { g1r = 0; g1c = 0; g2r = 1; g2c = 1; }
+  auto at = [&](int y, int x) -> int { return m[static_cast<size_t>(y) * w + x]; };
+  std::vector<uint8_t> out(static_cast<size_t>(w) * h * 3, 0);
+  for (int cy = 0; cy + 1 < h; cy += 2) {
+    for (int cx = 0; cx + 1 < w; cx += 2) {
+      uint8_t R = static_cast<uint8_t>(at(cy + rr, cx + rc));
+      uint8_t B = static_cast<uint8_t>(at(cy + br, cx + bc));
+      uint8_t G = static_cast<uint8_t>((at(cy + g1r, cx + g1c) + at(cy + g2r, cx + g2c) + 1) / 2);
+      for (int dy = 0; dy < 2; ++dy)
+        for (int dx = 0; dx < 2; ++dx) {
+          size_t o = (static_cast<size_t>(cy + dy) * w + (cx + dx)) * 3;
+          out[o] = R; out[o + 1] = G; out[o + 2] = B;
+        }
+    }
+  }
+  return out;
+}
+
 }  // namespace
 
 class GigeRos2Bridge : public rclcpp::Node {
@@ -63,7 +109,8 @@ class GigeRos2Bridge : public rclcpp::Node {
     socket_path_ = declare_parameter<std::string>("socket_path", "/tmp/gige/frames");
     topic_ = declare_parameter<std::string>("topic", "image_raw");
     frame_id_ = declare_parameter<std::string>("frame_id", "camera");
-    encoding_ = declare_parameter<std::string>("encoding", "");  // "" = derive from pixfmt
+    encoding_ = declare_parameter<std::string>("encoding", env_or("GIGE_ROS_ENCODING", ""));  // bayer_*; "" = mono from header
+    debayer_ = declare_parameter<bool>("debayer", std::string(env_or("GIGE_DEBAYER", "false")) == "true");
 
     // image_transport gives us the raw topic + a lazy `<topic>/compressed` (JPEG/PNG via
     // compressed_image_transport) that only costs CPU when something subscribes to it.
@@ -140,19 +187,32 @@ class GigeRos2Bridge : public rclcpp::Node {
       return;
     }
 
+    const std::string enc = encoding_.empty() ? pix.encoding : encoding_;  // mono8/16 or bayer_*
+    const int bcode = bayer_code(enc);
+
     sensor_msgs::msg::Image msg;
     msg.header.stamp = rclcpp::Time(static_cast<int64_t>(hdr.timestamp_ns));  // PTP capture time
     msg.header.frame_id = frame_id_;
     msg.height = hdr.height;
     msg.width = hdr.width;
-    msg.encoding = encoding_.empty() ? pix.encoding : encoding_;
-    msg.is_bigendian = pix.big_endian ? 1 : 0;
-    msg.step = static_cast<uint32_t>(hdr.width) * pix.bytes_per_px;
-    msg.data.assign(data + pixel_off, data + pixel_off + expected);
+    if (debayer_ && bcode && pix.bytes_per_px == 1) {
+      // Option B: demosaic the mosaic to color in-process.
+      msg.encoding = "rgb8";
+      msg.is_bigendian = 0;
+      msg.step = static_cast<uint32_t>(hdr.width) * 3;
+      msg.data = demosaic_rgb8(data + pixel_off, hdr.width, hdr.height, bcode);
+    } else {
+      // Option A (and mono): publish the raw plane, labeled mono8/16 or bayer_* for downstream debayer.
+      msg.encoding = enc;
+      msg.is_bigendian = pix.big_endian ? 1 : 0;
+      msg.step = static_cast<uint32_t>(hdr.width) * pix.bytes_per_px;
+      msg.data.assign(data + pixel_off, data + pixel_off + expected);
+    }
     pub_.publish(msg);  // raw on <topic>; compressed_image_transport adds <topic>/compressed on demand
   }
 
   std::string socket_path_, topic_, frame_id_, encoding_;
+  bool debayer_ = false;
   GstElement* pipeline_ = nullptr;
   image_transport::Publisher pub_;
 };
