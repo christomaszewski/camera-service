@@ -112,4 +112,3 @@ exercise it.
   arm64/24.04 image — identical across every JP7 Orin.
 - **Air-gapped vehicle (no registry):** `docker save <reg>/gige-core:jp7 ros2-bridge:jp7 | gzip > imgs.tgz`,
   scp alongside the launch bundle, `gunzip -c imgs.tgz | docker load`, set the per-image vars, skip `pull`.
-```
