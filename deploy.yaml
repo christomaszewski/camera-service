@@ -10,3 +10,15 @@ verbs:
   logs: "logs"
   config: "config"
 ros_distro: lyrical
+
+launch_surface:                          # the files rig copies to the vehicle (NOT the source/build context)
+  - gige-up
+  - tools/sensor_env.py
+  - docker-compose.yml
+  - docker-compose.dev.yml
+  - docker-compose.external-config.yml
+  - plugins/ros2-bridge/compose.yml
+  - plugins/webrtc-bridge/compose.yml
+
+external_volumes:                        # rig removes these only on FINAL teardown (`rig down --purge`),
+  - "gige_{name}_sock"                   #   never on a restart; {name} is the instance name
