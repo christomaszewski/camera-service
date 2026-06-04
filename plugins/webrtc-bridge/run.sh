@@ -1,17 +1,65 @@
 #!/usr/bin/env bash
-# WebRTC producer: read the core's RAW shm endpoint and serve frames to remote viewers
-# via webrtcsink (which encodes + does congestion control + multi-viewer fan-out itself).
-# Also runs the gst-plugins-rs signalling server in-container, so viewers/consumers
-# connect to <this-host>:${SIGNALLING_PORT}.
+# WebRTC producer: read the core's frames and serve them to remote viewers via webrtcsink (which
+# encodes + does congestion control + multi-viewer fan-out itself). Also runs the gst-plugins-rs
+# signalling server in-container, so viewers/consumers connect to <this-host>:${SIGNALLING_PORT}.
 #
-# Env (all optional): GIGE_SHM_SOCKET, GIGE_WIDTH/HEIGHT/FORMAT/FPS (must match the core's
-# raw endpoint caps), SIGNALLING_PORT, VIDEO_CAPS (e.g. "video/x-h264" to pin the codec),
-# RUN_SIGNALLING (1=start the bundled signalling server, default 1).
+# Transport mirrors the ros2 bridge (must match the core), selected by GIGE_PLATFORM:
+#   JP7 -> unixfdsrc on the core's plugin_endpoint (/tmp/gige/unixfd). Self-describing caps:
+#          geometry + the Bayer format come from the stream, so no config geometry is needed. Shares
+#          the one socket with the ros2 bridge -- unixfdsink broadcasts to every connected client.
+#   JP6 -> shmsrc on the raw endpoint (/tmp/gige/raw). Raw shm carries no caps, so geometry comes
+#          from the sensor config (GIGE_WIDTH/HEIGHT/FORMAT/FPS) and, for a CFA camera, the Bayer
+#          pattern (GIGE_BAYER) is applied as video/x-bayer caps. Needs transport.raw_endpoint.enabled.
+#
+# Color: a Bayer camera (GIGE_BAYER set) is debayered to color in-pipeline (bayer2rgb), so the browser
+# preview is RGB rather than a grayscale mosaic. Set GIGE_WEBRTC_DEBAYER=false to preview the raw
+# mosaic instead. Mono cameras are a straight passthrough (the appsink/encoder read the format off caps).
+#
+# Env (all optional): GIGE_PLATFORM ({jp6|jp7}), GIGE_TRANSPORT ({unixfd|shm} override),
+# GIGE_TRANSPORT_SOCKET (unixfd), GIGE_SHM_SOCKET (raw shm), GIGE_BAYER, GIGE_WEBRTC_DEBAYER,
+# GIGE_WIDTH/HEIGHT/FORMAT/FPS (JP6 raw shm only), SIGNALLING_PORT, VIDEO_CAPS (e.g. "video/x-h264"
+# to pin the codec), RUN_SIGNALLING (1=start the bundled signalling server, default 1).
 set -eu
-SOCK="${GIGE_SHM_SOCKET:-/tmp/gige/raw}"
+
+PLATFORM="${GIGE_PLATFORM:-jp6}"
+TRANSPORT="${GIGE_TRANSPORT:-}"
+if [ -z "$TRANSPORT" ]; then
+  [ "$PLATFORM" = jp7 ] && TRANSPORT=unixfd || TRANSPORT=shm
+fi
+
 W="${GIGE_WIDTH:-512}"; H="${GIGE_HEIGHT:-512}"; FMT="${GIGE_FORMAT:-GRAY8}"; FPS="${GIGE_FPS:-25}"
 PORT="${SIGNALLING_PORT:-8443}"
 VCAPS="${VIDEO_CAPS:-}"
+BAYER="${GIGE_BAYER:-}"
+
+# Debayer to color for a CFA camera (GIGE_BAYER set) unless explicitly disabled. bayer2rgb reads the
+# pattern from the input caps (unixfd carries it; the JP6 capsfilter below sets it).
+DEBAYER_EL=""
+case "${GIGE_WEBRTC_DEBAYER:-auto}" in
+  0|false|no|off) : ;;
+  *) [ -n "$BAYER" ] && DEBAYER_EL="bayer2rgb ! " ;;
+esac
+
+# Source chain (+ socket path) per transport.
+if [ "$TRANSPORT" = unixfd ]; then
+  SOCK="${GIGE_TRANSPORT_SOCKET:-/tmp/gige/unixfd}"
+  # Self-describing: caps (incl. video/x-bayer,<pattern> for CFA) come from the stream.
+  SRC="unixfdsrc socket-path=${SOCK}"
+else
+  SOCK="${GIGE_SHM_SOCKET:-/tmp/gige/raw}"
+  if [ -n "$DEBAYER_EL" ]; then
+    CAPS="video/x-bayer,format=${BAYER},width=${W},height=${H},framerate=${FPS}/1"
+  else
+    CAPS="video/x-raw,format=${FMT},width=${W},height=${H},framerate=${FPS}/1"
+  fi
+  # Raw shm carries no PTS -> do-timestamp on arrival (webrtcsink needs valid buffer timestamps to
+  # payload RTP / run congestion control).
+  SRC="shmsrc socket-path=${SOCK} is-live=true do-timestamp=true ! ${CAPS}"
+fi
+
+# The core publishes the socket asynchronously; depends_on doesn't wait for readiness. Give it a
+# chance so we don't fail-and-restart on a cold start (both shm + unixfd create a socket file).
+for _ in $(seq 1 60); do [ -S "$SOCK" ] && break; sleep 1; done
 
 if [ "${RUN_SIGNALLING:-1}" = "1" ]; then
   gst-webrtc-signalling-server --host 0.0.0.0 --port "$PORT" &
@@ -21,13 +69,10 @@ fi
 SINK="webrtcsink signaller::uri=ws://127.0.0.1:${PORT}"
 [ -n "$VCAPS" ] && SINK="$SINK video-caps=${VCAPS}"
 
-echo "webrtc-bridge: ${SOCK} (${FMT} ${W}x${H}@${FPS}) -> webrtcsink (signalling :${PORT})"
-# Force I420 after videoconvert: webrtcsink's encoders want a YUV format, not GRAY8
-# (a mono camera's native format), so converting up front lets encoder discovery succeed.
-# do-timestamp=true is essential: shm carries no PTS, and webrtcsink needs valid buffer
-# timestamps to payload RTP / run congestion control. Stamp them on arrival (live source).
+echo "webrtc-bridge: ${TRANSPORT} ${SOCK}${BAYER:+ bayer=${BAYER}}${DEBAYER_EL:+ (debayer->color)} -> webrtcsink (signalling :${PORT})"
+# Force I420 after videoconvert: webrtcsink's encoders want a YUV format, not GRAY8/RGBx. The leaky
+# queue drops frames if the encoder/network falls behind (live preview: the newest frame wins).
 exec gst-launch-1.0 -e \
-  shmsrc socket-path="$SOCK" is-live=true do-timestamp=true ! \
-  "video/x-raw,format=${FMT},width=${W},height=${H},framerate=${FPS}/1" ! \
-  queue leaky=downstream max-size-buffers=4 ! videoconvert ! video/x-raw,format=I420 ! \
+  ${SRC} ! \
+  queue leaky=downstream max-size-buffers=4 ! ${DEBAYER_EL}videoconvert ! video/x-raw,format=I420 ! \
   ${SINK}

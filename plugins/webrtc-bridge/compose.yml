@@ -1,7 +1,7 @@
 # webrtc-bridge — heavy plugin, runs as its own container (gst-plugins-rs webrtcsink, built
 # from source). Pulled into the per-sensor stack via the top-level `include:`, activated only
-# when the `webrtc-bridge` profile is enabled. Geometry/port come from the sensor config
-# (shm carries no caps; with host networking each sensor needs a distinct signalling port).
+# when the `webrtc-bridge` profile is enabled. Transport mirrors the ros2 bridge (unixfd on JP7,
+# raw shm on JP6); port comes from the sensor config (host networking -> a distinct port per sensor).
 services:
   webrtc-bridge:
     profiles: ["webrtc-bridge"]
@@ -11,11 +11,25 @@ services:
       dockerfile: plugins/webrtc-bridge/Dockerfile
     init: true
     network_mode: ${GIGE_NETWORK:-host}     # host = expose signalling + WebRTC media to viewers
-    ipc: host                               # share /dev/shm with the core (raw endpoint)
+    ipc: host                               # share /dev/shm with the core (JP6 raw endpoint; harmless for unixfd)
     volumes:
       - gige_sock:/tmp/gige
     environment:
-      - GIGE_SHM_SOCKET=/tmp/gige/raw
+      # Transport selection (mirrors the ros2 bridge; must match the core): unixfd on JP7 (rides the
+      # core's plugin_endpoint /tmp/gige/unixfd -- shared with the ros2 bridge, unixfdsink broadcasts),
+      # raw shm on JP6 (/tmp/gige/raw, needs transport.raw_endpoint.enabled). gige-up exports
+      # GIGE_PLATFORM; GIGE_TRANSPORT ({unixfd|shm}) overrides.
+      - GIGE_PLATFORM=${GIGE_PLATFORM:-jp6}
+      - GIGE_TRANSPORT=${GIGE_TRANSPORT:-}
+      - GIGE_TRANSPORT_SOCKET=${GIGE_TRANSPORT_SOCKET:-/tmp/gige/unixfd}
+      - GIGE_SHM_SOCKET=${GIGE_SHM_SOCKET:-/tmp/gige/raw}
+      # Bayer color: sensor_env derives the pattern from the camera pixel_format. Non-empty -> webrtc
+      # debayers the CFA preview to color (bayer2rgb); '' = mono. GIGE_WEBRTC_DEBAYER=false forces the
+      # raw mosaic. On JP7 the unixfd caps carry the pattern; on JP6 raw-shm run.sh applies it.
+      - GIGE_BAYER=${GIGE_BAYER:-}
+      - GIGE_WEBRTC_DEBAYER=${GIGE_WEBRTC_DEBAYER:-auto}
+      # JP6 raw shm carries no caps -> geometry from the sensor config (must match the camera frame).
+      # Ignored on JP7 (unixfd caps are self-describing).
       - GIGE_WIDTH=${GIGE_WIDTH:-512}
       - GIGE_HEIGHT=${GIGE_HEIGHT:-512}
       - GIGE_FORMAT=${GIGE_FORMAT:-GRAY8}

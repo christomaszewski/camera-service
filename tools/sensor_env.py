@@ -27,16 +27,24 @@ except ImportError:  # pragma: no cover
 _BAYER = {"RG": "rggb", "GR": "grbg", "GB": "gbrg", "BG": "bggr"}
 
 
+def bayer_pattern(pixel_format: str) -> str:
+    """The 4-letter GStreamer Bayer pattern (rggb/grbg/gbrg/bggr) for a Bayer pixel_format, else ''
+    (mono/unknown). The webrtc-bridge uses it to debayer a CFA preview to color (video/x-bayer !
+    bayer2rgb): on JP7/unixfd the stream caps already carry it, on JP6/raw-shm run.sh applies it."""
+    pf = pixel_format or ""
+    if not pf.startswith("Bayer") or len(pf) < 7:
+        return ""
+    return _BAYER.get(pf[5:7].upper(), "")
+
+
 def ros_bayer_encoding(pixel_format: str) -> str:
     """ROS image encoding for a Bayer pixel format, so the ros2-bridge labels the raw mosaic and a
     downstream image_proc can debayer it. Returns '' for mono/unknown -> the bridge derives
     mono8/mono16 from the frame header instead."""
-    pf = pixel_format or ""
-    if not pf.startswith("Bayer") or len(pf) < 7:
-        return ""
-    pat = _BAYER.get(pf[5:7].upper())
+    pat = bayer_pattern(pixel_format)
     if not pat:
         return ""
+    pf = pixel_format or ""
     return "bayer_" + pat + ("16" if any(t in pf for t in ("16", "12", "10")) else "8")
 
 
@@ -173,6 +181,10 @@ def main() -> int:
         env["GIGE_FORMAT"] = str(web.get("format", "GRAY8"))
         env["GIGE_FPS"] = str(web.get("fps", 25))
         env["GIGE_SIGNALLING_PORT"] = str(web.get("port", 8443))
+        # Bayer pattern from the camera pixel_format -> webrtc debayers the CFA preview to color
+        # (bayer2rgb). '' = mono/raw passthrough. JP7/unixfd caps already carry it; JP6/raw-shm
+        # run.sh applies it as video/x-bayer caps.
+        env["GIGE_BAYER"] = bayer_pattern(str(cam.get("pixel_format") or ""))
 
     for k, v in env.items():
         print(f"{k}={v}")

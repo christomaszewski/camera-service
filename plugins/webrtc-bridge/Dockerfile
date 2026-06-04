@@ -33,10 +33,13 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 # Runtime GStreamer + the libnice ICE elements; the codec/crypto runtime libs (x264/vpx/opus/srtp/ssl)
 # arrive as plugin dependencies. gstreamer1.0-nice = the ICE elements webrtcbin needs (separate from
-# the libnice C lib). onnx element stripped as elsewhere.
+# the libnice C lib). onnx element stripped as elsewhere. ca-certificates: webrtcsink's signaller
+# builds an OpenSSL TLS connector at startup (to support wss://) -- without a CA store that build
+# fails with "Signalling error: ... OpenSSL error" even on a plain ws:// URI.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
       gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice \
+      ca-certificates \
       python3 python3-gi gir1.2-glib-2.0 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
     && rm -f /usr/lib/*/gstreamer-1.0/libgstonnx.so /usr/lib/*/libonnxruntime.so* \
     && rm -rf /var/lib/apt/lists/*
