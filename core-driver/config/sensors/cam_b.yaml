@@ -13,6 +13,13 @@ camera:
 
 recording:
   enabled: false
+  # Lossless recorder knobs (shown for reference; only used when enabled: true):
+  #   encoder: auto              # auto -> HW HEVC lossless (8-bit) / ffv1 (>8-bit); or x265-lossless
+  #   segment_seconds: 60        # one .mkv per minute
+  # Bayer + temporal-compression tuning (a BayerRG8 camera + a temporal codec, i.e. NOT ffv1):
+  #   bayer_tile: true           # deinterleave the CFA into 4 quadrant sub-planes before encode
+  #   keyframe_interval_s: 10    # temporal window (I-frame spacing). bigger = smaller files, coarser seek
+  #   bframes: 0                 # B-frames (0 = P-only). HW lossless B-frame support is firmware-dependent
 
 transport:
   plugin_endpoint:

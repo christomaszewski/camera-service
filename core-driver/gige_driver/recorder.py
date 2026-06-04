@@ -36,35 +36,57 @@ def select_encoder(encoder: str, bits_per_pixel: int) -> str:
 
 
 def _splitmux(location_base: str, seconds: int, muxer: str = "matroskamux") -> str:
-    # splitmuxsink preserves continuous PTS across segments (good for alignment).
+    # splitmuxsink preserves continuous PTS across segments (good for alignment). send-keyframe-requests
+    # makes it ask the encoder for a keyframe at each split, so every .mkv starts on a keyframe and is
+    # independently decodable even with a long GOP.
     max_ns = max(1, int(seconds)) * Gst.SECOND
-    return (f'splitmuxsink name=rec_sink muxer={muxer} '
+    return (f'splitmuxsink name=rec_sink muxer={muxer} send-keyframe-requests=true '
             f'location="{location_base}-%05d.mkv" max-size-time={max_ns}')
 
 
-def build_recorder_description(cfg, bits_per_pixel: int, location_base: str) -> str:
-    """Return a gst-launch fragment beginning with a sink pad (linkable from `tee.`)."""
+def _gop_frames(cfg, fps: float) -> int:
+    """Keyframe interval in frames from the configured seconds-window (0 -> 0 = encoder default)."""
+    if cfg.keyframe_interval_s and cfg.keyframe_interval_s > 0:
+        return max(1, int(round(cfg.keyframe_interval_s * (fps if fps and fps > 0 else 30.0))))
+    return 0
+
+
+def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps: float = 0.0) -> str:
+    """Return a gst-launch fragment beginning with a sink pad (linkable from `tee.` or an appsrc)."""
     enc = select_encoder(cfg.encoder, bits_per_pixel)
     sink = _splitmux(location_base, cfg.segment_seconds)
-    log.info("recorder: encoder=%s (bits=%d) -> %s-*.mkv", enc, bits_per_pixel, location_base)
+    gop = _gop_frames(cfg, fps)
+    bframes = max(0, int(getattr(cfg, "bframes", 0)))
+    log.info("recorder: encoder=%s (bits=%d) gop=%s bframes=%d -> %s-*.mkv",
+             enc, bits_per_pixel, gop or "default", bframes, location_base)
 
     if enc == "hw-hevc-lossless":
-        # GRAY8 / Bayer8 mosaic -> Y plane of NV24 -> NVMM -> NVENC lossless (temporal).
+        # GRAY8 / Bayer8 mosaic -> Y plane of NV24 -> NVMM -> NVENC lossless (temporal). iframeinterval =
+        # the GOP/keyframe window; num-B-Frames only when asked (HW lossless B-frame support varies --
+        # verify on-device). Property names/lossless interplay are L4T-version-dependent.
+        temporal = (f" iframeinterval={gop}" if gop else "") + (f" num-B-Frames={bframes}" if bframes else "")
         return (
             "queue max-size-buffers=12 name=rec_q ! "
             "videoconvert ! video/x-raw,format=NV24 ! "
             "nvvidconv ! video/x-raw(memory:NVMM),format=NV24 ! "
-            "nvv4l2h265enc enable-lossless=1 maxperf-enable=1 ! h265parse ! " + sink
+            f"nvv4l2h265enc enable-lossless=1 maxperf-enable=1{temporal} ! h265parse ! " + sink
         )
 
     if enc == "x265-lossless":
         # CPU lossless + temporal; keeps high bit depth. Throughput-limited at 4K.
+        opts = "lossless=1"
+        if gop:
+            opts += f":keyint={gop}:min-keyint={gop}"
+        opts += f":bframes={bframes}"
         return (
             "queue max-size-buffers=12 name=rec_q ! videoconvert ! "
-            'x265enc option-string="lossless=1" speed-preset=ultrafast ! h265parse ! ' + sink
+            f'x265enc option-string="{opts}" speed-preset=ultrafast ! h265parse ! ' + sink
         )
 
-    # ffv1 (default for >8-bit): truly lossless, high-bit-depth, but INTRA-only.
+    # ffv1 (default for >8-bit): truly lossless, high-bit-depth, but INTRA-only -> the temporal knobs
+    # (keyframe_interval_s / bframes) don't apply.
+    if gop or bframes:
+        log.info("recorder: ffv1 is intra-only; ignoring keyframe_interval_s/bframes")
     return (
         "queue max-size-buffers=12 name=rec_q ! videoconvert ! "
         "avenc_ffv1 coder=1 context=1 ! " + sink

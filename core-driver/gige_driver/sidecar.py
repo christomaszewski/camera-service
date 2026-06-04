@@ -43,6 +43,9 @@ class SidecarHeader:
     width: int
     height: int
     tick_frequency_hz: int            # GevTimestampTickFrequency (1e9 under PTP)
+    # When True, recorded frames are CFA-tiled (4 quadrant sub-planes, phase = row%2,col%2), NOT the
+    # mosaic -- playback must untile (gige_driver.bayer_tile.untile_cfa) before demosaicing.
+    cfa_tiled: bool = False
     pts_convention: str = "pts_ns = timestamp_ns - base_timestamp_ns"
     absolute_time: str = "absolute_ns = pts_ns + base_timestamp_ns (epoch per timestamp_source)"
 

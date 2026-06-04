@@ -37,7 +37,7 @@ FROM ${BASE_IMAGE}
 ENV DEBIAN_FRONTEND=noninteractive
 # kmod: libnvtvmr runs `lsmod` during NVENC init, else nvv4l2h26{4,5}enc aborts. Runtime libs only.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 python3-gi python3-yaml kmod \
+      python3 python3-gi python3-yaml python3-numpy kmod \
       gir1.2-glib-2.0 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
       gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
       gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \

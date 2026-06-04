@@ -91,6 +91,9 @@ class CapturePipeline:
         self._unixfd_path = None
         self._fd_alloc = None              # GstAllocators.FdAllocator -> memfd buffers for unixfd
         self._GstAllocators = None
+        self.rec_src: Optional[Gst.Element] = None   # private recorder appsrc when CFA-tiling is on
+        self._tile_rec = False             # deinterleave the Bayer mosaic into quadrants for the recorder
+        self._tiler = None                 # bayer_tile.tile_cfa (imported lazily, only when tiling)
 
     # ---- build -------------------------------------------------------------
     @staticmethod
@@ -127,9 +130,16 @@ class CapturePipeline:
             "tee name=t",
         ]
         branches = []
+        rec_desc = None
         if self.cfg.recording.enabled:
             loc = f"{self.cfg.recording.output_dir.rstrip('/')}/{self.cfg.recording.name_prefix}"
-            branches.append("t. ! " + rec.build_recorder_description(self.cfg.recording, self._bits, loc))
+            rec_desc = rec.build_recorder_description(self.cfg.recording, self._bits, loc, fps)
+            # CFA-tile only an 8-bit Bayer mosaic, and only the recorder feed (the tee keeps the mosaic for
+            # transport/preview/raw). The tiled frame is still WxH GRAY8 -> the recorder branch is unchanged;
+            # it just gets a private appsrc (built below) instead of hanging off the tee.
+            self._tile_rec = bool(self.cfg.recording.bayer_tile and self._bayer and self._bits <= 8)
+            if not self._tile_rec:
+                branches.append("t. ! " + rec_desc)
 
         raw = self.cfg.transport.raw_endpoint
         if raw.enabled:
@@ -147,6 +157,17 @@ class CapturePipeline:
             branches.append("t. ! queue leaky=downstream max-size-buffers=4 ! fakesink sync=false")
 
         chains = [" ! ".join(main) + " " + " ".join(branches)]
+
+        # CFA tiling: the recorder gets a private appsrc fed deinterleaved (quadrant-tiled) frames so its
+        # lossless encoder sees smooth same-colour planes instead of the CFA checkerboard -- better spatial
+        # AND temporal compression. numpy is imported lazily (only when tiling is actually enabled).
+        if self._tile_rec:
+            from . import bayer_tile
+            self._tiler = bayer_tile.tile_cfa
+            chains.append(
+                f'appsrc name=recsrc is-live=true do-timestamp=false format=time caps="{caps}" '
+                f'! {rec_desc}')
+            log.info("recorder: CFA-tiling 8-bit Bayer (%s) into 4 quadrants before encode", self._bayer)
 
         # Plugin transport endpoint: prefer unixfd (native caps + GstBuffer metadata) where the element
         # exists (JP7 / GStreamer 1.24), else the shm+header endpoint. unixfd REPLACES the header endpoint
@@ -199,6 +220,7 @@ class CapturePipeline:
         self.appsrc = self.pipeline.get_by_name("camsrc")
         self.transport_src = self.pipeline.get_by_name("transport_src")
         self.unixfd_src = self.pipeline.get_by_name("unixfd_src")
+        self.rec_src = self.pipeline.get_by_name("recsrc")
         if self.appsrc is None:
             raise RuntimeError("appsrc 'camsrc' not found after parse_launch")
         return desc
@@ -256,6 +278,15 @@ class CapturePipeline:
             if ret != Gst.FlowReturn.OK:
                 log.warning("appsrc push-buffer -> %s", ret)
 
+            # Recorder gets a CFA-tiled copy (quadrant sub-planes) for better lossless compression; the
+            # tee above keeps feeding the mosaic to transport/preview/raw. Same PTS/frame_id.
+            if self.rec_src is not None:
+                rbuf = Gst.Buffer.new_wrapped(self._tiler(frame_bytes, self._width, self._height))
+                rbuf.pts = pts
+                rbuf.dts = Gst.CLOCK_TIME_NONE
+                rbuf.offset = stamp.frame_id
+                self.rec_src.emit("push-buffer", rbuf)
+
             # plugin transport endpoint, rate-limited. JP7 (unixfd): native caps + buffer fields, but
             # unixfdsink needs FD-backed memory -> copy the frame into a fresh memfd (~shm cost; the win
             # is a header-free, self-describing stream). Carry frame_id in .offset and the absolute PTP
@@ -309,6 +340,7 @@ class CapturePipeline:
             width=int(width),
             height=int(height),
             tick_frequency_hz=self.camera.tick_frequency_hz,
+            cfa_tiled=self._tile_rec,
         ))
 
     # ---- shutdown ----------------------------------------------------------
@@ -321,7 +353,7 @@ class CapturePipeline:
         self._stop_event.set()   # wake the reconnect backoff, if one is in progress
         log.info("stop requested: stopping acquisition + sending EOS to finalize recording")
         self.camera.stop()
-        for src in (self.appsrc, self.transport_src):
+        for src in (self.appsrc, self.transport_src, self.rec_src):
             if src is not None:
                 src.emit("end-of-stream")
         GLib.timeout_add_seconds(5, self._force_quit)

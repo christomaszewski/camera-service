@@ -56,6 +56,18 @@ class RecordingConfig:
     name_prefix: str = "gige"
     segment_seconds: int = 60
     bayer_pattern: Optional[str] = None
+    # Pre-encode CFA tiling: deinterleave an 8-bit Bayer mosaic into 4 quadrant sub-planes so the
+    # lossless codec's spatial + temporal prediction stops fighting the CFA checkerboard. Recorder-only
+    # (transport/preview/raw still see the mosaic); playback must untile (flagged in the sidecar).
+    bayer_tile: bool = False
+    # Temporal-compression window: the I-frame ("keyframe") interval in SECONDS -> the longest span the
+    # encoder can predict across. Bigger = smaller files but coarser seek + less corruption resilience.
+    # 0 = leave the encoder default. For archival lossless, set this to your segment length (or a few
+    # seconds for a seek/size balance). Ignored by ffv1 (intra-only). Maps to iframeinterval / x265 keyint.
+    keyframe_interval_s: float = 0.0
+    # B-frames between reference frames (0 = P-only / lowest latency; more = better compression). HW
+    # lossless B-frame support is encoder/firmware-dependent -- verify on-device. Ignored by ffv1.
+    bframes: int = 0
 
 
 @dataclass
