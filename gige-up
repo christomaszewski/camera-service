@@ -89,6 +89,9 @@ fi
 # Registry deploy (no per-vehicle build): GIGE_REGISTRY points every image at <registry>/<name>:<tag>,
 # tag following the detected platform (matches tools/build-images.sh) so one var pulls the whole stack.
 # Per-image vars still override individually. Then `gige-up <cfg> pull` + `up -d` runs the pulled images.
+# rig injects RIG_IMAGE_REGISTRY fleet-wide; honor it here so gige's PLATFORM-TAGGED refs (gige-core:jp7)
+# come out right -- the raw ${RIG_IMAGE_REGISTRY}/gige-core prefix in the composes would resolve :latest.
+GIGE_REGISTRY="${GIGE_REGISTRY:-${RIG_IMAGE_REGISTRY:-}}"
 if [ "$DEV" = 0 ] && [ -n "${GIGE_REGISTRY:-}" ]; then
   IMG_TAG="${GIGE_IMAGE_TAG:-$PLATFORM}"
   export GIGE_CORE_IMAGE="${GIGE_CORE_IMAGE:-$GIGE_REGISTRY/gige-core:$IMG_TAG}"

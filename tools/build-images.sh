@@ -3,9 +3,11 @@
 # instead of building per-vehicle. Jetsons are arm64, so run this on an arm64 host (an Orin is
 # perfect) for a native build, or cross-build from x86 with PLATFORM_FLAG (slow; needs qemu binfmt).
 #
-#   tools/build-images.sh <registry[:port]> [tag]
-#     registry   your local registry, e.g. registry.lan:5000
-#     tag        default: jp7   (gige-up pulls <registry>/<img>:<platform>, i.e. jp7 on a JP7 box)
+#   tools/build-images.sh [registry[:port]] [tag]
+#     registry   your local registry, e.g. registry.lan:5000. Falls back to $RIG_IMAGE_REGISTRY (the
+#                fleet registry rig injects), so rig's build phase sets ONE var for build + deploy.
+#     tag        default: jp7   (gige-up pulls <registry>/<img>:<platform>, i.e. jp7 on a JP7 box). rig
+#                builds per target platform: call once per tag in `build.platforms` (deploy.yaml).
 #
 #   env knobs:
 #     IMAGES="gige-core ros2-bridge webrtc-bridge"   subset to build (default: all three)
@@ -23,7 +25,9 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 
-REGISTRY="${1:?usage: build-images.sh <registry[:port]> [tag]   (e.g. registry.lan:5000 jp7)}"
+# Registry from $1, else rig's RIG_IMAGE_REGISTRY (one var for build + deploy). PUSH=0 skips the push.
+REGISTRY="${1:-${RIG_IMAGE_REGISTRY:-}}"
+: "${REGISTRY:?usage: build-images.sh [registry[:port]] [tag], or set RIG_IMAGE_REGISTRY  (e.g. registry.lan:5000 jp7)}"
 TAG="${2:-jp7}"
 IMAGES="${IMAGES:-gige-core ros2-bridge webrtc-bridge}"
 # gige-core base defaults from the tag: jp6 -> the slim l4t-base, else ubuntu:24.04 (JP7). Override BASE_IMAGE.
