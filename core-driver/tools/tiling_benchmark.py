@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 import gi
@@ -124,23 +125,25 @@ def hevc_stats(path):
     return st["k"][0], st["k"][1], st["d"][0], st["d"][1]
 
 
-def encode(mode_raw, w, h, fps, enc_name, gop_s, bframes, base):
-    """Encode mode_raw with the recorder's real fragment; return output bytes (or None on failure)."""
+def encode(mode_raw, w, h, fps, enc_name, gop_s, bframes, preset, maxperf, base):
+    """Encode mode_raw with the recorder's real fragment; return (bytes, wall_seconds) or None on failure."""
     rec_enc = ENCODERS[enc_name][0]
-    cfg = SimpleNamespace(encoder=rec_enc, segment_seconds=100000,
-                          keyframe_interval_s=gop_s, bframes=bframes)
+    cfg = SimpleNamespace(encoder=rec_enc, segment_seconds=100000, keyframe_interval_s=gop_s,
+                          bframes=bframes, nvenc_preset=preset, nvenc_maxperf=maxperf)
     frag = recorder.build_recorder_description(cfg, 8, base, fps)
     desc = (f'filesrc location="{mode_raw}" ! rawvideoparse width={w} height={h} format=gray8 '
             f'framerate={max(1, int(round(fps)))}/1 ! {frag}')
     # argv list, NOT shell=True: the NVMM caps contain "(memory:NVMM)" and a shell would choke on the
     # parens. gst-launch rejoins argv and does its own parsing (incl. stripping the prop="..." quotes).
+    t0 = time.monotonic()
     r = subprocess.run(["gst-launch-1.0", "-e", *desc.split()],
                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    secs = time.monotonic() - t0
     out = base + "-00000.mkv"
     if r.returncode != 0 or not os.path.exists(out):
         sys.stderr.write(f"  ! encode failed ({enc_name}): {r.stderr.decode()[-200:]}\n")
         return None
-    return os.path.getsize(out)
+    return os.path.getsize(out), secs
 
 
 def _fps_from_csv(csv_path, default=25.0):
@@ -162,6 +165,10 @@ def main():
     ap.add_argument("--modes", default="mosaic,plain,green_diff,rct")
     ap.add_argument("--gop-seconds", type=float, default=4.0)
     ap.add_argument("--bframes", type=int, default=0)
+    ap.add_argument("--preset", default="",
+                    help="nvenc preset(s) to sweep, comma-separated: ultrafast,fast,medium,slow (or 1-4). "
+                         "'' = encoder default. Only applies to the nvenc encoder.")
+    ap.add_argument("--maxperf", type=int, default=1, help="nvenc maxperf-enable (0|1)")
     ap.add_argument("--fps", type=float, default=0.0)
     ap.add_argument("--width", type=int, default=0)
     ap.add_argument("--height", type=int, default=0)
@@ -189,15 +196,16 @@ def main():
     modes = [m for m in a.modes.split(",")]
     os.makedirs(a.work, exist_ok=True)
 
+    presets = a.preset.split(",") if a.preset else [""]
     print(f"benchmark: {a.recording}\n  {w}x{h} {pattern}  {fps:.2f} fps  frames={a.frames}  "
-          f"gop={a.gop_seconds}s bframes={a.bframes}")
+          f"gop={a.gop_seconds}s bframes={a.bframes} maxperf={a.maxperf}  nvenc-presets={presets}")
     if skipped:
         print(f"  (skipped encoders not in this image: {','.join(skipped)} -- run on the Orin for nvenc)")
     mosaic_src = os.path.join(a.work, "_source.raw")          # decoded mosaic (distinct from the 'mosaic' mode)
     n = decode_mosaic(a.recording, a.frames, w, h, mosaic_src)
     print(f"  decoded {n} mosaic frames ({w*h/1e6:.1f} MB/frame raw)\n")
 
-    base_bytes = {}   # encoder -> mosaic total bytes (for ratios)
+    base_bytes = {}   # (encoder, preset) -> mosaic total bytes (for ratios)
     rows = []
     for mode in modes:
         if mode == "mosaic":
@@ -206,32 +214,35 @@ def main():
             mode_raw = os.path.join(a.work, f"{mode}.raw")
             make_mode_raw(mosaic_src, mode, w, h, pattern, mode_raw)
         for enc in encs:
-            outbase = os.path.join(a.work, f"{mode}_{enc}")
-            size = encode(mode_raw, w, h, fps, enc, a.gop_seconds, a.bframes, outbase)
-            if size is None:
-                continue
-            if mode == "mosaic":
-                base_bytes[enc] = size
-            stats = hevc_stats(outbase + "-00000.mkv") if enc != "ffv1" else None
-            rows.append((mode, enc, size, stats))
+            for preset in (presets if enc == "nvenc" else [""]):   # preset only matters for nvenc
+                outbase = os.path.join(a.work, f"{mode}_{enc}_{preset or 'def'}")
+                res = encode(mode_raw, w, h, fps, enc, a.gop_seconds, a.bframes, preset, a.maxperf, outbase)
+                if res is None:
+                    continue
+                size, secs = res
+                if mode == "mosaic":
+                    base_bytes[(enc, preset)] = size
+                stats = hevc_stats(outbase + "-00000.mkv") if enc != "ffv1" else None
+                rows.append((mode, enc, preset, size, secs, stats))
         if mode != "mosaic":
             os.remove(mode_raw)
 
     # report
-    print(f"{'mode':<11}{'encoder':<7}{'MB':>9}{'KB/frame':>10}{'vs mosaic':>11}   {'P/B vs I size':>14}")
-    print("-" * 70)
-    for mode, enc, size, stats in rows:
-        ratio = (size / base_bytes[enc]) if base_bytes.get(enc) else 1.0
+    print(f"{'mode':<11}{'enc':<6}{'preset':<9}{'MB':>8}{'KB/fr':>8}{'vs mos':>8}{'enc-fps':>9}{'P/B vs I':>11}")
+    print("-" * 78)
+    for mode, enc, preset, size, secs, stats in rows:
+        bb = base_bytes.get((enc, preset))
+        ratio = (size / bb * 100) if bb else 100.0
+        encfps = (n / secs) if secs > 0 else 0.0
         temporal = ""
         if stats:
             kc, kb, dc, db = stats
-            if dc and kc:
-                temporal = f"{100 * (db / dc) / (kb / kc):.0f}% ({dc}P/B,{kc}I)"
-            elif kc:
-                temporal = f"all-I ({kc})"
-        print(f"{mode:<11}{enc:<7}{size/1e6:>9.1f}{size/n/1024:>10.1f}{ratio*100:>10.0f}%   {temporal:>14}")
-    print("\nvs mosaic <100% = smaller. 'P/B vs I size' << 100% means temporal prediction is working on")
-    print("that layout; ~100% means inter isn't helping (the mosaic's CFA-phase problem, or sensor noise).")
+            temporal = (f"{100 * (db / dc) / (kb / kc):.0f}%" if (dc and kc) else
+                        (f"all-I({kc})" if kc else ""))
+        print(f"{mode:<11}{enc:<6}{(preset or 'default'):<9}{size/1e6:>8.1f}{size/n/1024:>8.1f}"
+              f"{ratio:>7.0f}%{encfps:>9.1f}{temporal:>11}")
+    print(f"\nvs mos <100% = smaller. enc-fps = encode throughput (must be >= camera {fps:.0f} fps to record")
+    print("real-time at that preset). P/B vs I << 100% = temporal prediction working; ~100% = inter not helping.")
     os.remove(mosaic_src)
 
 

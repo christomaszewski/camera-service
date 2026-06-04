@@ -70,8 +70,15 @@ class RecordingConfig:
     # seconds for a seek/size balance). Ignored by ffv1 (intra-only). Maps to iframeinterval / x265 keyint.
     keyframe_interval_s: float = 0.0
     # B-frames between reference frames (0 = P-only / lowest latency; more = better compression). HW
-    # lossless B-frame support is encoder/firmware-dependent -- verify on-device. Ignored by ffv1.
+    # lossless B-frame support is encoder/firmware-dependent (on the Orin nvv4l2enc it's Xavier-only =
+    # a no-op). Ignored by ffv1.
     bframes: int = 0
+    # NVENC (hw-hevc-lossless) tuning. preset-level controls how hard the HW encoder searches for a
+    # compact LOSSLESS representation: bigger = smaller files but slower encode -- watch real-time, a
+    # 5MP@fps recorder must keep up or it drops frames. "" leaves the encoder default (UltraFast = the
+    # FASTEST + LARGEST). Accepts ultrafast(1)|fast(2)|medium(3)|slow(4) or the number.
+    nvenc_preset: str = ""
+    nvenc_maxperf: bool = True   # maxperf-enable (deprecated; high GPU clocks for throughput)
 
 
 @dataclass

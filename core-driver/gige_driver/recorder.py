@@ -25,6 +25,19 @@ log = logging.getLogger(__name__)
 
 VALID_ENCODERS = ("auto", "hw-hevc-lossless", "ffv1", "x265-lossless")
 
+# nvv4l2h265enc preset-level enum (HW search depth: bigger = smaller lossless file, slower encode).
+_PRESET_LEVEL = {"disable": 0, "ultrafast": 1, "fast": 2, "medium": 3, "slow": 4}
+
+
+def _preset_level(value):
+    """Map an nvenc preset name/number to its preset-level int, or None to leave the encoder default."""
+    s = str(value or "").strip().lower()
+    if s in _PRESET_LEVEL:
+        return _PRESET_LEVEL[s]
+    if s.isdigit() and 0 <= int(s) <= 4:
+        return int(s)
+    return None
+
 
 def select_encoder(encoder: str, bits_per_pixel: int) -> str:
     if encoder not in VALID_ENCODERS:
@@ -57,19 +70,29 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
     sink = _splitmux(location_base, cfg.segment_seconds)
     gop = _gop_frames(cfg, fps)
     bframes = max(0, int(getattr(cfg, "bframes", 0)))
-    log.info("recorder: encoder=%s (bits=%d) gop=%s bframes=%d -> %s-*.mkv",
-             enc, bits_per_pixel, gop or "default", bframes, location_base)
+    preset = _preset_level(getattr(cfg, "nvenc_preset", "")) if enc == "hw-hevc-lossless" else None
+    log.info("recorder: encoder=%s (bits=%d) gop=%s bframes=%d preset=%s -> %s-*.mkv",
+             enc, bits_per_pixel, gop or "default", bframes,
+             "default" if preset is None else preset, location_base)
 
     if enc == "hw-hevc-lossless":
-        # GRAY8 / Bayer8 mosaic -> Y plane of NV24 -> NVMM -> NVENC lossless (temporal). iframeinterval =
-        # the GOP/keyframe window; num-B-Frames only when asked (HW lossless B-frame support varies --
-        # verify on-device). Property names/lossless interplay are L4T-version-dependent.
-        temporal = (f" iframeinterval={gop}" if gop else "") + (f" num-B-Frames={bframes}" if bframes else "")
+        # GRAY8 / Bayer8 mosaic -> Y plane of NV24 -> NVMM -> NVENC lossless. iframeinterval = the
+        # GOP/keyframe window; preset-level = HW search depth (bigger = smaller file, slower -- the lever
+        # for archival size, but must sustain the frame rate); num-B-Frames only when asked (Xavier-only
+        # on Tegra). Property names/lossless interplay are L4T-version-dependent.
+        opts = f" maxperf-enable={1 if getattr(cfg, 'nvenc_maxperf', True) else 0}"
+        level = _preset_level(getattr(cfg, "nvenc_preset", ""))
+        if level is not None:
+            opts += f" preset-level={level}"
+        if gop:
+            opts += f" iframeinterval={gop}"
+        if bframes:
+            opts += f" num-B-Frames={bframes}"
         return (
             "queue max-size-buffers=12 name=rec_q ! "
             "videoconvert ! video/x-raw,format=NV24 ! "
             "nvvidconv ! video/x-raw(memory:NVMM),format=NV24 ! "
-            f"nvv4l2h265enc enable-lossless=1 maxperf-enable=1{temporal} ! h265parse ! " + sink
+            f"nvv4l2h265enc enable-lossless=1{opts} ! h265parse ! " + sink
         )
 
     if enc == "x265-lossless":
