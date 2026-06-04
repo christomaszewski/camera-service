@@ -93,7 +93,8 @@ class CapturePipeline:
         self._GstAllocators = None
         self.rec_src: Optional[Gst.Element] = None   # private recorder appsrc when CFA-tiling is on
         self._tile_rec = False             # deinterleave the Bayer mosaic into quadrants for the recorder
-        self._tiler = None                 # bayer_tile.tile_cfa (imported lazily, only when tiling)
+        self._tile_mode = "off"            # off | plain | green_diff | rct (recording.bayer_tile)
+        self._tiler = None                 # closure: frame_bytes -> tiled bytes (lazy; needs numpy)
 
     # ---- build -------------------------------------------------------------
     @staticmethod
@@ -137,7 +138,16 @@ class CapturePipeline:
             # CFA-tile only an 8-bit Bayer mosaic, and only the recorder feed (the tee keeps the mosaic for
             # transport/preview/raw). The tiled frame is still WxH GRAY8 -> the recorder branch is unchanged;
             # it just gets a private appsrc (built below) instead of hanging off the tee.
-            self._tile_rec = bool(self.cfg.recording.bayer_tile and self._bayer and self._bits <= 8)
+            if self._bayer and self._bits <= 8:
+                from . import bayer_tile
+                self._tile_mode = bayer_tile.normalize_mode(self.cfg.recording.bayer_tile)
+                if self._tile_mode == "off" and self.cfg.recording.bayer_tile not in (False, None, "", "off"):
+                    log.warning("unknown recording.bayer_tile %r; recording the mosaic untiled",
+                                self.cfg.recording.bayer_tile)
+                if self._tile_mode != "off":
+                    pat, mode = (self._bayer or "rggb"), self._tile_mode
+                    self._tiler = lambda b: bayer_tile.tile_cfa(b, self._width, self._height, mode, pat)
+                    self._tile_rec = True
             if not self._tile_rec:
                 branches.append("t. ! " + rec_desc)
 
@@ -162,12 +172,10 @@ class CapturePipeline:
         # lossless encoder sees smooth same-colour planes instead of the CFA checkerboard -- better spatial
         # AND temporal compression. numpy is imported lazily (only when tiling is actually enabled).
         if self._tile_rec:
-            from . import bayer_tile
-            self._tiler = bayer_tile.tile_cfa
             chains.append(
                 f'appsrc name=recsrc is-live=true do-timestamp=false format=time caps="{caps}" '
                 f'! {rec_desc}')
-            log.info("recorder: CFA-tiling 8-bit Bayer (%s) into 4 quadrants before encode", self._bayer)
+            log.info("recorder: CFA-tiling 8-bit Bayer (%s) mode=%s before encode", self._bayer, self._tile_mode)
 
         # Plugin transport endpoint: prefer unixfd (native caps + GstBuffer metadata) where the element
         # exists (JP7 / GStreamer 1.24), else the shm+header endpoint. unixfd REPLACES the header endpoint
@@ -281,7 +289,7 @@ class CapturePipeline:
             # Recorder gets a CFA-tiled copy (quadrant sub-planes) for better lossless compression; the
             # tee above keeps feeding the mosaic to transport/preview/raw. Same PTS/frame_id.
             if self.rec_src is not None:
-                rbuf = Gst.Buffer.new_wrapped(self._tiler(frame_bytes, self._width, self._height))
+                rbuf = Gst.Buffer.new_wrapped(self._tiler(frame_bytes))
                 rbuf.pts = pts
                 rbuf.dts = Gst.CLOCK_TIME_NONE
                 rbuf.offset = stamp.frame_id
@@ -340,7 +348,7 @@ class CapturePipeline:
             width=int(width),
             height=int(height),
             tick_frequency_hz=self.camera.tick_frequency_hz,
-            cfa_tiled=self._tile_rec,
+            cfa_tile_mode=self._tile_mode,
         ))
 
     # ---- shutdown ----------------------------------------------------------

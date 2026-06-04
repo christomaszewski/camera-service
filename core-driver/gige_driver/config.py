@@ -56,10 +56,14 @@ class RecordingConfig:
     name_prefix: str = "gige"
     segment_seconds: int = 60
     bayer_pattern: Optional[str] = None
-    # Pre-encode CFA tiling: deinterleave an 8-bit Bayer mosaic into 4 quadrant sub-planes so the
-    # lossless codec's spatial + temporal prediction stops fighting the CFA checkerboard. Recorder-only
-    # (transport/preview/raw still see the mosaic); playback must untile (flagged in the sidecar).
-    bayer_tile: bool = False
+    # Pre-encode CFA tiling: deinterleave an 8-bit Bayer mosaic into 4 quadrant sub-planes so the lossless
+    # codec's spatial + temporal prediction stops fighting the CFA checkerboard. Recorder-only
+    # (transport/preview/raw still see the mosaic); playback must untile (mode is flagged in the sidecar).
+    #   off | plain (== true) | green_diff | rct
+    # plain = quadrant tiling (the big win); green_diff = + (Gb-Gr) residual (safe, near-free); rct = +
+    # a reversible R-G/B-G/Gb-Gr colour transform (higher ceiling, but the 8-bit wrap taxes a predictive
+    # HW codec -- measure it). See gige_driver.bayer_tile. A plain `true`/`false` still works.
+    bayer_tile: str = "off"
     # Temporal-compression window: the I-frame ("keyframe") interval in SECONDS -> the longest span the
     # encoder can predict across. Bigger = smaller files but coarser seek + less corruption resilience.
     # 0 = leave the encoder default. For archival lossless, set this to your segment length (or a few
