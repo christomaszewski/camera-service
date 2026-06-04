@@ -25,9 +25,10 @@ services:
       context: .
       dockerfile: core-driver/Dockerfile
       args:
-        # JP6 default (l4t r36 / 22.04). On a JP7 host gige-up sets this to ubuntu:24.04; use a CUDA
-        # base (nvcr.io/nvidia/cuda:13.x-devel-ubuntu24.04) only if you add custom CUDA processing.
-        BASE_IMAGE: ${GIGE_CORE_BASE:-nvcr.io/nvidia/l4t-jetpack:r36.4.0}
+        # JP6 default = the slim l4t-base (NOT l4t-jetpack -- we use no CUDA SDK, so the full ~14 GB
+        # JetPack base is pure waste). On a JP7 host gige-up sets this to ubuntu:24.04. NVENC is
+        # injected at runtime (CSV on JP6, CDI on JP7), so no CUDA base is ever needed.
+        BASE_IMAGE: ${GIGE_CORE_BASE:-nvcr.io/nvidia/l4t-base:r36.2.0}
     init: true                          # tini reaps orphans; the supervisor manages its children
     network_mode: ${GIGE_NETWORK:-host} # GigE Vision broadcast discovery needs host networking
     ipc: host                           # publish /dev/shm so consumers can read the transport

@@ -31,10 +31,11 @@ git clone https://github.com/christomaszewski/gige-vision-service && cd gige-vis
 ```
 - Skip the slow webrtc build: `IMAGES="gige-core ros2-bridge" ./tools/build-images.sh registry.lan:5000`
 - Cross-build from x86: `PLATFORM_FLAG=--platform=linux/arm64 ./tools/build-images.sh …` (needs qemu binfmt; slow)
-- JP6 images: `BASE_IMAGE=nvcr.io/nvidia/l4t-jetpack:r36.4.0 ./tools/build-images.sh registry.lan:5000 jp6`
-  — match the `r36.x` tag to the vehicle's L4T (r36.4.0 = JP6.2), and `docker login nvcr.io` first if the base
-  pull is denied. Only `gige-core` differs by platform (it needs the l4t/GStreamer-1.20 base for CSV-injected
-  NVENC); the plugins are platform-agnostic, so you can re-tag instead of rebuilding them:
+- JP6 images: `./tools/build-images.sh registry.lan:5000 jp6` — the `jp6` tag auto-selects the **slim
+  `l4t-base:r36.2.0`** (not the ~14 GB `l4t-jetpack`; we use no CUDA SDK). Match the `r36.x` to the vehicle's
+  L4T (r36.4.0 = JP6.2) via `BASE_IMAGE=…` if needed, and `docker login nvcr.io` first if the base pull is
+  denied. Only `gige-core` differs by platform (l4t/GStreamer-1.20 base for CSV-injected NVENC); the plugins
+  are platform-agnostic, so you can re-tag instead of rebuilding them:
   `for p in ros2-bridge webrtc-bridge; do docker tag registry.lan:5000/$p:jp7 registry.lan:5000/$p:jp6 && docker push registry.lan:5000/$p:jp6; done`
 
 ## 2. New vehicle — one-time prep (no source tree)

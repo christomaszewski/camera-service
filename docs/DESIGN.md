@@ -205,12 +205,12 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
   for same-host consumers) and **`nvunixfd` zero-copy GPU sharing** across containers (the original
   zero-copy goal — no longer Thor-gated).
 - **Containers on Jetson:** on **JP6**, `nvv4l2*`/`nvvidconv` are injected from the host BSP via the nvidia
-  runtime's CSV mounts → the base image must match host L4T (`l4t-jetpack:r36.x`) and the container's
-  GStreamer is pinned to 1.20. **JP7** moved to a **cloud-native** model: Orin uses standard **ARM SBSA
-  CUDA images** (`nvcr.io/nvidia/cuda:13.x-devel-ubuntu24.04`) rather than `l4t-jetpack`. The load-bearing
-  unknown for the NVENC recorder on JP7 is **how the multimedia stack (`nvv4l2*`) reaches the container**
-  (CSV vs CDI) — confirm on-device (see [jetpack7-bringup.md](jetpack7-bringup.md)); the software (FFV1)
-  path doesn't depend on it. Either generation: GigE needs **host networking** (the `docker0` bridge
+  runtime's CSV mounts → the base must be an L4T r36 base (the slim **`l4t-base:r36.x`** — we use no CUDA
+  SDK, so `l4t-jetpack`'s ~14 GB is pure waste) and the container's GStreamer is pinned to 1.20. **JP7**
+  moved to a **cloud-native** model: a plain **`ubuntu:24.04`** base with the multimedia stack injected via
+  **CDI** (`nvidia-ctk cdi generate` + `--device nvidia.com/gpu=all`) — confirmed on a JP7.2 Orin; no CUDA
+  base needed (NVENC is v4l2). See [jetpack7-bringup.md](jetpack7-bringup.md); the software (FFV1) path
+  needs neither. Either generation: GigE needs **host networking** (the `docker0` bridge
   breaks Aravis discovery) and **no `/dev` passthrough**; PTP daemons run on the host (shared `CLOCK_REALTIME`).
 
 ## Testing strategy

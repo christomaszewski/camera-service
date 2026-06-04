@@ -9,16 +9,16 @@
 #
 #   env knobs:
 #     IMAGES="gige-core ros2-bridge webrtc-bridge"   subset to build (default: all three)
-#     BASE_IMAGE=ubuntu:24.04        gige-core base for JP7 (JP6: nvcr.io/nvidia/l4t-jetpack:r36.4.0, tag jp6)
+#     BASE_IMAGE=...                 gige-core base; defaults from the tag (jp6 -> l4t-base, else ubuntu:24.04)
 #     ROS_DISTRO=lyrical             ros2-bridge ROS 2 distro
 #     PUSH=1                         set 0 to build+tag locally without pushing
 #     PLATFORM_FLAG=                 e.g. --platform=linux/arm64 to cross-build from x86
 #
 #   examples:
-#     tools/build-images.sh registry.lan:5000                      # all three -> :jp7, pushed
+#     tools/build-images.sh registry.lan:5000                      # all three -> :jp7 (ubuntu:24.04), pushed
 #     IMAGES="gige-core ros2-bridge" tools/build-images.sh registry.lan:5000
 #     PUSH=0 tools/build-images.sh registry.lan:5000               # local build only
-#     BASE_IMAGE=nvcr.io/nvidia/l4t-jetpack:r36.4.0 tools/build-images.sh registry.lan:5000 jp6
+#     tools/build-images.sh registry.lan:5000 jp6                  # JP6 -> auto slim l4t-base, tag jp6
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
@@ -26,7 +26,11 @@ cd "$REPO"
 REGISTRY="${1:?usage: build-images.sh <registry[:port]> [tag]   (e.g. registry.lan:5000 jp7)}"
 TAG="${2:-jp7}"
 IMAGES="${IMAGES:-gige-core ros2-bridge webrtc-bridge}"
-BASE_IMAGE="${BASE_IMAGE:-ubuntu:24.04}"
+# gige-core base defaults from the tag: jp6 -> the slim l4t-base, else ubuntu:24.04 (JP7). Override BASE_IMAGE.
+case "$TAG" in
+  jp6) BASE_IMAGE="${BASE_IMAGE:-nvcr.io/nvidia/l4t-base:r36.2.0}" ;;
+  *)   BASE_IMAGE="${BASE_IMAGE:-ubuntu:24.04}" ;;
+esac
 ROS_DISTRO="${ROS_DISTRO:-lyrical}"
 PUSH="${PUSH:-1}"
 PLATFORM_FLAG="${PLATFORM_FLAG:-}"
