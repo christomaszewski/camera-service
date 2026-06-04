@@ -1,0 +1,26 @@
+# Core config for the WebRTC COLOR round-trip test (Bayer camera; no Jetson, no camera).
+# Fake BayerRG8 -> BOTH transport endpoints, so webrtc_test.sh can exercise the bridge on either:
+#   plugin_endpoint -> unixfd (/tmp/gige/unixfd) on GStreamer >= 1.24 (the JP7 path)
+#   raw_endpoint    -> raw shm (/tmp/gige/raw)                          (the JP6 path)
+# Both carry the raw mosaic; the bridge debayers to color in-pipeline (bayer2rgb).
+camera:
+  fake: true
+  camera_id: Fake_1
+  pixel_format: BayerRG8
+  frame_rate: 25.0
+  timestamp_source: ptp_chunk     # fake camera has no chunks -> falls back to camera/system (expected)
+  ptp_enable: false
+
+recording:
+  enabled: false
+
+preview:
+  enabled: false
+
+transport:
+  plugin_endpoint:
+    enabled: true
+    socket_path: /tmp/gige/frames   # JP7 / gst >= 1.24 -> unixfd at the sibling /tmp/gige/unixfd
+  raw_endpoint:
+    enabled: true
+    socket_path: /tmp/gige/raw

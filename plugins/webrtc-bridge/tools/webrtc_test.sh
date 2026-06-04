@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# Headless WebRTC round-trip (no Jetson, no camera, no browser):
+# Headless WebRTC round-trip (no Jetson, no camera, no browser). Exercises BOTH transports the
+# bridge supports, end to end:
 #
-#   core (fake cam -> raw shm)  ->  webrtc-bridge (webrtcsink + signalling)  ->  webrtcsrc consumer
+#   1. JP6 raw shm  + mono  (GRAY8 passthrough)        core --raw shm-->  bridge
+#   2. JP7 unixfd   + color (Bayer -> bayer2rgb)       core --unixfd-->   bridge
 #
-# Proves the full egress path: raw shm -> webrtcsink (encode + congestion control) -> WebRTC ->
-# webrtcsrc (decode) -> counted frames. shm is shared cross-container via a named volume
-# (not a host bind mount — Docker Desktop's macOS bind mounts can't host a unix socket) + --ipc=host.
+# Each scenario:  core (fake cam) -> webrtc-bridge (webrtcsink + signalling) -> webrtcsrc consumer
+# (decode + count). shm is shared cross-container via a named volume (not a host bind mount --
+# Docker Desktop's macOS bind mounts can't host a unix socket) + --ipc=host. Proves the whole egress
+# path without a browser. PASS = each scenario decoded >= 30 frames.
+#
+# The unixfd scenario needs a GStreamer >= 1.24 core image (gige-dev on Ubuntu 24.04, or gige-core on
+# JP7). Override the images with CORE_IMG / WEBRTC_IMG (e.g. on an Orin: CORE_IMG=gige-core:bench
+# WEBRTC_IMG=webrtc-bridge:jp7).
 set -euo pipefail
 cd "$(dirname "$0")/../../.."          # repo root
 REPO="$(pwd)"
@@ -27,30 +34,55 @@ echo "== build images (if needed) =="
 docker image inspect "$CORE_IMG"   >/dev/null 2>&1 || docker build -f core-driver/Dockerfile.dev -t "$CORE_IMG" .
 docker image inspect "$WEBRTC_IMG" >/dev/null 2>&1 || docker build -f plugins/webrtc-bridge/Dockerfile -t "$WEBRTC_IMG" .
 
-docker volume create "$VOL" >/dev/null
+# run_scenario <label> <core-config> <bridge -e env...>
+#   Starts the core + bridge for the scenario, runs the headless consumer, prints a verdict, and
+#   returns the consumer's exit code (0 = PASS). --entrypoint bash on the core keeps it agnostic to
+#   the image's own entrypoint (gige-dev vs gige-core).
+run_scenario() {
+  local label="$1" config="$2"; shift 2
+  echo
+  echo "########## SCENARIO: $label ##########"
+  docker rm -f "$CORE" "$BRIDGE" >/dev/null 2>&1 || true
+  docker volume rm "$VOL" >/dev/null 2>&1 || true
+  docker volume create "$VOL" >/dev/null
 
-echo "== start core (fake cam -> raw shm /tmp/gige/raw) =="
-docker run -d --rm --name "$CORE" --ipc=host -v "$VOL:/tmp/gige" -v "$REPO/core-driver:/app" \
-  "$CORE_IMG" bash -c "mkdir -p /data/recordings /tmp/gige && python3 main.py -c config/webrtc-fake.yaml" >/dev/null
+  echo "== start core ($config) =="
+  docker run -d --rm --name "$CORE" --ipc=host --entrypoint bash \
+    -v "$VOL:/tmp/gige" -v "$REPO/core-driver:/app" "$CORE_IMG" \
+    -c "cd /app && mkdir -p /data/recordings /tmp/gige && exec python3 main.py -c $config" >/dev/null
 
-echo "== start webrtc-bridge (signalling :8443 + webrtcsink) =="
-docker run -d --rm --name "$BRIDGE" --ipc=host -v "$VOL:/tmp/gige" \
-  -v "$REPO/plugins/webrtc-bridge:/app" \
-  -e GIGE_SHM_SOCKET=/tmp/gige/raw -e GIGE_WIDTH=512 -e GIGE_HEIGHT=512 -e GIGE_FORMAT=GRAY8 -e GIGE_FPS=25 \
-  "$WEBRTC_IMG" bash run.sh >/dev/null
+  echo "== start webrtc-bridge =="
+  docker run -d --rm --name "$BRIDGE" --ipc=host -v "$VOL:/tmp/gige" \
+    -v "$REPO/plugins/webrtc-bridge:/app" "$@" "$WEBRTC_IMG" bash run.sh >/dev/null
 
-echo "== wait for producer to register (encoder discovery + shm hookup) =="
-sleep 10
+  echo "== wait for producer (encoder discovery + transport hookup) =="
+  sleep 12
+  echo "-- bridge transport line --"
+  docker logs "$BRIDGE" 2>&1 | grep -E "webrtc-bridge:" | head -1 || true
 
-echo "== headless webrtcsrc consumer (inside the bridge netns: loopback signalling + ICE) =="
-set +e
-docker exec "$BRIDGE" python3 /app/tools/webrtc_consumer.py ws://127.0.0.1:8443 30 40
-RC=$?
-set -e
+  echo "== headless webrtcsrc consumer (loopback in the bridge netns; need >= 30 frames / 40s) =="
+  set +e
+  docker exec "$BRIDGE" python3 /app/tools/webrtc_consumer.py ws://127.0.0.1:8443 30 40
+  local rc=$?
+  set -e
+  echo "-- bridge log tail --"
+  docker logs "$BRIDGE" 2>&1 | grep -ivE "set_mempolicy" | tail -8
+  [ "$rc" -eq 0 ] && echo "-- scenario PASS --" || echo "-- scenario FAIL (rc=$rc) --"
+  return "$rc"
+}
 
-echo "== bridge log tail =="
-docker logs "$BRIDGE" 2>&1 | tail -16
+FAILED=0
+run_scenario "JP6 raw shm + mono (GRAY8 passthrough)" \
+  config/webrtc-fake.yaml \
+  -e GIGE_PLATFORM=jp6 -e GIGE_SHM_SOCKET=/tmp/gige/raw \
+  -e GIGE_WIDTH=512 -e GIGE_HEIGHT=512 -e GIGE_FORMAT=GRAY8 -e GIGE_FPS=25 \
+  || FAILED=1
+
+run_scenario "JP7 unixfd + color (Bayer -> bayer2rgb)" \
+  config/webrtc-fake-bayer.yaml \
+  -e GIGE_PLATFORM=jp7 -e GIGE_BAYER=rggb \
+  || FAILED=1
 
 echo
-if [ $RC -eq 0 ]; then echo "WEBRTC TEST: PASS"; else echo "WEBRTC TEST: FAIL (rc=$RC)"; fi
-exit $RC
+if [ "$FAILED" -eq 0 ]; then echo "WEBRTC TEST: PASS (both transports)"; else echo "WEBRTC TEST: FAIL"; fi
+exit "$FAILED"
