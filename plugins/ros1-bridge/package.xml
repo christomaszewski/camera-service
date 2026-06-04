@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>gige_ros1_bridge</name>
+  <version>0.0.1</version>
+  <description>ROS 1 (Noetic) mirror of the gige ros2-bridge: consumes the core's shm + 36-byte header
+    transport and republishes sensor_msgs/Image, stamping header.stamp from the per-frame hardware (PTP)
+    timestamp. JP6-class transport only (ROS 1's GStreamer 1.16 has no unixfd).</description>
+  <maintainer email="maintainer@example.com">gige-vision-service</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  <build_depend>pkg-config</build_depend>
+
+  <depend>roscpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>image_transport</depend>
+  <!-- provides the lazy <topic>/compressed (JPEG/PNG) transport at runtime -->
+  <exec_depend>compressed_image_transport</exec_depend>
+  <!-- optional color: a ROS 1 image_proc/debayer nodelet, run by the launch when debayer is enabled -->
+  <exec_depend>image_proc</exec_depend>
+  <exec_depend>nodelet</exec_depend>
+
+  <!-- GStreamer (gstreamer-1.0, gstreamer-app-1.0) via pkg-config from libgstreamer1.0-dev,
+       libgstreamer-plugins-base1.0-dev. shmsrc/bayer2rgb come from gstreamer1.0-plugins-bad. -->
+</package>
