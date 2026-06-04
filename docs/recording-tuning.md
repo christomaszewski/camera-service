@@ -36,6 +36,15 @@ colour (the wrap tax) even though it wins for an entropy coder (ffv1) — so `rc
 Every `.mkv` segment still starts on a keyframe (`splitmuxsink send-keyframe-requests`), so it's
 independently decodable even with a long GOP.
 
+## NVENC knobs — `recording.nvenc_preset` / `nvenc_maxperf`
+
+`nvenc_preset` (`ultrafast|fast|medium|slow`, or `0-4`) sets the HW encoder's `preset-level`; `nvenc_maxperf`
+toggles `maxperf-enable`. **Measured finding: for *lossless* these are moot** — on the Orin, sweeping
+ultrafast→slow changed neither file size nor encode speed (preset tunes rate-distortion decisions that
+only matter in lossy mode; in lossless the residual is coded exactly). `num-B-Frames` is Xavier-only (a
+no-op on Orin); `maxperf-enable` is deprecated. They're exposed for completeness / future lossy use and
+so you can re-verify per camera with the benchmark's `--preset` sweep.
+
 ## The linchpin: does this encoder actually do temporal prediction? — `tools/probe_temporal.py`
 
 Tiling's *temporal* half and the window knob only matter if the encoder emits delta (P/B) frames that
@@ -60,13 +69,18 @@ total, ratio-vs-mosaic, and (for HEVC) the P/B-vs-I sizes — so you see both th
 tiling unlocks temporal.
 
 ```bash
-# run on the ORIN -- it has nvenc (your real encoder) and is fast enough at full sensor res:
-docker run --rm -v /data/recordings:/in -v /tmp/bench:/work --entrypoint python3 gige-core:jp7 \
-    tools/tiling_benchmark.py /in/<prefix>-00000.mkv --frames 120 --encoders nvenc,x265,ffv1 --work /work
+# run on the ORIN -- it has nvenc (your real encoder) via CDI, and is fast enough at full sensor res:
+docker run --rm --device nvidia.com/gpu=all -v /data/recordings:/in -v /tmp/bench:/work \
+    --entrypoint python3 <gige-core image> \
+    tools/tiling_benchmark.py /in/<prefix>-00000.mkv --frames 120 --encoders nvenc,ffv1 --work /work
+# sweep nvenc presets / match your recording's GOP:
+#   ... --encoders nvenc --modes mosaic,plain --preset ultrafast,medium,slow --gop-seconds 10
 ```
-Geometry/pattern come from the sidecar `.json`; fps from the `.csv`. The CPU legs (x265/ffv1) run
-anywhere, but x265 at 5 MP is slow off-Jetson — the **nvenc** leg is the one that represents your
-recorder, so run the benchmark on the box.
+Geometry/pattern come from the sidecar `.json`; fps from the `.csv`. It reports bytes/frame, ratio vs
+mosaic, **`enc-fps`** (encode throughput — must be ≥ camera fps to record real-time), and **`P/B vs I`**
+(temporal). The CPU legs (x265/ffv1) run anywhere, but x265 at 5 MP is impractically slow off-Jetson —
+the **nvenc** leg is the one that represents your recorder, so run the benchmark on the box. The image
+needs numpy (the published `gige-core` may predate it: `gige-core:bench` = base `+ apt install python3-numpy`).
 
 ## Recommended path
 1. `probe_temporal` an existing recording → know if temporal is real on your encoder.

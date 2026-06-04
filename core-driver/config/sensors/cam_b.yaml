@@ -20,7 +20,8 @@ recording:
   #   bayer_tile: plain          # off | plain | green_diff | rct  (deinterleave CFA before encode)
   #                              #   plain=the big win; green_diff=+safe green residual; rct=+colour transform (measure on HW)
   #   keyframe_interval_s: 10    # temporal window (I-frame spacing). bigger = smaller files, coarser seek
-  #   bframes: 0                 # B-frames (0 = P-only). HW lossless B-frame support is firmware-dependent
+  #   bframes: 0                 # B-frames (0 = P-only); Xavier-only on Tegra = a no-op on Orin
+  #   nvenc_preset: ""           # ultrafast|fast|medium|slow -- MEASURED MOOT for lossless (tunes lossy RD only)
 
 transport:
   plugin_endpoint:
