@@ -132,7 +132,9 @@ def encode(mode_raw, w, h, fps, enc_name, gop_s, bframes, base):
     frag = recorder.build_recorder_description(cfg, 8, base, fps)
     desc = (f'filesrc location="{mode_raw}" ! rawvideoparse width={w} height={h} format=gray8 '
             f'framerate={max(1, int(round(fps)))}/1 ! {frag}')
-    r = subprocess.run("gst-launch-1.0 -e " + desc, shell=True,
+    # argv list, NOT shell=True: the NVMM caps contain "(memory:NVMM)" and a shell would choke on the
+    # parens. gst-launch rejoins argv and does its own parsing (incl. stripping the prop="..." quotes).
+    r = subprocess.run(["gst-launch-1.0", "-e", *desc.split()],
                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     out = base + "-00000.mkv"
     if r.returncode != 0 or not os.path.exists(out):
