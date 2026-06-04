@@ -29,11 +29,13 @@ cd "$REPO"
 REGISTRY="${1:-${RIG_IMAGE_REGISTRY:-}}"
 : "${REGISTRY:?usage: build-images.sh [registry[:port]] [tag], or set RIG_IMAGE_REGISTRY  (e.g. registry.lan:5000 jp7)}"
 TAG="${2:-jp7}"
-IMAGES="${IMAGES:-gige-core ros2-bridge webrtc-bridge}"
-# gige-core base defaults from the tag: jp6 -> the slim l4t-base, else ubuntu:24.04 (JP7). Override BASE_IMAGE.
+# gige-core base + the default image set default from the tag: jp6 -> slim l4t-base + includes the Noetic
+# ros1-bridge (ROS 1 is jp6-class); else ubuntu:24.04 (JP7), no ros1-bridge. Override BASE_IMAGE / IMAGES.
 case "$TAG" in
-  jp6) BASE_IMAGE="${BASE_IMAGE:-nvcr.io/nvidia/l4t-base:r36.2.0}" ;;
-  *)   BASE_IMAGE="${BASE_IMAGE:-ubuntu:24.04}" ;;
+  jp6) BASE_IMAGE="${BASE_IMAGE:-nvcr.io/nvidia/l4t-base:r36.2.0}"
+       IMAGES="${IMAGES:-gige-core ros2-bridge ros1-bridge webrtc-bridge}" ;;
+  *)   BASE_IMAGE="${BASE_IMAGE:-ubuntu:24.04}"
+       IMAGES="${IMAGES:-gige-core ros2-bridge webrtc-bridge}" ;;
 esac
 ROS_DISTRO="${ROS_DISTRO:-lyrical}"
 PUSH="${PUSH:-1}"
@@ -53,8 +55,9 @@ for img in $IMAGES; do
   case "$img" in
     gige-core)     build_one gige-core     core-driver/Dockerfile           --build-arg "BASE_IMAGE=$BASE_IMAGE" ;;
     ros2-bridge)   build_one ros2-bridge   plugins/ros2-bridge/Dockerfile   --build-arg "ROS_DISTRO=$ROS_DISTRO" ;;
+    ros1-bridge)   build_one ros1-bridge   plugins/ros1-bridge/Dockerfile ;;   # Noetic (ROS_DISTRO baked in)
     webrtc-bridge) build_one webrtc-bridge plugins/webrtc-bridge/Dockerfile ;;
-    *) echo "build-images: unknown image '$img' (want: gige-core|ros2-bridge|webrtc-bridge)" >&2; exit 1 ;;
+    *) echo "build-images: unknown image '$img' (want: gige-core|ros2-bridge|ros1-bridge|webrtc-bridge)" >&2; exit 1 ;;
   esac
 done
 

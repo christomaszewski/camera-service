@@ -14,6 +14,7 @@
 # Requires Docker Compose >= 2.20 (the `include:` element) — the v2 `docker compose` plugin.
 include:
   - plugins/ros2-bridge/compose.yml
+  - plugins/ros1-bridge/compose.yml
   - plugins/webrtc-bridge/compose.yml
 
 services:

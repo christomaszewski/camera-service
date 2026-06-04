@@ -11,7 +11,8 @@
 #   gige-up --jp7 config/sensors/cam_a.yaml up -d # force JetPack 7 (Orin): runc + CDI NVENC device
 #   gige-up --jp6 config/sensors/cam_a.yaml up -d # force JetPack 6: l4t base + nvidia runtime (CSV)
 #   gige-up --dev config/sensors/cam_a.yaml up -d # detached
-#   gige-up --zenohd config/sensors/cam_a.yaml up -d # also start the shared host zenoh router (standalone)
+#   gige-up --zenohd config/sensors/cam_a.yaml up -d # also start the shared host zenoh router (ros2, standalone)
+#   gige-up --jp6 --roscore config/sensors/cam_a.yaml up -d # ros1-bridge: jp6-class core + shared roscore
 #   gige-up --dev config/sensors/cam_a.yaml down  # tear the sensor down
 #   gige-up --dev config/sensors/cam_a.yaml config  # just render the merged compose
 #   gige-up /any/host/path/cam_front.yaml up -d      # config from an arbitrary path (e.g. via `rig`)
@@ -26,12 +27,13 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")" && pwd)"
 PYTHON="${GIGE_PYTHON:-python3}"
 
-DEV=0; ZENOHD=0; PLATFORM="${GIGE_PLATFORM:-auto}"   # auto -> detect JP6/JP7 from the host; jp6|jp7 to pin
+DEV=0; ZENOHD=0; ROSCORE=0; PLATFORM="${GIGE_PLATFORM:-auto}"   # auto -> detect JP6/JP7; jp6|jp7 to pin
 while :; do case "${1:-}" in
   --dev) DEV=1; shift;;
   --jp7) PLATFORM=jp7; shift;;   # force JetPack 7 (Orin): runc + the CDI NVENC device overlay
   --jp6) PLATFORM=jp6; shift;;   # force JetPack 6: l4t base + nvidia runtime (CSV mounts)
   --zenohd) ZENOHD=1; shift;;    # bring up the shared host zenoh router first (standalone; rig owns it in prod)
+  --roscore) ROSCORE=1; shift;;  # bring up the shared host roscore first (ROS 1 / ros1-bridge; rig owns it in prod)
   *) break;;
 esac; done
 CONFIG="${1:?usage: gige-up [--dev|--jp6|--jp7] <sensor-config.yaml> [compose args...]}"; shift || true
@@ -96,11 +98,14 @@ if [ "$DEV" = 0 ] && [ -n "${GIGE_REGISTRY:-}" ]; then
   IMG_TAG="${GIGE_IMAGE_TAG:-$PLATFORM}"
   export GIGE_CORE_IMAGE="${GIGE_CORE_IMAGE:-$GIGE_REGISTRY/gige-core:$IMG_TAG}"
   export GIGE_ROS2_IMAGE="${GIGE_ROS2_IMAGE:-$GIGE_REGISTRY/ros2-bridge:$IMG_TAG}"
+  export GIGE_ROS1_IMAGE="${GIGE_ROS1_IMAGE:-$GIGE_REGISTRY/ros1-bridge:$IMG_TAG}"   # Noetic; ros1-bridge is jp6-class
   export GIGE_WEBRTC_IMAGE="${GIGE_WEBRTC_IMAGE:-$GIGE_REGISTRY/webrtc-bridge:$IMG_TAG}"
 fi
 # --zenohd: ensure the single shared host zenoh router is up before the stack (standalone convenience;
 # rig runs it per host in production). Idempotent + one-per-host; reuses the resolved ros2-bridge image.
 if [ "$ZENOHD" = 1 ]; then GIGE_ROS2_IMAGE="${GIGE_ROS2_IMAGE:-ros2-bridge}" "$REPO/tools/zenohd.sh" up; fi
+# --roscore: same, for the ROS 1 master (ros1-bridge consumers; mirrors --zenohd). One per host, idempotent.
+if [ "$ROSCORE" = 1 ]; then GIGE_ROS1_IMAGE="${GIGE_ROS1_IMAGE:-ros1-bridge}" "$REPO/tools/roscore.sh" up; fi
 # Config from an arbitrary host path (e.g. a vehicle-level config managed by `rig`): bind-mount
 # that single file into the container so the core/supervisor loads it. In-repo configs (under
 # core-driver/config/sensors/) already live in the mounted config dir, so no overlay is needed.

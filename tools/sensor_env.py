@@ -157,7 +157,7 @@ def main() -> int:
         "GIGE_SOCK_VOLUME": f"gige_{name}_sock",
     }
 
-    ros = by_name.get("ros2-bridge")
+    ros = by_name.get("ros2-bridge") or by_name.get("ros1-bridge")   # same topic/frame_id/encoding/debayer params
     if ros is not None:
         env["GIGE_ROS_TOPIC"] = str(ros.get("topic", "image_raw"))
         env["GIGE_FRAME_ID"] = str(ros.get("frame_id", name))

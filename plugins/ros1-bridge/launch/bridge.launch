@@ -6,7 +6,8 @@
   <arg name="topic"       default="$(optenv GIGE_ROS_TOPIC image_raw)"/>
   <arg name="frame_id"    default="$(optenv GIGE_FRAME_ID camera)"/>
   <arg name="socket_path" default="$(optenv GIGE_TRANSPORT_SOCKET /tmp/gige/frames)"/>
-  <arg name="encoding"    default="$(optenv GIGE_ROS_ENCODING '')"/>
+  <arg name="encoding"    default="$(optenv GIGE_ROS_ENCODING)"/>   <!-- NO ''-default: roslaunch takes it literally -->
+
   <arg name="debayer"     default="$(optenv GIGE_DEBAYER false)"/>
 
   <group ns="$(arg instance)">
@@ -17,9 +18,11 @@
       <param name="encoding"    value="$(arg encoding)"/>
     </node>
 
-    <!-- Color (debayer on a CFA camera): a standalone image_proc/debayer nodelet subscribes to the bayer
-         topic and publishes image_color (+ image_mono). The bridge always publishes the raw mosaic. -->
-    <node if="$(eval arg('debayer') == 'true' and arg('encoding').startswith('bayer_'))"
+    <!-- Color (debayer): a standalone image_proc/debayer nodelet subscribes to the bayer topic and
+         publishes image_color (+ image_mono). The bridge always publishes the raw mosaic. Gate on the
+         plain `debayer` arg ("true"/"false"); a $(eval ...) bool stringifies to "True" which if= won't
+         match. (debayer expects a bayer encoding; only enable it on a CFA camera.) -->
+    <node if="$(arg debayer)"
           name="debayer" pkg="nodelet" type="nodelet" args="standalone image_proc/debayer" output="screen">
       <remap from="image_raw" to="$(arg topic)"/>
     </node>
