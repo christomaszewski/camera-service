@@ -36,11 +36,28 @@ as an **extra tee branch on JP7**, opt-in, for GStreamer-native consumers. So th
       time + frame_id beside the frame, replacing the header fields.
 - [ ] **Drops `--ipc=host`** for unixfd consumers (SCM_RIGHTS fd-passing isn't IPC-namespace-scoped).
 
-## Validate-first (same playbook as the NVENC bit-exact check)
-- [ ] Prove the **timestamp meta actually crosses** `unixfdsink -> unixfdsrc` on 1.24 (caps + fd cross
-      for sure; meta only crosses if it implements serialize/deserialize). If `GstReferenceTimestampMeta`
-      doesn't round-trip, we need a tiny custom serializable meta for frame_id. A ~30-line gst-launch
-      producer + a small consumer settles it on the Orin.
+## Validated on GStreamer 1.24 (2026-06-04, in Docker)
+- ✅ `unixfdsink`/`unixfdsrc` exist on 1.24; **`video/x-bayer,format=rggb` caps cross intact** + data
+  flows -> the bridge reads the Bayer format off the negotiated caps (drops the `GIGE_ROS_ENCODING`
+  config plumbing).
+- ⚠️ **Don't put the absolute timestamp in `buffer.pts`** -- a ~56-year "future" epoch-ns PTS stalls
+  downstream flow even at `sync=false`. Carry it in `buffer.offset_end` (+ `offset` = frame_id); those
+  are native buffer fields that serialize with the buffer and aren't time-interpreted. PTS stays relative.
+- ❗ **`unixfdsink` requires FD-backed (memfd) buffers** (`Expecting buffers with FD memories`). A plain
+  `tee` tap of regular CPU buffers ERRORS -- the tee can't negotiate the memfd allocation across its
+  branches, and `videoconvert` doesn't help. So the **producer must allocate memfd buffers itself**
+  (`os.memfd_create` + `GstAllocators.FdAllocator`, confirmed available in the core image) and copy the
+  frame in -> a **separate unixfd appsrc**, not a tee branch.
+
+## The zero-copy reality (DECISION POINT)
+The memfd requirement means **plain unixfd is NOT zero-copy for CPU camera (Aravis) frames** -- it's a
+producer-side memfd copy, ~the same cost as shm. Its win is *cleanliness* (native caps + metadata, no
+header, in-pipeline `bayer2rgb`), not speed. **True** zero-copy needs frames already fd/dmabuf-backed,
+which on the Jetson means **NVMM** (GPU) + **nvunixfd** (DeepStream 8). Two directions:
+- **A (memfd-copy unixfd):** clean transport now; modest; the foundation for B. ~shm cost.
+- **B (NVMM + nvunixfd):** tap the recorder's existing `nvvidconv -> NVMM` for the transport branch +
+  `nvunixfd` -> real GPU zero-copy. Bigger lift (DeepStream dependency), but it's what "ensure zero-copy"
+  actually requires.
 
 ## Bigger follow-on (separate): nvunixfd / zero-copy GPU
 Plain `unixfd` is CPU memfd (≈ same copy cost as shm — the win is *cleanliness*, not speed). The actual
