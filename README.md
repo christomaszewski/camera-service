@@ -177,7 +177,8 @@ Docker Compose **profiles**, and brings up that sensor's stack:
 - **Drops into a vehicle-level orchestrator** (e.g. `rig`) without coupling this repo to it. `gige-up`
   accepts a config from **any host path** (a vehicle-wide inventory, not only `core-driver/config/sensors/`
   — it auto-mounts an out-of-repo config into the container); exposes `up -d` / `down` / `ps` / `logs` on
-  one config; passes `ROS_DOMAIN_ID` / `RMW_IMPLEMENTATION` through so every stack shares one DDS graph;
+  one config; passes `ROS_DOMAIN_ID` / `RMW_IMPLEMENTATION` through so every stack shares one ROS 2 graph
+  (default `rmw_zenoh_cpp`, via a shared per-host `rmw_zenohd` router — `--zenohd` / `tools/zenohd.sh`);
   and ships a [`deploy.yaml`](deploy.yaml) descriptor telling the orchestrator how to invoke it. The
   dependency is one-way — this repo stays fully standalone. (`service:` + `name:` are the routing keys;
   the core exposes a health check so `rig status` is real.) See [DESIGN.md](docs/DESIGN.md).

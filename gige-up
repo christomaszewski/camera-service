@@ -11,6 +11,7 @@
 #   gige-up --jp7 config/sensors/cam_a.yaml up -d # force JetPack 7 (Orin): runc + CDI NVENC device
 #   gige-up --jp6 config/sensors/cam_a.yaml up -d # force JetPack 6: l4t base + nvidia runtime (CSV)
 #   gige-up --dev config/sensors/cam_a.yaml up -d # detached
+#   gige-up --zenohd config/sensors/cam_a.yaml up -d # also start the shared host zenoh router (standalone)
 #   gige-up --dev config/sensors/cam_a.yaml down  # tear the sensor down
 #   gige-up --dev config/sensors/cam_a.yaml config  # just render the merged compose
 #   gige-up /any/host/path/cam_front.yaml up -d      # config from an arbitrary path (e.g. via `rig`)
@@ -25,11 +26,12 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")" && pwd)"
 PYTHON="${GIGE_PYTHON:-python3}"
 
-DEV=0; PLATFORM="${GIGE_PLATFORM:-auto}"   # auto -> detect JP6/JP7 from the host; jp6|jp7 to pin
+DEV=0; ZENOHD=0; PLATFORM="${GIGE_PLATFORM:-auto}"   # auto -> detect JP6/JP7 from the host; jp6|jp7 to pin
 while :; do case "${1:-}" in
   --dev) DEV=1; shift;;
   --jp7) PLATFORM=jp7; shift;;   # force JetPack 7 (Orin): runc + the CDI NVENC device overlay
   --jp6) PLATFORM=jp6; shift;;   # force JetPack 6: l4t base + nvidia runtime (CSV mounts)
+  --zenohd) ZENOHD=1; shift;;    # bring up the shared host zenoh router first (standalone; rig owns it in prod)
   *) break;;
 esac; done
 CONFIG="${1:?usage: gige-up [--dev|--jp6|--jp7] <sensor-config.yaml> [compose args...]}"; shift || true
@@ -56,6 +58,9 @@ eval "$("$PYTHON" "$REPO/tools/sensor_env.py" "$CONFIG" | sed 's/^/export /')"
 export GIGE_CONFIG="config/sensors/$(basename "$CONFIG")"   # in-container path (config dir is mounted)
 export GIGE_NETWORK="${GIGE_NETWORK:-host}"
 [ "$DEV" = 1 ] && export GIGE_NETWORK=bridge
+# ROS 2 middleware: rmw_zenoh_cpp is the default across the stack (discovers via a shared host
+# `rmw_zenohd` router; see --zenohd / tools/zenohd.sh). FastDDS stays selectable via RMW_IMPLEMENTATION.
+export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
 
 # shm transport = a stable EXTERNAL volume, so sibling and other-stack containers can attach
 docker volume create "$GIGE_SOCK_VOLUME" >/dev/null
@@ -66,6 +71,11 @@ if [ "$DEV" = 0 ] && [ "$PLATFORM" = auto ]; then
   REL=""; [ -r /etc/nv_tegra_release ] && REL="$(sed -n 's/^# R\([0-9][0-9]*\).*/\1/p' /etc/nv_tegra_release)"
   if [ "${REL:-0}" -ge 38 ] 2>/dev/null; then PLATFORM=jp7; else PLATFORM=jp6; fi
 fi
+# Dev / unresolved -> the conservative shm+header transport. Export the resolved platform so the
+# ros2-bridge picks the matching consumer (GigeUnixfdBridge on jp7, GigeHeaderBridge otherwise) -- the
+# core selects its transport the same way (unixfd exactly when GStreamer >= 1.24 / jp7).
+[ "$PLATFORM" = auto ] && PLATFORM=jp6
+export GIGE_PLATFORM="$PLATFORM"
 
 FILES=(-f "$REPO/docker-compose.yml")
 [ "$DEV" = 1 ] && FILES+=(-f "$REPO/docker-compose.dev.yml")
@@ -85,6 +95,9 @@ if [ "$DEV" = 0 ] && [ -n "${GIGE_REGISTRY:-}" ]; then
   export GIGE_ROS2_IMAGE="${GIGE_ROS2_IMAGE:-$GIGE_REGISTRY/ros2-bridge:$IMG_TAG}"
   export GIGE_WEBRTC_IMAGE="${GIGE_WEBRTC_IMAGE:-$GIGE_REGISTRY/webrtc-bridge:$IMG_TAG}"
 fi
+# --zenohd: ensure the single shared host zenoh router is up before the stack (standalone convenience;
+# rig runs it per host in production). Idempotent + one-per-host; reuses the resolved ros2-bridge image.
+if [ "$ZENOHD" = 1 ]; then GIGE_ROS2_IMAGE="${GIGE_ROS2_IMAGE:-ros2-bridge}" "$REPO/tools/zenohd.sh" up; fi
 # Config from an arbitrary host path (e.g. a vehicle-level config managed by `rig`): bind-mount
 # that single file into the container so the core/supervisor loads it. In-repo configs (under
 # core-driver/config/sensors/) already live in the mounted config dir, so no overlay is needed.
@@ -96,5 +109,5 @@ fi
 
 ARGS=("$@"); [ ${#ARGS[@]} -eq 0 ] && ARGS=(up)
 PLAT_LABEL="$([ "$DEV" = 1 ] && echo dev || echo "$PLATFORM")"
-echo "gige-up: project=$COMPOSE_PROJECT_NAME platform=$PLAT_LABEL${GIGE_REGISTRY:+ registry=$GIGE_REGISTRY} profiles=[${COMPOSE_PROFILES:-<none>}] sock=$GIGE_SOCK_VOLUME net=$GIGE_NETWORK config=$GIGE_CONFIG${GIGE_CONFIG_HOST:+ (external: $GIGE_CONFIG_HOST)}" >&2
+echo "gige-up: project=$COMPOSE_PROJECT_NAME platform=$PLAT_LABEL${GIGE_REGISTRY:+ registry=$GIGE_REGISTRY} profiles=[${COMPOSE_PROFILES:-<none>}] sock=$GIGE_SOCK_VOLUME net=$GIGE_NETWORK rmw=$RMW_IMPLEMENTATION config=$GIGE_CONFIG${GIGE_CONFIG_HOST:+ (external: $GIGE_CONFIG_HOST)}" >&2
 exec docker compose "${FILES[@]}" "${ARGS[@]}"

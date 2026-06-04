@@ -50,6 +50,13 @@ sudo systemctl restart docker
 # parser, so stock python3 is enough; add python3-yaml only if you want the full YAML parser.)
 sudo apt-get update && sudo apt-get install -y docker-compose-plugin
 ```
+**Start the shared zenoh router (once per host).** The stack defaults to `rmw_zenoh_cpp`, which discovers
+through one `rmw_zenohd` router per host. `rig` runs it in production; standalone, bring up exactly one
+(idempotent) — it reuses the ros2-bridge image you already pull:
+```bash
+GIGE_REGISTRY=registry.lan:5000 GIGE_ROS2_IMAGE=registry.lan:5000/ros2-bridge:jp7 ~/gige/tools/zenohd.sh up
+#   ... or let gige-up do it for you below with `--zenohd`.
+```
 **Make NVENC reachable in containers — this is the one step that differs by JetPack** (gige-up applies the
 matching compose wiring automatically once it detects the platform):
 - **JP7 → CDI:** `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` (re-run after a JetPack update).
@@ -76,19 +83,23 @@ export GIGE_REGISTRY=registry.lan:5000        # gige-up points every image at th
 # a real camera: same file with  camera.fake: false  +  camera.camera_id: <serial>
 
 ./gige-up ~/cam_a.yaml pull                   # REQUIRED: fetch images (the bundle has no build context to fall back on)
-./gige-up ~/cam_a.yaml up -d
-./gige-up ~/cam_a.yaml ps                      # health -> 'healthy' once the shm socket is up
+./gige-up --zenohd ~/cam_a.yaml up -d         # --zenohd also ensures the shared host router is up (drop it if rig runs it)
+./gige-up ~/cam_a.yaml ps                      # health -> 'healthy' once the transport socket is up
 ```
-The status line should read `platform=jp7 registry=registry.lan:5000 … config=/run/gige-sensor.yaml (external: …)`.
-Multiple cameras = repeat with each config file; each becomes its own project, shm volume, ROS ns, and ports.
+The status line should read `platform=jp7 registry=registry.lan:5000 … rmw=rmw_zenoh_cpp config=/run/gige-sensor.yaml (external: …)`.
+Multiple cameras = repeat with each config file; each becomes its own project, socket volume, ROS ns, and ports.
 
 ## 4. Verify
 ```bash
-./gige-up ~/cam_a.yaml logs core-driver       # "pipeline: running", transport endpoint -> /tmp/gige/frames
-./gige-up ~/cam_a.yaml logs ros2-bridge       # publishing /<name>/image_raw   (name comes from the config)
+./gige-up ~/cam_a.yaml logs core-driver       # "pipeline: running", transport endpoint (unixfd) on JP7 / (shm+header) on JP6
+./gige-up ~/cam_a.yaml logs ros2-bridge       # "consuming … -> publishing /<name>/image_raw"  (name from the config)
 
-# ROS 2 — an independent node on the same DDS graph (image already pulled as a layer):
-docker run --rm -it --network host --ipc=host -e ROS_DOMAIN_ID=0 ros:lyrical-ros-base ros2 topic list
+# ROS 2 — an independent node on the same zenoh graph (image already pulled as a layer). --ipc=host is only
+# needed to read the JP6 shm transport; harmless on JP7. Under rmw_zenoh add --no-daemon to topic echo/hz
+# (the daemon-backed CLI often shows nothing even though data flows; typed subscriber nodes are unaffected).
+docker run --rm -it --network host --ipc=host -e ROS_DOMAIN_ID=0 -e RMW_IMPLEMENTATION=rmw_zenoh_cpp \
+  registry.lan:5000/ros2-bridge:jp7 ros2 topic list
+#   ... ros2 topic echo --no-daemon /<name>/image_raw --field encoding   # bayer_rggb8 (or rgb8 with debayer)
 ```
 NVENC HW-lossless recording is off in `cam_a.yaml`; enable `recording.enabled: true` + `encoder: auto` to
 exercise it.

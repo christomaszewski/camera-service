@@ -3,8 +3,9 @@
 <package format="3">
   <name>gige_ros2_bridge</name>
   <version>0.0.1</version>
-  <description>Bridges the gige-vision-service shm transport to sensor_msgs/Image,
-    stamping header.stamp from the per-frame hardware (PTP) timestamp.</description>
+  <description>Bridges the gige-vision-service transport (JP6 shm+header / JP7 unixfd) to
+    sensor_msgs/Image as rclcpp composable components, stamping header.stamp from the per-frame
+    hardware (PTP) timestamp.</description>
   <maintainer email="maintainer@example.com">gige-vision-service</maintainer>
   <license>Apache-2.0</license>
 
@@ -12,13 +13,19 @@
   <build_depend>pkg-config</build_depend>
 
   <depend>rclcpp</depend>
+  <depend>rclcpp_components</depend>
   <depend>sensor_msgs</depend>
   <depend>image_transport</depend>
+  <!-- launch (Python) composes the container; provides component_container_mt -->
+  <exec_depend>launch_ros</exec_depend>
   <!-- provides the lazy <topic>/compressed (JPEG/PNG) transport at runtime -->
   <exec_depend>compressed_image_transport</exec_depend>
+  <!-- JP6 color: image_proc::DebayerNode is composed into the container when debayer is enabled -->
+  <exec_depend>image_proc</exec_depend>
 
   <!-- GStreamer (gstreamer-1.0, gstreamer-app-1.0) is resolved via pkg-config from
-       system packages: libgstreamer1.0-dev, libgstreamer-plugins-base1.0-dev. -->
+       system packages: libgstreamer1.0-dev, libgstreamer-plugins-base1.0-dev.
+       The JP7 in-pipeline debayer needs `bayer2rgb` (gstreamer1.0-plugins-bad). -->
 
   <export>
     <build_type>ament_cmake</build_type>

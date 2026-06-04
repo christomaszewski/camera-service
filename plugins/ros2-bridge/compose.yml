@@ -14,28 +14,35 @@ services:
       dockerfile: plugins/ros2-bridge/Dockerfile
     init: true
     network_mode: ${GIGE_NETWORK:-host}     # host = join the host ROS2 graph
-    ipc: host                               # share /dev/shm with the core
+    ipc: host                               # share /dev/shm with the core (JP6 shm transport; harmless for unixfd)
     volumes:
       - gige_sock:/tmp/gige
     environment:
-      # Bayer color: sensor_env derives these from the camera pixel_format + the plugin's `debayer`
-      # param. GIGE_ROS_ENCODING labels a mosaic stream (e.g. bayer_rggb8) so image_proc can debayer
-      # downstream (option A; '' = mono, derived from the header). GIGE_DEBAYER=true makes the bridge
-      # demosaic to rgb8 in-process (option B). The bridge reads both as parameter defaults.
+      # Transport selection (must match the core): unixfd on JP7, shm+header on JP6. gige-up exports the
+      # host platform; the launch file derives the component + socket from it (GIGE_TRANSPORT overrides).
+      - GIGE_PLATFORM=${GIGE_PLATFORM:-jp6}
+      - GIGE_TRANSPORT=${GIGE_TRANSPORT:-}
+      # Per-sensor identity (sensor_env derives these from the config): ROS namespace, topic, frame_id.
+      - GIGE_INSTANCE=${GIGE_INSTANCE:-camera}
+      - GIGE_ROS_TOPIC=${GIGE_ROS_TOPIC:-image_raw}
+      - GIGE_FRAME_ID=${GIGE_FRAME_ID:-camera}
+      # Bayer color: sensor_env derives these from the camera pixel_format + the plugin's `debayer` param.
+      # GIGE_ROS_ENCODING labels a mosaic stream (e.g. bayer_rggb8); '' = mono. GIGE_DEBAYER=true turns on
+      # debayering -- JP7 in the GStreamer pipeline (bayer2rgb), JP6 via a composed image_proc::DebayerNode.
       - GIGE_ROS_ENCODING=${GIGE_ROS_ENCODING:-}
       - GIGE_DEBAYER=${GIGE_DEBAYER:-false}
-      # Join the vehicle-wide DDS graph. `rig` exports these before calling gige-up so every
-      # stack shares one graph; the defaults are also correct standalone (gige joins whatever
-      # domain the host sets). rmw_fastrtps_cpp is the ROS 2 default RMW, in ros-base already.
+      # Join the vehicle-wide ROS 2 graph. `rig` exports these before calling gige-up so every stack
+      # shares one graph; the defaults are also correct standalone. The graph runs on rmw_zenoh_cpp,
+      # which discovers via a shared host `rmw_zenohd` router (rig runs it; standalone: `gige-up
+      # --zenohd` or tools/zenohd.sh). On host networking the node reaches it at the default
+      # tcp/localhost:7447 -- no extra config. FastDDS stays selectable via RMW_IMPLEMENTATION.
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
-      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
-    # __ns namespaces the node per sensor, so topics land under /<instance>/...
-    command: >
-      ros2 run gige_ros2_bridge gige_ros2_bridge --ros-args
-      -r __ns:=/${GIGE_INSTANCE:-camera}
-      -p socket_path:=/tmp/gige/frames
-      -p topic:=${GIGE_ROS_TOPIC:-image_raw}
-      -p frame_id:=${GIGE_FRAME_ID:-camera}
+      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}
+      # Optional: point the zenoh session at a non-localhost router (rig sets this for a remote hub).
+      - ZENOH_SESSION_CONFIG_URI=${ZENOH_SESSION_CONFIG_URI:-}
+    # Compose the container per platform (env-driven). The launch file picks GigeUnixfdBridge (JP7) or
+    # GigeHeaderBridge (JP6), namespaces it /<instance>, and on JP6+debayer also loads image_proc.
+    command: ["ros2", "launch", "gige_ros2_bridge", "bridge.launch.py"]
     depends_on:
       - core-driver
     restart: unless-stopped

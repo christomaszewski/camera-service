@@ -143,8 +143,10 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
   unchanged. One file suffices because a sensor config is self-contained (`load_config` reads one YAML +
   dataclass defaults; it doesn't merge `camera.yaml`);
   (3) the ros2-bridge passes through **`ROS_DOMAIN_ID` / `RMW_IMPLEMENTATION`** so every stack shares one
-  DDS graph (rig exports them; the defaults — domain 0, `rmw_fastrtps_cpp`, the ROS 2 default RMW — are
-  correct standalone too);
+  ROS 2 graph (rig exports them; the defaults — domain 0, **`rmw_zenoh_cpp`** discovering via a shared
+  per-host `rmw_zenohd` router (`gige-up --zenohd` / `tools/zenohd.sh`; rig runs it in prod) — are correct
+  standalone too; FastDDS stays selectable via `RMW_IMPLEMENTATION`. Zenoh also clears a FastDDS
+  default-config bottleneck on large image messages — full-rate full-res color vs a few Hz);
   (4) a repo-root **`deploy.yaml`** descriptor tells rig how to invoke the launcher (logical verbs →
   compose subcommands, `ros_distro`) — descriptive metadata only, not code this repo runs.
   A core-driver **HEALTHCHECK** (the shm transport socket exists) makes `rig status` (= `docker compose
