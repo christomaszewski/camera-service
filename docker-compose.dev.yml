@@ -4,7 +4,7 @@
 # so they run unchanged from their normal definitions. gige-up --dev also sets GIGE_NETWORK=bridge.
 services:
   core-driver:
-    image: gige-dev
+    image: ${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}gige-dev
     build:
       context: .
       dockerfile: core-driver/Dockerfile.dev

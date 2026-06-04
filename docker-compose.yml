@@ -19,8 +19,9 @@ include:
 services:
   core-driver:
     # gige-up auto-detects the host (JP6/JP7) and sets GIGE_CORE_BASE to match; GIGE_CORE_IMAGE lets
-    # pull-based deploys point at a per-platform registry tag (e.g. registry/gige-core:jp7).
-    image: ${GIGE_CORE_IMAGE:-gige-core}
+    # pull-based deploys point at a per-platform registry tag (e.g. registry/gige-core:jp7). When rig
+    # injects RIG_IMAGE_REGISTRY the bare tag is pulled from that fleet registry; GIGE_CORE_IMAGE still wins.
+    image: ${GIGE_CORE_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}gige-core}
     build:
       context: .
       dockerfile: core-driver/Dockerfile
