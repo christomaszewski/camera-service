@@ -79,6 +79,10 @@ class RecordingConfig:
     # FASTEST + LARGEST). Accepts ultrafast(1)|fast(2)|medium(3)|slow(4) or the number.
     nvenc_preset: str = ""
     nvenc_maxperf: bool = True   # maxperf-enable (deprecated; high GPU clocks for throughput)
+    # The GRAY8->NV24 (or ->I420) CPU `videoconvert` is the recorder's real per-frame bottleneck at high
+    # res (single-threaded ~21fps for 5MP in a 30W power mode -- right at the 24fps line). Parallelize it
+    # across cores so the recorder keeps real-time with margin (5MP: n-threads=6 -> ~69fps). 0 = all cores.
+    videoconvert_threads: int = 4
 
 
 @dataclass

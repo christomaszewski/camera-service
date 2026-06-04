@@ -71,9 +71,13 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
     gop = _gop_frames(cfg, fps)
     bframes = max(0, int(getattr(cfg, "bframes", 0)))
     preset = _preset_level(getattr(cfg, "nvenc_preset", "")) if enc == "hw-hevc-lossless" else None
-    log.info("recorder: encoder=%s (bits=%d) gop=%s bframes=%d preset=%s -> %s-*.mkv",
+    # Parallelize the CPU GRAY8->NV24/I420 conversion (the recorder's real per-frame bottleneck at high
+    # res) so it keeps real-time with margin. n-threads=0 means all cores.
+    nt = max(0, int(getattr(cfg, "videoconvert_threads", 4)))
+    vconv = f"videoconvert n-threads={nt}"
+    log.info("recorder: encoder=%s (bits=%d) gop=%s bframes=%d preset=%s vconv-threads=%d -> %s-*.mkv",
              enc, bits_per_pixel, gop or "default", bframes,
-             "default" if preset is None else preset, location_base)
+             "default" if preset is None else preset, nt, location_base)
 
     if enc == "hw-hevc-lossless":
         # GRAY8 / Bayer8 mosaic -> Y plane of NV24 -> NVMM -> NVENC lossless. iframeinterval = the
@@ -90,7 +94,7 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
             opts += f" num-B-Frames={bframes}"
         return (
             "queue max-size-buffers=12 name=rec_q ! "
-            "videoconvert ! video/x-raw,format=NV24 ! "
+            f"{vconv} ! video/x-raw,format=NV24 ! "
             "nvvidconv ! video/x-raw(memory:NVMM),format=NV24 ! "
             f"nvv4l2h265enc enable-lossless=1{opts} ! h265parse ! " + sink
         )
@@ -102,7 +106,7 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
             opts += f":keyint={gop}:min-keyint={gop}"
         opts += f":bframes={bframes}"
         return (
-            "queue max-size-buffers=12 name=rec_q ! videoconvert ! "
+            f"queue max-size-buffers=12 name=rec_q ! {vconv} ! "
             f'x265enc option-string="{opts}" speed-preset=ultrafast ! h265parse ! ' + sink
         )
 
@@ -111,6 +115,6 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
     if gop or bframes:
         log.info("recorder: ffv1 is intra-only; ignoring keyframe_interval_s/bframes")
     return (
-        "queue max-size-buffers=12 name=rec_q ! videoconvert ! "
+        f"queue max-size-buffers=12 name=rec_q ! {vconv} ! "
         "avenc_ffv1 coder=1 context=1 ! " + sink
     )
