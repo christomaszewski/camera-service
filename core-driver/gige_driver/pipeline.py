@@ -1,17 +1,29 @@
 """GStreamer pipeline: Aravis-fed appsrc -> tee -> [recorder][raw endpoint][preview],
-plus a separate transport appsrc -> shmsink carrying header-framed frames for plugins.
+plus a separate transport appsrc carrying frames to out-of-process plugins.
 
 The Aravis "new-buffer" callback is where the hw timestamp + frame_id live, so it:
   - sets the GstBuffer PTS = (timestamp - base) and OFFSET = frame_id,
   - pushes the raw video into the main appsrc (recorder / optional raw shm / preview),
-  - and -- rate-limited -- pushes a header-prefixed copy into the transport appsrc for
-    out-of-process plugins (wire format in gige_driver.transport).
+  - and -- rate-limited -- pushes a copy into the transport appsrc for plugins.
 
-Why a separate transport appsrc rather than a post-tee transform: shm carries only
-bytes (no PTS/meta), so the plugin endpoint needs a custom `application/x-gige-frame`
-payload (header + frame). Building that in the feeder -- which already holds the
-absolute timestamp + frame_id -- avoids a fragile post-tee buffer rewrite, and rate
-limiting becomes a simple time check here.
+The plugin transport endpoint has two implementations, picked at build() by capability:
+  - JP7 (GStreamer >= 1.24, `unixfdsink` present): a `unixfdsink` carrying NATIVE caps
+    (video/x-raw GRAY8/16 for mono, video/x-bayer,<pattern> for Bayer) + buffer fields
+    over SCM_RIGHTS. No header -- the stream is self-describing. unixfdsink needs FD-backed
+    memory, so the feeder copies each frame into a memfd (GstAllocators.FdAllocator); ~shm
+    cost, the win is cleanliness. frame_id rides in buffer.offset, the absolute capture ns
+    in buffer.offset_end (an absolute-ns PTS stalls downstream flow); PTS stays relative.
+  - JP6 (GStreamer 1.20, no unixfd): a `shmsink` carrying a custom 36-byte
+    `application/x-gige-frame` header (shm drops caps/PTS/meta, so we prepend our own).
+
+unixfd REPLACES the header endpoint where available (not both); the raw headless shm sink
+(raw_endpoint) is independent and config-gated on both platforms.
+
+Why a separate transport appsrc rather than a post-tee transform: the transport branch needs
+its own caps/allocation (header bytes on shm, memfd buffers on unixfd) that the tee can't
+negotiate across branches. Building it in the feeder -- which already holds the absolute
+timestamp + frame_id -- avoids a fragile post-tee buffer rewrite, and rate limiting becomes
+a simple time check here.
 
 NOTE (packed formats): assumes 8-bit or 16-bit-aligned data (Mono8 / Mono16 / Bayer*8).
 Packed formats (Mono10p/Mono12Packed) need a bit-unpack step not implemented yet.
@@ -58,6 +70,7 @@ class CapturePipeline:
         self.pipeline: Optional[Gst.Pipeline] = None
         self.appsrc: Optional[Gst.Element] = None
         self.transport_src: Optional[Gst.Element] = None
+        self.unixfd_src: Optional[Gst.Element] = None
         self.loop: Optional[GLib.MainLoop] = None
         self._base_ts: Optional[int] = None
         self._last_pub_ts: Optional[int] = None
@@ -74,6 +87,10 @@ class CapturePipeline:
         self._height = 0
         self._image_size = 0
         self._stopping = False
+        self._have_unixfd = False          # JP7 (GStreamer 1.24): unixfd transport available
+        self._unixfd_path = None
+        self._fd_alloc = None              # GstAllocators.FdAllocator -> memfd buffers for unixfd
+        self._GstAllocators = None
 
     # ---- build -------------------------------------------------------------
     @staticmethod
@@ -131,8 +148,41 @@ class CapturePipeline:
 
         chains = [" ! ".join(main) + " " + " ".join(branches)]
 
+        # Plugin transport endpoint: prefer unixfd (native caps + GstBuffer metadata) where the element
+        # exists (JP7 / GStreamer 1.24), else the shm+header endpoint. unixfd REPLACES the header endpoint
+        # (the raw headless shm above is separate + config-optional). unixfdsink needs FD-backed buffers,
+        # so this is a SEPARATE appsrc fed memfd buffers by the feeder -- NOT a tee tap (the tee can't
+        # negotiate the memfd allocation across branches). The plane rides as video/x-bayer,<pattern>
+        # (8-bit Bayer) or video/x-raw GRAY8/16 (mono); offset=frame_id, offset_end=abs-ts (PTS stays relative).
         pe = self.cfg.transport.plugin_endpoint
-        if pe.enabled:
+        self._have_unixfd = bool(pe.enabled) and Gst.ElementFactory.find("unixfdsink") is not None
+        if self._have_unixfd:
+            gi.require_version("GstAllocators", "1.0")
+            from gi.repository import GstAllocators
+            self._GstAllocators = GstAllocators
+            self._fd_alloc = GstAllocators.FdAllocator.new()
+            self._unixfd_path = os.path.join(os.path.dirname(pe.socket_path) or "/tmp/gige", "unixfd")
+            self._ensure_socket_dir(self._unixfd_path)
+            # unixfdsink binds a fresh AF_UNIX socket and will NOT rebind over a stale one. A hard
+            # restart (crash / container restart with a persistent socket volume) leaves the socket
+            # file behind -> unixfdsink "Failed to start". Unlink any stale socket first. (shmsink
+            # manages its own file, so the legacy endpoint doesn't need this.)
+            try:
+                if os.path.exists(self._unixfd_path):
+                    os.unlink(self._unixfd_path)
+            except OSError as e:
+                log.warning("could not remove stale unixfd socket %s: %s", self._unixfd_path, e)
+            if self._bayer and self._bits <= 8:
+                ucaps = (f"video/x-bayer,format={self._bayer},width={self._width},"
+                         f"height={self._height},framerate={framerate}")
+            else:
+                ucaps = caps   # mono: video/x-raw GRAY8/16
+            chains.append(
+                f'appsrc name=unixfd_src is-live=true do-timestamp=false format=time caps="{ucaps}" '
+                f'! queue max-size-buffers=8 ! unixfdsink socket-path={self._unixfd_path} sync=false')
+            log.info("plugin transport endpoint (unixfd) -> %s  caps=%s", self._unixfd_path,
+                     ucaps.split(",", 1)[0] + (f",{self._bayer}" if (self._bayer and self._bits <= 8) else ""))
+        elif pe.enabled:
             self._ensure_socket_dir(pe.socket_path)
             shm = self._shm_size(pe, frame_bytes + transport.HEADER_SIZE)
             chains.append(
@@ -140,7 +190,7 @@ class CapturePipeline:
                 f'caps="{transport.CAPS}" ! queue max-size-buffers=8 ! '
                 f"shmsink socket-path={pe.socket_path} shm-size={shm} "
                 f"wait-for-connection=false sync=false")
-            log.info("plugin transport endpoint -> %s (%d-byte shm, max_rate=%s)",
+            log.info("plugin transport endpoint (shm+header) -> %s (%d-byte shm, max_rate=%s)",
                      pe.socket_path, shm, pe.max_rate_hz or "unlimited")
 
         desc = "   ".join(chains)   # multiple top-level chains in one pipeline
@@ -148,6 +198,7 @@ class CapturePipeline:
         self.pipeline = Gst.parse_launch(desc)
         self.appsrc = self.pipeline.get_by_name("camsrc")
         self.transport_src = self.pipeline.get_by_name("transport_src")
+        self.unixfd_src = self.pipeline.get_by_name("unixfd_src")
         if self.appsrc is None:
             raise RuntimeError("appsrc 'camsrc' not found after parse_launch")
         return desc
@@ -205,16 +256,34 @@ class CapturePipeline:
             if ret != Gst.FlowReturn.OK:
                 log.warning("appsrc push-buffer -> %s", ret)
 
-            # plugin transport endpoint: header + frame, rate-limited
-            if self.transport_src is not None and self._should_publish(stamp.timestamp_ns):
-                hdr = transport.FrameHeader(
-                    timestamp_ns=stamp.timestamp_ns, frame_id=stamp.frame_id,
-                    width=self._width, height=self._height,
-                    pixfmt=self._gst_format, ts_source=stamp.source.value).pack()
-                tbuf = Gst.Buffer.new_wrapped(hdr + frame_bytes)
-                tbuf.pts = pts
-                tbuf.offset = stamp.frame_id
-                self.transport_src.emit("push-buffer", tbuf)
+            # plugin transport endpoint, rate-limited. JP7 (unixfd): native caps + buffer fields, but
+            # unixfdsink needs FD-backed memory -> copy the frame into a fresh memfd (~shm cost; the win
+            # is a header-free, self-describing stream). Carry frame_id in .offset and the absolute PTP
+            # capture time in .offset_end (an absolute-ns PTS would stall downstream flow). PTS stays
+            # relative. JP6 (no unixfd): the legacy shm+header endpoint.
+            if self._should_publish(stamp.timestamp_ns):
+                if self.unixfd_src is not None:
+                    fd = os.memfd_create("gige", 0)
+                    os.ftruncate(fd, len(frame_bytes))
+                    os.pwrite(fd, frame_bytes, 0)
+                    mem = self._GstAllocators.FdAllocator.alloc(
+                        self._fd_alloc, fd, len(frame_bytes),
+                        self._GstAllocators.FdMemoryFlags.NONE)   # FdAllocator owns/closes the fd
+                    ubuf = Gst.Buffer.new()
+                    ubuf.insert_memory(-1, mem)
+                    ubuf.pts = pts
+                    ubuf.offset = stamp.frame_id
+                    ubuf.offset_end = stamp.timestamp_ns
+                    self.unixfd_src.emit("push-buffer", ubuf)
+                elif self.transport_src is not None:
+                    hdr = transport.FrameHeader(
+                        timestamp_ns=stamp.timestamp_ns, frame_id=stamp.frame_id,
+                        width=self._width, height=self._height,
+                        pixfmt=self._gst_format, ts_source=stamp.source.value).pack()
+                    tbuf = Gst.Buffer.new_wrapped(hdr + frame_bytes)
+                    tbuf.pts = pts
+                    tbuf.offset = stamp.frame_id
+                    self.transport_src.emit("push-buffer", tbuf)
 
             self.sidecar.add(stamp, pts)
             if self._n_pushed < 5:  # quick eyeball; full per-frame data is in the CSV
