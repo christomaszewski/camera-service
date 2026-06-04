@@ -18,3 +18,6 @@ recordings/
 # Claude Code local (machine-specific permission grants)
 .claude/settings.local.json
 dist/
+
+# local benchmark input (large recordings; never commit)
+input/
