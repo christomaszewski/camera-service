@@ -10,9 +10,9 @@
 # Docker Desktop's macOS bind mounts can't host a unix socket) + --ipc=host. Proves the whole egress
 # path without a browser. PASS = each scenario decoded >= 30 frames.
 #
-# The unixfd scenario needs a GStreamer >= 1.24 core image (gige-dev on Ubuntu 24.04, or gige-core on
-# JP7). Override the images with CORE_IMG / WEBRTC_IMG (e.g. on an Orin: CORE_IMG=gige-core:bench
-# WEBRTC_IMG=webrtc-bridge:jp7).
+# The unixfd scenario needs a GStreamer >= 1.24 core (unixfdsink landed in 1.24). The default gige-dev
+# is Ubuntu 22.04 / gst 1.20 (a JP6 userspace mirror -- no unixfd), so scenario 2 is auto-skipped there;
+# run it with a gst >= 1.24 core -- on an Orin: CORE_IMG=gige-core:bench WEBRTC_IMG=webrtc-bridge:jp7.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."          # repo root
 REPO="$(pwd)"
@@ -78,11 +78,20 @@ run_scenario "JP6 raw shm + mono (GRAY8 passthrough)" \
   -e GIGE_WIDTH=512 -e GIGE_HEIGHT=512 -e GIGE_FORMAT=GRAY8 -e GIGE_FPS=25 \
   || FAILED=1
 
-run_scenario "JP7 unixfd + color (Bayer -> bayer2rgb)" \
-  config/webrtc-fake-bayer.yaml \
-  -e GIGE_PLATFORM=jp7 -e GIGE_BAYER=rggb \
-  || FAILED=1
+# unixfd needs a gst >= 1.24 core (the default gige-dev is 22.04/1.20). Skip scenario 2 -- rather than
+# fail it -- when the core image can't produce the transport at all.
+if docker run --rm --entrypoint bash "$CORE_IMG" -c 'gst-inspect-1.0 unixfdsink >/dev/null 2>&1'; then
+  run_scenario "JP7 unixfd + color (Bayer -> bayer2rgb)" \
+    config/webrtc-fake-bayer.yaml \
+    -e GIGE_PLATFORM=jp7 -e GIGE_BAYER=rggb \
+    || FAILED=1
+else
+  echo
+  echo "########## SCENARIO: JP7 unixfd + color -- SKIPPED ##########"
+  echo "   core image '$CORE_IMG' has no unixfdsink (GStreamer < 1.24); unixfd needs gst >= 1.24."
+  echo "   Re-run with a 1.24 core, e.g. CORE_IMG=gige-core:bench WEBRTC_IMG=webrtc-bridge:jp7."
+fi
 
 echo
-if [ "$FAILED" -eq 0 ]; then echo "WEBRTC TEST: PASS (both transports)"; else echo "WEBRTC TEST: FAIL"; fi
+if [ "$FAILED" -eq 0 ]; then echo "WEBRTC TEST: PASS"; else echo "WEBRTC TEST: FAIL"; fi
 exit "$FAILED"
