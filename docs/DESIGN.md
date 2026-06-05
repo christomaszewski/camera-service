@@ -147,7 +147,7 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
   per-host `rmw_zenohd` router (`gige-up --zenohd` / `tools/zenohd.sh`; rig runs it in prod) — are correct
   standalone too; FastDDS stays selectable via `RMW_IMPLEMENTATION`. Zenoh also clears a FastDDS
   default-config bottleneck on large image messages — full-rate full-res color vs a few Hz);
-  (4) a repo-root **`deploy.yaml`** descriptor tells rig how to invoke the launcher (logical verbs →
+  (4) a repo-root **`rigging.yaml`** descriptor tells rig how to invoke the launcher (logical verbs →
   compose subcommands, `ros_distro`) — descriptive metadata only, not code this repo runs.
   A core-driver **HEALTHCHECK** (the shm transport socket exists) makes `rig status` (= `docker compose
   ps`) report real health instead of "n/a". Invariants kept throughout: `ipc:host` + the external

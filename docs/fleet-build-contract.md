@@ -21,7 +21,7 @@ arm64 build host (has the stack repos)                 each vehicle (Orin)
 - **Build only what's deployed.** rig iterates the stacks in the vehicle/fleet deployment (its
   `services.yaml` ∩ the vehicle config), not every repo.
 
-## Per-stack contract — `deploy.yaml: build:`
+## Per-stack contract — `rigging.yaml: build:`
 
 Each stack declares how to build + publish its images:
 
@@ -46,7 +46,7 @@ Single-platform stacks (the nav drivers) set `platforms: [default]` (or omit) an
 ```python
 reg = vehicle.images.registry                      # e.g. devbox:5000
 for stack in deployed_stacks:                       # services.yaml ∩ vehicle config
-    d = load(stack.repo / "deploy.yaml")
+    d = load(stack.repo / "rigging.yaml")           # falls back to the legacy deploy.yaml
     if not d.build: continue                        # stack with no build entrypoint (CI-published) -> skip
     tags = d.build.platforms or ["default"]
     tags = [t for t in tags if t in fleet_target_platforms]   # build only what's needed

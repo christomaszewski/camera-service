@@ -7,7 +7,7 @@
 #     registry   your local registry, e.g. registry.lan:5000. Falls back to $RIG_IMAGE_REGISTRY (the
 #                fleet registry rig injects), so rig's build phase sets ONE var for build + deploy.
 #     tag        default: jp7   (gige-up pulls <registry>/<img>:<platform>, i.e. jp7 on a JP7 box). rig
-#                builds per target platform: call once per tag in `build.platforms` (deploy.yaml).
+#                builds per target platform: call once per tag in `build.platforms` (rigging.yaml).
 #
 #   env knobs:
 #     IMAGES="gige-core ros2-bridge webrtc-bridge"   subset to build (default: all three)

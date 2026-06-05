@@ -119,7 +119,7 @@ exercise it.
   `up` would try (and fail) to build. `pull` fetches the registry images; `up` then just runs them.
 - **One var, whole stack:** `GIGE_REGISTRY` → `<registry>/<name>:<platform>` for all three images. Override
   one with `GIGE_CORE_IMAGE`/`GIGE_ROS2_IMAGE`/`GIGE_WEBRTC_IMAGE`, or pin a release with `GIGE_IMAGE_TAG`.
-- **The bundle can't drift:** `package-launch-surface.sh` reads the file list straight from `deploy.yaml`'s
+- **The bundle can't drift:** `package-launch-surface.sh` reads the file list straight from `rigging.yaml`'s
   `launch_surface`, the same contract rig uses.
 - **No CUDA base needed:** NVENC reaches the container via CDI at runtime, so `gige-core` is a plain
   arm64/24.04 image — identical across every JP7 Orin.
