@@ -35,6 +35,24 @@ services:
       - GIGE_FORMAT=${GIGE_FORMAT:-GRAY8}
       - GIGE_FPS=${GIGE_FPS:-25}
       - SIGNALLING_PORT=${GIGE_SIGNALLING_PORT:-8443}
+      # Fleet discovery (docs/DISCOVERY.md): once streaming, the bridge advertises this stream over
+      # Zenoh at fleet/<VEHICLE_ID>/media/<GIGE_INSTANCE> -- a liveliness token (presence) + a queryable
+      # (JSON descriptor). Best-effort + additive: GIGE_ADVERTISE=0 (or GIGE_LAUNCHER=gst-launch) turns
+      # it off and the video path is untouched. VEHICLE_ID empty -> the container hostname.
+      - GIGE_INSTANCE=${GIGE_INSTANCE:-camera}
+      - VEHICLE_ID=${VEHICLE_ID:-}
+      - ZENOH_CONNECT=${ZENOH_CONNECT:-tcp/localhost:7447}   # the vehicle's local zenohd; set empty to scout
+      - GIGE_ADVERTISE=${GIGE_ADVERTISE:-1}
+      - GIGE_LAUNCHER=${GIGE_LAUNCHER:-}
+      - GIGE_PRODUCER_ID=${GIGE_PRODUCER_ID:-}              # default <vehicle>-<sensor>; == webrtcsink meta.name
+      - GIGE_STREAM_ROLE=${GIGE_STREAM_ROLE:-}              # human label; default = sensor id
+      - GIGE_SIGNALLING_URL=${GIGE_SIGNALLING_URL:-}        # full override; else <scheme>://<host>:<port>
+      - GIGE_SIGNALLING_HOST=${GIGE_SIGNALLING_HOST:-}      # default = hostname (reachability is deployment's job)
+      - GIGE_SIGNALLING_SCHEME=${GIGE_SIGNALLING_SCHEME:-ws}
+      - GIGE_SIGNALLING_PROTOCOL=${GIGE_SIGNALLING_PROTOCOL:-gstwebrtc-api}
+      - GIGE_ROS_TOPIC=${GIGE_ROS_TOPIC:-}                  # OPTIONAL linkage if a ros bridge coexists
+      - GIGE_RECORDING_GLOB=${GIGE_RECORDING_GLOB:-}        # OPTIONAL recording linkage
+      - VIDEO_CAPS=${VIDEO_CAPS:-}                          # pin a codec (e.g. video/x-h264) -> descriptor hint
     command: ["bash", "run.sh"]
     depends_on:
       - core-driver

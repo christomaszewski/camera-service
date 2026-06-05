@@ -44,7 +44,7 @@ esac
 if [ "$TRANSPORT" = unixfd ]; then
   SOCK="${GIGE_TRANSPORT_SOCKET:-/tmp/gige/unixfd}"
   # Self-describing: caps (incl. video/x-bayer,<pattern> for CFA) come from the stream.
-  SRC="unixfdsrc socket-path=${SOCK}"
+  SRC="unixfdsrc name=gige_src socket-path=${SOCK}"
 else
   SOCK="${GIGE_SHM_SOCKET:-/tmp/gige/raw}"
   if [ -n "$DEBAYER_EL" ]; then
@@ -54,7 +54,7 @@ else
   fi
   # Raw shm carries no PTS -> do-timestamp on arrival (webrtcsink needs valid buffer timestamps to
   # payload RTP / run congestion control).
-  SRC="shmsrc socket-path=${SOCK} is-live=true do-timestamp=true ! ${CAPS}"
+  SRC="shmsrc name=gige_src socket-path=${SOCK} is-live=true do-timestamp=true ! ${CAPS}"
 fi
 
 # The core publishes the socket asynchronously; depends_on doesn't wait for readiness. Give it a
@@ -66,13 +66,22 @@ if [ "${RUN_SIGNALLING:-1}" = "1" ]; then
   sleep 1
 fi
 
-SINK="webrtcsink signaller::uri=ws://127.0.0.1:${PORT}"
+SINK="webrtcsink name=gige_webrtcsink signaller::uri=ws://127.0.0.1:${PORT}"
 [ -n "$VCAPS" ] && SINK="$SINK video-caps=${VCAPS}"
 
-echo "webrtc-bridge: ${TRANSPORT} ${SOCK}${BAYER:+ bayer=${BAYER}}${DEBAYER_EL:+ (debayer->color)} -> webrtcsink (signalling :${PORT})"
 # Force I420 after videoconvert: webrtcsink's encoders want a YUV format, not GRAY8/RGBx. The leaky
 # queue drops frames if the encoder/network falls behind (live preview: the newest frame wins).
-exec gst-launch-1.0 -e \
-  ${SRC} ! \
-  queue leaky=downstream max-size-buffers=4 ! ${DEBAYER_EL}videoconvert ! video/x-raw,format=I420 ! \
-  ${SINK}
+PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=4 ! ${DEBAYER_EL}videoconvert ! video/x-raw,format=I420 ! ${SINK}"
+
+echo "webrtc-bridge: ${TRANSPORT} ${SOCK}${BAYER:+ bayer=${BAYER}}${DEBAYER_EL:+ (debayer->color)} -> webrtcsink (signalling :${PORT})"
+
+# Default launcher: a small Python process (tools/bridge_stream.py) that OWNS this pipeline and, once it
+# is streaming, advertises the stream over Zenoh for fleet discovery (docs/DISCOVERY.md). It shares this
+# process, so the liveliness token lives exactly as long as the bridge (crash/kill -> presence withdrawn).
+# Escape hatch: GIGE_LAUNCHER=gst-launch runs the bare pipeline with NO discovery (debugging / minimal).
+if [ "${GIGE_LAUNCHER:-python}" = "gst-launch" ]; then
+  echo "webrtc-bridge: launcher=gst-launch (discovery off)"
+  exec gst-launch-1.0 -e ${PIPELINE}
+fi
+export GIGE_PIPELINE="$PIPELINE"
+exec python3 -u tools/bridge_stream.py

@@ -72,6 +72,40 @@ Or via the per-sensor stack: `gige-up <sensor>.yaml up -d webrtc-bridge` (gige-u
 | `SIGNALLING_PORT` | `8443` | signalling server port |
 | `RUN_SIGNALLING` | `1` | run the bundled signalling server in-container |
 
+## Fleet discovery (Zenoh)
+
+Once the pipeline is streaming, the bridge advertises this stream over Zenoh so an operator dashboard
+can find it — presence + a descriptor — following the system-wide convention in
+[docs/DISCOVERY.md](../../docs/DISCOVERY.md). It advertises at:
+
+```
+fleet/<VEHICLE_ID>/media/<GIGE_INSTANCE>
+```
+
+a **liveliness token** (presence; appears on `PLAYING`, auto-withdrawn when this process dies — no
+heartbeat) and a **queryable** that replies the JSON descriptor (`id`, `role`, `producer`, `protocol`,
+`signalling`, `producer_id`, and best-effort `codec`/`width`/`height`/`fps`/`pixel_format`, plus optional
+`ros_topic`/`recording` links). `producer_id` is also set as `webrtcsink`'s `meta.name`, so a shared
+signalling server's producers line up with discovery.
+
+The advertiser runs **inside this bridge process** (`tools/bridge_stream.py`, which now owns the
+pipeline) so the token's lifetime equals the stream's. It's **additive + best-effort**: if Zenoh is
+unreachable it logs and keeps streaming; `GIGE_ADVERTISE=0` (or `GIGE_LAUNCHER=gst-launch`) turns it off
+entirely. Generic half: [`tools/zenoh_advertiser.py`](tools/zenoh_advertiser.py) (no webrtc knowledge).
+
+| Env | Default | Meaning |
+|---|---|---|
+| `GIGE_ADVERTISE` | `1` | advertise over Zenoh; `0` disables (video unaffected) |
+| `GIGE_LAUNCHER` | `python` | `gst-launch` = legacy bare pipeline, no discovery |
+| `VEHICLE_ID` | _(hostname)_ | `<vehicle_id>` key segment |
+| `GIGE_INSTANCE` | `camera` | `<sensor_id>` key segment (sensor_env sets it from the config name) |
+| `ZENOH_CONNECT` | `tcp/localhost:7447` | the vehicle's local zenohd; set **empty** to scout |
+| `GIGE_PRODUCER_ID` | _(`<vehicle>-<sensor>`)_ | descriptor `producer_id` == `webrtcsink` `meta.name` |
+| `GIGE_STREAM_ROLE` | _(= sensor id)_ | human `role` label |
+| `GIGE_SIGNALLING_URL` | _(`ws://<host>:<port>`)_ | advertised signalling URL; or set `GIGE_SIGNALLING_HOST`/`_SCHEME` |
+| `GIGE_SIGNALLING_PROTOCOL` | `gstwebrtc-api` | descriptor `protocol` |
+| `GIGE_ROS_TOPIC` / `GIGE_RECORDING_GLOB` | _(unset)_ | optional descriptor cross-links (omitted if unset) |
+
 ## Viewing
 
 A viewer connects to the signalling server (`ws://<host>:8443`) and gets the stream. For a browser,
@@ -88,6 +122,17 @@ webrtcsink has `run-web-server` — verify with `gst-inspect-1.0 webrtcsink`.)
 Runs the full loopback: core fake camera → transport → this bridge (`webrtcsink`) →
 [`webrtc_consumer.py`](tools/webrtc_consumer.py) (`webrtcsrc` → decode → counts frames). Proves the
 whole egress path without a browser. PASS = it decoded ≥30 frames.
+
+Discovery has its own test (needs a Linux host for host networking + a Zenoh router):
+
+```bash
+./plugins/webrtc-bridge/tools/discovery_test.sh
+```
+
+Brings up a `rmw_zenohd` router + core + bridge, and a Zenoh probe
+([`discovery_probe.py`](tools/discovery_probe.py)) asserts: a liveliness **PUT** at
+`fleet/<vehicle>/media/<sensor>` once streaming, a valid JSON **descriptor** from `get(<key>)`, and a
+**DELETE** when the bridge stops.
 
 ## Jetson notes
 

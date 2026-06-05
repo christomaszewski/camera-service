@@ -181,6 +181,9 @@ def main() -> int:
         env["GIGE_FORMAT"] = str(web.get("format", "GRAY8"))
         env["GIGE_FPS"] = str(web.get("fps", 25))
         env["GIGE_SIGNALLING_PORT"] = str(web.get("port", 8443))
+        # Discovery (docs/DISCOVERY.md): human-facing role label for the advertised descriptor; default
+        # = the sensor name. (vehicle_id/producer_id/signalling default in the bridge from env/hostname.)
+        env["GIGE_STREAM_ROLE"] = str(web.get("role", name))
         # Bayer pattern from the camera pixel_format -> webrtc debayers the CFA preview to color
         # (bayer2rgb). '' = mono/raw passthrough. JP7/unixfd caps already carry it; JP6/raw-shm
         # run.sh applies it as video/x-bayer caps.

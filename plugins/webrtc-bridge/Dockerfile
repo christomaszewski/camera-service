@@ -40,9 +40,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
       gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice \
       ca-certificates \
-      python3 python3-gi gir1.2-glib-2.0 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
+      python3 python3-gi python3-pip gir1.2-glib-2.0 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
     && rm -f /usr/lib/*/gstreamer-1.0/libgstonnx.so /usr/lib/*/libonnxruntime.so* \
     && rm -rf /var/lib/apt/lists/*
+# eclipse-zenoh: the Python Zenoh binding for the fleet-discovery advertiser (presence + descriptor;
+# docs/DISCOVERY.md). A prebuilt manylinux abi3 wheel installs on arm64/x86 -- no Rust build. PEP668
+# externally-managed env in-container -> --break-system-packages.
+RUN pip3 install --break-system-packages --no-cache-dir eclipse-zenoh==1.9.0
 COPY --from=builder /usr/local /usr/local
 RUN ldconfig
 ENV GST_PLUGIN_PATH=/usr/local/lib/gstreamer-1.0 \
