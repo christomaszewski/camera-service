@@ -25,7 +25,7 @@ Layout (little-endian, fixed 36 bytes for v1 -- struct "<4sHHQQHHIBBH"):
     width        u16
     height       u16
     pixfmt       u32  code (PIXFMT map) -> GStreamer raw format
-    ts_source    u8   0=ptp_chunk, 1=camera, 2=system  (provenance)
+    ts_source    u8   0=ptp_chunk 1=camera 2=system 3=sof(usb) 4=rtp_ntp(rtsp)  (provenance)
     flags        u8   reserved bitfield
     reserved     u16
 """
@@ -49,8 +49,10 @@ _CODE_TO_GST = {1: "GRAY8", 2: "GRAY16_LE", 3: "GRAY16_BE",
                 4: "I420", 5: "NV12", 6: "YUY2", 7: "RGB", 8: "BGR"}
 _GST_TO_CODE = {v: k for k, v in _CODE_TO_GST.items()}
 
-# ts_source codes mirror cam_driver.timestamps.TimestampSource values
-TS_SOURCE_CODE = {"ptp_chunk": 0, "camera": 1, "system": 2}
+# ts_source codes mirror cam_driver.timestamps.TimestampSource values. Additive: 0-2 unchanged;
+# 3=sof (usb kernel start-of-frame) and 4=rtp_ntp (rtsp RTCP->NTP) are new provenance rungs. The
+# C++ bridges parse this byte but don't branch on it, so new codes are safe on the wire.
+TS_SOURCE_CODE = {"ptp_chunk": 0, "camera": 1, "system": 2, "sof": 3, "rtp_ntp": 4}
 TS_SOURCE_NAME = {v: k for k, v in TS_SOURCE_CODE.items()}
 
 

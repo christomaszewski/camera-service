@@ -8,7 +8,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from cam_driver.formats import (  # noqa: E402
-    bytes_per_frame, encoded_info, parse_pixel_format, select_encoder,
+    bytes_per_frame, encoded_info, parse_pixel_format, select_decoder, select_encoder,
 )
 
 
@@ -62,6 +62,18 @@ def test_select_encoder_encoded_is_stream_copy():
     assert select_encoder("auto", 8, encoded=True) == "stream-copy"
     assert select_encoder("auto", 8, is_color=True, encoded=True) == "stream-copy"   # encoded wins
     assert select_encoder("ffv1", 8, encoded=True) == "ffv1"      # explicit re-encode honored
+
+
+def test_select_decoder_software_default():
+    # no HW -> per-codec software decoder + CPU videoconvert (dev/x86/JP6-no-NVDEC)
+    assert select_decoder("avdec_h264") == ("avdec_h264", "videoconvert")
+    assert select_decoder("jpegdec", hw_available=False) == ("jpegdec", "videoconvert")
+
+
+def test_select_decoder_hw_when_available():
+    # HW present -> NVDEC (one element, codec-agnostic) + nvvidconv, regardless of the sw decoder
+    assert select_decoder("avdec_h265", hw_available=True) == ("nvv4l2decoder", "nvvidconv")
+    assert select_decoder("jpegdec", hw_available=True) == ("nvv4l2decoder", "nvvidconv")
 
 
 def _main():

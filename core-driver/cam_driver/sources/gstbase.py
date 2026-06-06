@@ -59,6 +59,19 @@ class GstPipelineSource(Source):
             if tee is None:
                 raise RuntimeError(f"{type(self).__name__}: an encoded source needs a 'tee name=st'")
             tee.get_static_pad("sink").add_probe(Gst.PadProbeType.BUFFER, self._stamp_probe)
+        self._configure_pipeline()
+
+    def _configure_pipeline(self) -> None:
+        """Post-parse element tweaks for properties that can't live in the launch string because they
+        may not exist on the running GStreamer (e.g. rtspsrc add-reference-timestamp-meta on gst<1.24).
+        Default no-op; RtspSource overrides to enable the NTP reference meta when available."""
+
+    @staticmethod
+    def _hw_decode_available() -> bool:
+        """True when the Jetson HW decoder (nvv4l2decoder) is present, so the consumer decode branch
+        uses NVDEC + nvvidconv; False on dev/x86/non-Jetson -> software decode. Same image auto-upgrades
+        to HW on a JP7 host (with the GPU exposed) -- no code change. See formats.select_decoder."""
+        return Gst.ElementFactory.find("nvv4l2decoder") is not None
 
     def start(self, on_frame: OnFrame, on_encoded: OnFrame = None) -> None:
         self._on_frame = on_frame
@@ -72,18 +85,32 @@ class GstPipelineSource(Source):
         if self._pipeline is not None:
             self._pipeline.set_state(Gst.State.NULL)
 
+    # ---- capture-timestamp extraction (subclass hook) ----------------------
+    def _extract_capture(self, buf):
+        """Return (capture_ns, provenance) read off the buffer, or (None, SYSTEM) to use arrival.
+        Subclasses override to pull a sensor-closer stamp (RTSP: RTCP->NTP reference-timestamp-meta;
+        USB: v4l2 SOF on hardware). Called pre-tee for encoded sources (so both branches inherit it
+        via the PTS-keyed lookup) and on the raw buffer otherwise. Default = arrival (SYSTEM)."""
+        return None, TimestampSource.SYSTEM
+
     # ---- stamping / correlation --------------------------------------------
-    def _new_stamp(self, pts_hint: int) -> FrameStamp:
-        now = time.time_ns()   # arrival; SOF (USB) / RTP-NTP (RTSP) provenance are follow-ups
-        st = FrameStamp(frame_id=self._frame_id, timestamp_ns=now, source=TimestampSource.SYSTEM,
-                        system_ns=now, camera_ns=pts_hint, chunk_ns=None)
+    def _new_stamp(self, buf) -> FrameStamp:
+        now = time.time_ns()                          # host arrival (CLOCK_REALTIME)
+        capture_ns, prov = self._extract_capture(buf)
+        if capture_ns is not None:
+            ts, src, cam = int(capture_ns), prov, int(capture_ns)
+        else:
+            pts = int(buf.pts) if buf.pts != Gst.CLOCK_TIME_NONE else now
+            ts, src, cam = now, TimestampSource.SYSTEM, pts
+        st = FrameStamp(frame_id=self._frame_id, timestamp_ns=ts, source=src,
+                        system_ns=now, camera_ns=cam, chunk_ns=None)
         self._frame_id += 1
         return st
 
     def _stamp_probe(self, pad, info) -> Gst.PadProbeReturn:
         buf = info.get_buffer()
         pts = int(buf.pts) if buf.pts != Gst.CLOCK_TIME_NONE else time.time_ns()
-        self._stamps[pts] = self._new_stamp(pts)
+        self._stamps[pts] = self._new_stamp(buf)
         while len(self._stamps) > 240:
             self._stamps.popitem(last=False)   # bounded; evict oldest
         return Gst.PadProbeReturn.OK
@@ -92,17 +119,15 @@ class GstPipelineSource(Source):
         """Look up the pre-tee stamp by buffer PTS (both branches share it); fall back if evicted."""
         pts = int(buf.pts) if buf.pts != Gst.CLOCK_TIME_NONE else None
         st = self._stamps.get(pts) if pts is not None else None
-        return st if st is not None else self._new_stamp(pts or time.time_ns())
+        return st if st is not None else self._new_stamp(buf)
 
     def _on_raw(self, sink) -> Gst.FlowReturn:
         sample = sink.emit("pull-sample")
         if sample is None:
             return Gst.FlowReturn.OK
         buf = sample.get_buffer()
-        if self.encoded_caps is not None:
-            stamp = self._stamp_for(buf)   # correlate with the encoded branch
-        else:
-            stamp = self._new_stamp(int(buf.pts) if buf.pts != Gst.CLOCK_TIME_NONE else time.time_ns())
+        # encoded: correlate with the pre-tee stamp (carries the NTP meta); raw: stamp this buffer
+        stamp = self._stamp_for(buf) if self.encoded_caps is not None else self._new_stamp(buf)
         data = buf.extract_dup(0, buf.get_size())
         if self._on_frame is not None:
             self._on_frame(stamp, data)

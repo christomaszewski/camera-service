@@ -46,6 +46,20 @@ def encoded_info(fmt):
     return _ENCODED.get((fmt or "").upper())
 
 
+def select_decoder(sw_decoder, hw_available=False):
+    """(decoder, converter) for the encoded->raw consumer branch. On a Jetson with the L4T plugins
+    present, nvv4l2decoder (HW NVDEC; auto-detects the codec from caps) + nvvidconv (NVMM->system
+    memory) is used; otherwise the per-codec software decoder + CPU videoconvert.
+
+    HW selection is AUTOMATIC (caller passes hw_available = nvv4l2decoder factory present), so a
+    JP6->JP7 host upgrade activates NVDEC with no code change -- only a deploy that exposes the GPU.
+    The recording is stream-copy and never decodes, so this only affects the live-consumer path. The
+    NVMM caps negotiation is L4T-version-dependent -> validate the HW branch on real JP7 hardware."""
+    if hw_available:
+        return "nvv4l2decoder", "nvvidconv"
+    return sw_decoder, "videoconvert"
+
+
 def parse_pixel_format(pixel_format):
     """Return (gst_format, bits_per_pixel, bayer_pattern, packed, is_color)."""
     pf = pixel_format or "Mono8"

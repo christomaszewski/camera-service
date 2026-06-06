@@ -33,9 +33,11 @@ log = logging.getLogger(__name__)
 
 
 class TimestampSource(enum.Enum):
-    PTP_CHUNK = "ptp_chunk"   # PTP-synced ChunkTimestamp (primary)
-    CAMERA = "camera"         # Aravis buffer camera-clock timestamp
-    SYSTEM = "system"         # host arrival time (interim fallback)
+    PTP_CHUNK = "ptp_chunk"   # GigE: PTP-synced ChunkTimestamp (primary)
+    CAMERA = "camera"         # GigE: Aravis buffer camera-clock timestamp
+    SOF = "sof"               # USB/v4l2: kernel start-of-frame (CLOCK_MONOTONIC, pre-transfer) -- on HW
+    RTP_NTP = "rtp_ntp"       # RTSP: camera wall-clock from RTCP SRs (gst>=1.24 reference-timestamp-meta)
+    SYSTEM = "system"         # host arrival time (universal fallback)
 
 
 @dataclass
