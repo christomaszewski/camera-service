@@ -16,6 +16,7 @@ docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
   python3 tests/test_transport.py
   python3 tests/test_config.py
   python3 tests/test_timestamps.py
+  python3 tests/test_dropstats.py
 
   echo "=== fake-camera producer + shm probe ==="
   python3 main.py -c config/fake-camera.yaml >/tmp/core.log 2>&1 &
