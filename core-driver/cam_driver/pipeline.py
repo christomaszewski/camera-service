@@ -44,22 +44,11 @@ from gi.repository import GLib, Gst
 from . import recorder as rec
 from . import transport
 from .dropstats import DropStats
+from .formats import bytes_per_frame, parse_pixel_format
 from .sidecar import SidecarHeader, SidecarWriter
 from .timestamps import FrameStamp
 
 log = logging.getLogger(__name__)
-
-_BAYER_MAP = {"RG": "rggb", "GR": "grbg", "GB": "gbrg", "BG": "bggr"}
-
-
-def parse_pixel_format(pixel_format: str):
-    """Return (gst_raw_format, bits_per_pixel, bayer_pattern, packed)."""
-    pf = pixel_format or "Mono8"
-    bits = 16 if any(tok in pf for tok in ("16", "12", "10")) else 8
-    packed = pf.endswith("p") or "Packed" in pf
-    bayer = _BAYER_MAP.get(pf[5:7].upper()) if pf.startswith("Bayer") and len(pf) >= 7 else None
-    gst_format = "GRAY16_LE" if bits > 8 else "GRAY8"
-    return gst_format, bits, bayer, packed
 
 
 class CapturePipeline:
@@ -83,6 +72,7 @@ class CapturePipeline:
         self._gst_format = "GRAY8"
         self._bits = 8
         self._bayer = None
+        self._is_color = False
         self._width = 0
         self._height = 0
         self._image_size = 0
@@ -111,7 +101,7 @@ class CapturePipeline:
         Gst.init(None)
         _x, _y, width, height = self.source.geometry()
         pf = self.source.pixel_format()
-        self._gst_format, self._bits, self._bayer, packed = parse_pixel_format(pf)
+        self._gst_format, self._bits, self._bayer, packed, self._is_color = parse_pixel_format(pf)
         self._width, self._height = int(width), int(height)
         if packed:
             log.warning("pixel format %s appears PACKED; fed as %s and will misinterpret data. "
@@ -122,7 +112,7 @@ class CapturePipeline:
         self._frame_interval_ns = int(1_000_000_000 / fps) if fps else 1_000_000
         caps = (f"video/x-raw,format={self._gst_format},width={self._width},"
                 f"height={self._height},framerate={framerate}")
-        self._image_size = self._width * self._height * (2 if self._bits > 8 else 1)
+        self._image_size = bytes_per_frame(self._gst_format, self._width, self._height)
         frame_bytes = self._image_size
 
         main = [
@@ -134,7 +124,7 @@ class CapturePipeline:
         rec_desc = None
         if self.cfg.recording.enabled:
             loc = f"{self.cfg.recording.output_dir.rstrip('/')}/{self.cfg.recording.name_prefix}"
-            rec_desc = rec.build_recorder_description(self.cfg.recording, self._bits, loc, fps)
+            rec_desc = rec.build_recorder_description(self.cfg.recording, self._bits, loc, fps, self._is_color)
             # CFA-tile only an 8-bit Bayer mosaic, and only the recorder feed (the tee keeps the mosaic for
             # transport/preview/raw). The tiled frame is still WxH GRAY8 -> the recorder branch is unchanged;
             # it just gets a private appsrc (built below) instead of hanging off the tee.

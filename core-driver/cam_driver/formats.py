@@ -1,0 +1,71 @@
+"""Pixel-format parsing + encoder selection (pure logic; no GStreamer -- unit-testable).
+
+Two source-string conventions feed in:
+  * GVSP/Aravis (gige):  Mono8, Mono16, BayerRG8, ... -> mapped to a GStreamer raw format.
+  * GStreamer-native (usb/v4l2, decoded rtsp):  GRAY8, I420, NV12, YUY2, RGB, ... -> as-is.
+
+Color formats (YUV/RGB) record via FFV1 to stay BIT-EXACT: the hw-hevc path converts to
+NV24 (4:4:4), which for a 4:2:0 source (I420/NV12) is an upsample->encode->downsample round
+trip = not lossless. FFV1 keeps the source's native subsampling. (NVENC color-lossless fed
+the native subsampling -- e.g. NV12 -- is a hardware refinement to verify on-device.)
+"""
+from __future__ import annotations
+
+import logging
+
+log = logging.getLogger(__name__)
+
+_BAYER_MAP = {"RG": "rggb", "GR": "grbg", "GB": "gbrg", "BG": "bggr"}
+
+# GStreamer raw formats accepted verbatim from a source (usb / decoded rtsp).
+_GST_MONO = {"GRAY8", "GRAY16_LE", "GRAY16_BE"}
+_GST_COLOR = {"I420", "NV12", "NV24", "YV12", "YUY2", "UYVY",
+              "RGB", "BGR", "RGBA", "BGRA", "RGBx", "BGRx"}
+_GST_RAW = _GST_MONO | _GST_COLOR
+
+VALID_ENCODERS = ("auto", "hw-hevc-lossless", "ffv1", "x265-lossless")
+
+
+def parse_pixel_format(pixel_format):
+    """Return (gst_format, bits_per_pixel, bayer_pattern, packed, is_color)."""
+    pf = pixel_format or "Mono8"
+    if pf in _GST_RAW:                        # already a GStreamer raw format (usb / decoded)
+        bits = 16 if "16" in pf else 8
+        return pf, bits, None, False, pf in _GST_COLOR
+    # GVSP/Aravis style: Mono* / Bayer*
+    bits = 16 if any(tok in pf for tok in ("16", "12", "10")) else 8
+    packed = pf.endswith("p") or "Packed" in pf
+    bayer = _BAYER_MAP.get(pf[5:7].upper()) if pf.startswith("Bayer") and len(pf) >= 7 else None
+    gst_format = "GRAY16_LE" if bits > 8 else "GRAY8"
+    return gst_format, bits, bayer, packed, False
+
+
+def bytes_per_frame(gst_format, width, height):
+    """Frame size in bytes for a GStreamer raw format (accounts for chroma subsampling)."""
+    px = int(width) * int(height)
+    if gst_format in ("GRAY16_LE", "GRAY16_BE"):
+        return px * 2
+    if gst_format in ("I420", "NV12", "YV12"):     # 4:2:0
+        return px * 3 // 2
+    if gst_format in ("YUY2", "UYVY"):             # 4:2:2 packed
+        return px * 2
+    if gst_format == "NV24":                       # 4:4:4
+        return px * 3
+    if gst_format in ("RGB", "BGR"):
+        return px * 3
+    if gst_format in ("RGBA", "BGRA", "RGBx", "BGRx"):
+        return px * 4
+    return px                                      # GRAY8 / 8-bit single plane (incl. Bayer8)
+
+
+def select_encoder(encoder, bits_per_pixel, is_color=False):
+    """Resolve `auto`: color -> ffv1 (lossless, no chroma resample); mono/Bayer 8-bit ->
+    hw-hevc-lossless; >8-bit -> ffv1. An explicit (non-auto) encoder is honored as-is."""
+    if encoder not in VALID_ENCODERS:
+        log.warning("unknown encoder %r; falling back to auto", encoder)
+        encoder = "auto"
+    if encoder != "auto":
+        return encoder
+    if is_color:
+        return "ffv1"
+    return "hw-hevc-lossless" if bits_per_pixel <= 8 else "ffv1"
