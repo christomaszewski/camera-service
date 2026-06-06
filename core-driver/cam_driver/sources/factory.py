@@ -14,4 +14,7 @@ def make_source(cfg) -> Source:
     if stype == "usb":
         from .usb import UsbSource
         return UsbSource(cfg.usb)
-    raise ValueError(f"unknown source type {cfg.source.type!r} (known: gige, usb)")
+    if stype == "rtsp":
+        from .rtsp import RtspSource
+        return RtspSource(cfg.rtsp)
+    raise ValueError(f"unknown source type {cfg.source.type!r} (known: gige, usb, rtsp)")

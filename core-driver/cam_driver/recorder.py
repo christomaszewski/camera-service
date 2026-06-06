@@ -42,12 +42,16 @@ def _preset_level(value):
     return None
 
 
-def _splitmux(location_base: str, seconds: int, muxer: str = "matroskamux") -> str:
+def _splitmux(location_base: str, seconds: int, muxer: str = "matroskamux",
+              keyframe_requests: bool = True) -> str:
     # splitmuxsink preserves continuous PTS across segments (good for alignment). send-keyframe-requests
-    # makes it ask the encoder for a keyframe at each split, so every .mkv starts on a keyframe and is
-    # independently decodable even with a long GOP.
+    # makes it ask the ENCODER (via an upstream force-key-unit event) for a keyframe at each split, so
+    # every .mkv starts on a keyframe even with a long GOP. Stream-copy has NO encoder upstream to honor
+    # that request -- it's just a parser + appsrc -- so the request is a no-op; we disable it and let
+    # splitmuxsink split on the stream's existing keyframes (every MJPEG frame is intra; H.264/H.265 on IDRs).
     max_ns = max(1, int(seconds)) * Gst.SECOND
-    return (f'splitmuxsink name=rec_sink muxer={muxer} send-keyframe-requests=true '
+    kr = "send-keyframe-requests=true " if keyframe_requests else ""
+    return (f'splitmuxsink name=rec_sink muxer={muxer} {kr}'
             f'location="{location_base}-%05d.mkv" max-size-time={max_ns}')
 
 
@@ -73,7 +77,8 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
         else:
             log.info("recorder: stream-copy (%s) -> %s-*.mkv (delivered bitstream, no re-encode)",
                      encoded_parser, location_base)
-            return f"queue max-size-buffers=12 name=rec_q ! {encoded_parser} ! " + sink
+            sc_sink = _splitmux(location_base, cfg.segment_seconds, keyframe_requests=False)
+            return f"queue max-size-buffers=12 name=rec_q ! {encoded_parser} ! " + sc_sink
 
     gop = _gop_frames(cfg, fps)
     bframes = max(0, int(getattr(cfg, "bframes", 0)))
