@@ -1,0 +1,33 @@
+# REAL USB/UVC camera, RAW (uncompressed) mode: NexiGo on /dev/video0 delivering YUY2 (4:2:2).
+# Raw color -> FFV1 lossless recording (no chroma resample; see formats.select_encoder). The cam's
+# YUY2 modes top out lower than MJPEG (640x480@30 here), which is why MJPEG is the high-res default.
+source:
+  type: usb
+
+usb:
+  device: /dev/video0
+  fake: false
+  pixel_format: YUY2
+  width: 640
+  height: 480
+  frame_rate: 30.0
+
+recording:
+  enabled: true
+  encoder: auto                 # raw color -> ffv1 (lossless, native subsampling)
+  output_dir: /data/recordings
+  name_prefix: usbyuy2
+  segment_seconds: 30
+
+preview:
+  enabled: false
+
+transport:
+  plugin_endpoint:
+    enabled: true
+    socket_path: /tmp/cam/frames
+  raw_endpoint:
+    enabled: false
+    socket_path: /tmp/cam/raw
+
+plugins: []

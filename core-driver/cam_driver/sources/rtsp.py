@@ -14,6 +14,10 @@ from __future__ import annotations
 
 import logging
 
+import gi
+gi.require_version("Gst", "1.0")
+from gi.repository import Gst
+
 from ..formats import encoded_info, select_decoder
 from ..timestamps import TimestampSource
 from .gstbase import GstPipelineSource
@@ -36,6 +40,7 @@ class RtspSource(GstPipelineSource):
         self._enc = encoded_info(cfg.codec)              # (caps, parser, decoder); RTSP is always encoded
         self._depay = _RTP_DEPAY.get((cfg.codec or "").upper())
         self._ntp_enabled = False                        # set in _configure_pipeline (gst>=1.24)
+        self._ntp_anchor = None                          # (buf_pts, ntp_ns): last frame that had the meta
         if self._enc is None or self._depay is None:
             raise ValueError(f"unsupported rtsp codec {cfg.codec!r} (known: h264, h265, mjpeg)")
 
@@ -82,16 +87,28 @@ class RtspSource(GstPipelineSource):
 
     def _extract_capture(self, buf):
         """Read the per-frame wall-clock the camera reports via RTCP, attached by rtspsrc as a
-        GstReferenceTimestampMeta (reference 'timestamp/x-ntp', NTP epoch). None -> fall back to arrival
-        (e.g. before the property could be enabled, or on gst<1.24)."""
+        GstReferenceTimestampMeta (reference 'timestamp/x-ntp', NTP epoch).
+
+        Real cameras drop the meta on the odd frame (~1/s, around RTCP SR boundaries). Once we're
+        locked onto the NTP timeline we must NOT fall back to wall-clock arrival for those frames --
+        the camera clock is offset from wall-clock, so mixing the two injects large backward jumps.
+        Instead extrapolate along the NTP timeline using the buffer PTS delta: rtspsrc puts PTS on the
+        same reconstructed RTP/sender timeline as the NTP meta, so the two stay consistent (no sawtooth).
+        Only before the FIRST meta (true warm-up) do we fall back to arrival (SYSTEM)."""
+        pts = int(buf.pts) if buf.pts != Gst.CLOCK_TIME_NONE else None
         meta = buf.get_reference_timestamp_meta()
-        if meta is None:
-            return None, TimestampSource.SYSTEM
-        ts = int(meta.timestamp)
-        ref = meta.reference.to_string() if meta.reference else ""
-        if "x-ntp" in ref:
-            ts -= _NTP_EPOCH_OFFSET_NS        # NTP (1900) -> Unix (1970)
-        return ts, TimestampSource.RTP_NTP
+        if meta is not None:
+            ts = int(meta.timestamp)
+            ref = meta.reference.to_string() if meta.reference else ""
+            if "x-ntp" in ref:
+                ts -= _NTP_EPOCH_OFFSET_NS        # NTP (1900) -> Unix (1970)
+            if pts is not None:
+                self._ntp_anchor = (pts, ts)
+            return ts, TimestampSource.RTP_NTP
+        if self._ntp_anchor is not None and pts is not None:
+            a_pts, a_ts = self._ntp_anchor       # extrapolate on the NTP timeline via the PTS delta
+            return a_ts + (pts - a_pts), TimestampSource.RTP_NTP
+        return None, TimestampSource.SYSTEM
 
     @property
     def active_timestamp_source(self) -> str:
