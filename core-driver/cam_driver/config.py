@@ -70,14 +70,16 @@ class UsbConfig:
 @dataclass
 class RtspConfig:
     # RTSP source (used when source.type == rtsp). Always encoded -> stream-copy recording +
-    # decode for consumers. First cut: configured geometry must match the stream; dynamic caps
-    # negotiation + RTP/RTCP->NTP timestamp provenance are follow-ups.
+    # decode for consumers, with RTCP->NTP per-frame provenance on gst>=1.24. Configured geometry
+    # must match the stream (dynamic caps negotiation is a follow-up).
     url: str = "rtsp://127.0.0.1:8554/test"
     codec: str = "h264"               # h264 | h265 | mjpeg
     latency_ms: int = 200             # rtspsrc jitter-buffer latency
     width: int = 640
     height: int = 480
     frame_rate: float = 30.0          # informational; the stream sets the real rate
+    protocols: str = ""               # rtspsrc transport: "" = default (udp w/ tcp fallback),
+    #                                   "tcp" forces RTP-over-TCP (firewalls / Docker NAT / lossy nets)
 
 
 @dataclass

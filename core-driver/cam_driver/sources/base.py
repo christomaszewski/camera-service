@@ -13,13 +13,18 @@ per-frame timestamp-provenance handling downstream stays single-sourced.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Callable, Tuple
+from typing import Callable, Optional, Tuple
 
 from ..timestamps import FrameStamp
 
 # The pipeline hands the source this callback; the source invokes it once per delivered
 # frame with the resolved stamp + clean image bytes (any device padding/chunk data stripped).
 OnFrame = Callable[[FrameStamp, bytes], None]
+
+# Encoded delivery passes the SAMPLE's caps string too (stream-format + codec_data -- e.g. the
+# H.264/H.265 VPS/SPS/PPS that hvc1/avc carry in caps, not in the bytes), so the stream-copy
+# recorder's appsrc negotiates with the muxer. Raw bytes alone would drop the parameter sets.
+OnEncoded = Callable[[FrameStamp, bytes, Optional[str]], None]
 
 
 class Source(ABC):
@@ -70,10 +75,11 @@ class Source(ABC):
         """Apply settings, set up the timestamp policy, and ready the capture stream."""
 
     @abstractmethod
-    def start(self, on_frame: OnFrame, on_encoded: OnFrame = None) -> None:
+    def start(self, on_frame: OnFrame, on_encoded: "OnEncoded" = None) -> None:
         """Arm the feeder and begin acquisition (also used to re-arm after reopen()). Delivers
         raw frames to on_frame. An encoded source (encoded_caps set) ALSO delivers the encoded
-        bitstream to on_encoded -- when the pipeline supplies it -- for the stream-copy recorder."""
+        bitstream (+ its caps string) to on_encoded -- when the pipeline supplies it -- for the
+        stream-copy recorder."""
 
     @abstractmethod
     def stop(self) -> None:
