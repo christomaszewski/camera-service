@@ -67,6 +67,21 @@ class SidecarWriter:
             json.dump(asdict(header), f, indent=2)
         log.info("wrote sidecar header %s", self._json_path)
 
+    def write_summary(self, summary: dict) -> None:
+        """Merge a final summary (e.g. drop counters) into the JSON sidecar on stop, so the
+        recording's metadata attests how faithful the log is to what was received."""
+        try:
+            data = {}
+            if os.path.exists(self._json_path):
+                with open(self._json_path) as f:
+                    data = json.load(f)
+            data["drops"] = summary
+            with open(self._json_path, "w") as f:
+                json.dump(data, f, indent=2)
+            log.info("wrote sidecar drop summary: %s", summary)
+        except (OSError, ValueError) as e:
+            log.warning("could not write sidecar summary: %s", e)
+
     def start(self) -> None:
         os.makedirs(os.path.dirname(self._csv_path) or ".", exist_ok=True)
         self._thread.start()

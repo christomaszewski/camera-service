@@ -43,6 +43,7 @@ from gi.repository import GLib, Gst
 
 from . import recorder as rec
 from . import transport
+from .dropstats import DropStats
 from .sidecar import SidecarHeader, SidecarWriter
 from .timestamps import FrameStamp
 
@@ -66,6 +67,7 @@ class CapturePipeline:
         self.cfg = cfg
         self.source = source
         self.sidecar = sidecar
+        self.drops = DropStats()
         self.pipeline: Optional[Gst.Pipeline] = None
         self.appsrc: Optional[Gst.Element] = None
         self.transport_src: Optional[Gst.Element] = None
@@ -248,6 +250,10 @@ class CapturePipeline:
         preview), and -- rate-limited -- to the plugin transport endpoint. Source-agnostic."""
         if self._stopping:
             return   # draining for EOS; stop feeding the pipeline
+        gap = self.drops.observe_frame(stamp.frame_id)
+        if gap:
+            log.warning("frame-id gap: %d frame(s) lost before fid=%s (source/link drop; %d missing total)",
+                        gap, stamp.frame_id, self.drops.frames_missing)
         if self._base_ts is None:
             self._base_ts = stamp.timestamp_ns
             self._write_header()
@@ -269,7 +275,8 @@ class CapturePipeline:
         gbuf.offset = stamp.frame_id
         ret = self.appsrc.emit("push-buffer", gbuf)
         if ret != Gst.FlowReturn.OK:
-            log.warning("appsrc push-buffer -> %s", ret)
+            self.drops.note_enqueue_failure()
+            log.warning("appsrc push-buffer -> %s (frame received but not enqueued)", ret)
 
         # Recorder gets a CFA-tiled copy (quadrant sub-planes) for better lossless compression; the
         # tee above keeps feeding the mosaic to transport/preview/raw. Same PTS/frame_id.
@@ -366,11 +373,24 @@ class CapturePipeline:
         self.source.start(self._on_frame)
         if self.source.reconnect_enabled:
             GLib.timeout_add_seconds(1, self._watchdog)
+        GLib.timeout_add_seconds(30, self._log_health)
         log.info("running")
         try:
             self.loop.run()
         finally:
             self.shutdown()
+
+    def _log_health(self) -> bool:
+        """~every 30s: surface drop accounting as a first-class live signal (not just at shutdown)."""
+        if self._stopping:
+            return False
+        s = self.drops.summary()
+        if s["source_gaps"] or s["enqueue_failures"]:
+            log.warning("health: frames=%(frames)d source_gaps=%(source_gaps)d "
+                        "frames_missing=%(frames_missing)d enqueue_failures=%(enqueue_failures)d", s)
+        else:
+            log.info("health: frames=%(frames)d, no drops", s)
+        return True
 
     def _watchdog(self) -> bool:
         """Runs on the main loop ~1 Hz: ask the source whether it's disconnected and, if so,
@@ -425,4 +445,8 @@ class CapturePipeline:
             self.source.stop()
         if self.pipeline:
             self.pipeline.set_state(Gst.State.NULL)
+        s = self.drops.summary()
+        log.info("drop summary: frames=%(frames)d source_gaps=%(source_gaps)d "
+                 "frames_missing=%(frames_missing)d enqueue_failures=%(enqueue_failures)d", s)
+        self.sidecar.write_summary(s)
         self.sidecar.stop()
