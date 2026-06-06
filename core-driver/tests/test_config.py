@@ -77,12 +77,25 @@ def test_source_type_parsed():
 
 
 def test_make_source_unknown_raises():
-    # factory dispatch is testable without a source's native deps (the gige impl imports lazily)
+    # factory dispatch is testable without a source's native deps (impls import lazily)
     try:
         make_source(parse_config({"source": {"type": "nope"}}))
         assert False, "expected ValueError"
     except ValueError:
         pass
+
+
+def test_usb_config_defaults():
+    u = parse_config({}).usb
+    assert (u.device, u.fake, u.pixel_format) == ("/dev/video0", False, "GRAY8")
+
+
+def test_usb_config_parsed():
+    c = parse_config({"source": {"type": "usb"},
+                      "usb": {"fake": True, "width": 640, "height": 480, "device": "/dev/video2"}})
+    assert c.source.type == "usb"
+    assert c.usb.fake is True and (c.usb.width, c.usb.height) == (640, 480)
+    assert c.usb.device == "/dev/video2"
 
 
 def _main():

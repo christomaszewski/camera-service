@@ -56,6 +56,18 @@ class CameraConfig:
 
 
 @dataclass
+class UsbConfig:
+    # USB / v4l2 source (used when source.type == usb). Step 3 handles raw GRAY8; color/decode
+    # + caps negotiation, the SOF/arrival timestamp policy, and device/hotplug come in step 4.
+    device: str = "/dev/video0"       # prefer a stable /dev/v4l/by-id/... path on real hardware
+    fake: bool = False                # videotestsrc instead of v4l2src (CI/dev; no device needed)
+    pixel_format: str = "GRAY8"       # delivered raw format fed to the shared pipeline
+    width: int = 640
+    height: int = 480
+    frame_rate: float = 30.0
+
+
+@dataclass
 class RecordingConfig:
     enabled: bool = True
     encoder: str = "auto"
@@ -131,7 +143,8 @@ class PluginConfig:
 @dataclass
 class AppConfig:
     source: SourceConfig = field(default_factory=SourceConfig)
-    camera: CameraConfig = field(default_factory=CameraConfig)
+    camera: CameraConfig = field(default_factory=CameraConfig)   # gige source params
+    usb: UsbConfig = field(default_factory=UsbConfig)            # usb source params
     recording: RecordingConfig = field(default_factory=RecordingConfig)
     preview: PreviewConfig = field(default_factory=PreviewConfig)
     transport: TransportConfig = field(default_factory=TransportConfig)
@@ -184,6 +197,7 @@ def parse_config(raw: dict) -> AppConfig:
     return AppConfig(
         source=_build(SourceConfig, raw.get("source")),
         camera=camera,
+        usb=_build(UsbConfig, raw.get("usb")),
         recording=_build(RecordingConfig, raw.get("recording")),
         preview=_build(PreviewConfig, raw.get("preview")),
         transport=transport_cfg,
