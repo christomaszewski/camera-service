@@ -1,0 +1,36 @@
+# Test config: FAKE encoded USB source (videotestsrc -> MJPEG, no /dev/video device).
+#
+# Exercises the DUAL-OUTPUT encoded path: the source decodes to I420 for live consumers
+# (the header transport endpoint) AND exposes the delivered MJPEG bitstream, which the
+# recorder STREAM-COPIES (muxes verbatim, no decode/re-encode) -- the faithful log for an
+# already-compressed source. The recording must decode back as image/jpeg (proves stream-copy,
+# not a re-encode), and the header endpoint must carry decoded I420 to consumers.
+source:
+  type: usb
+
+usb:
+  fake: true
+  pixel_format: MJPEG          # encoded delivery -> stream-copy recording + decode-for-consumers
+  width: 512
+  height: 512
+  frame_rate: 25.0
+
+recording:
+  enabled: true
+  encoder: auto                # encoded source -> stream-copy
+  output_dir: /data/recordings
+  name_prefix: usbmjpeg
+  segment_seconds: 30
+
+preview:
+  enabled: false
+
+transport:
+  plugin_endpoint:
+    enabled: true              # carries the DECODED I420 to consumers (ros2/etc.)
+    socket_path: /tmp/cam/frames
+  raw_endpoint:
+    enabled: false
+    socket_path: /tmp/cam/raw
+
+plugins: []

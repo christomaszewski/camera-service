@@ -67,8 +67,8 @@ class GigeSource(Source):
         bytes_pp = 2 if any(tok in pf for tok in ("16", "12", "10")) else 1
         return int(w) * int(h) * bytes_pp
 
-    def start(self, on_frame: OnFrame) -> None:
-        self._on_frame = on_frame
+    def start(self, on_frame: OnFrame, on_encoded: OnFrame = None) -> None:
+        self._on_frame = on_frame   # gige delivers raw only; on_encoded is unused (not an encoded source)
         stream = self.camera.stream
         stream.set_emit_signals(True)
         stream.connect("new-buffer", self._on_new_buffer)

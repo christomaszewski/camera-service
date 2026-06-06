@@ -44,7 +44,7 @@ from gi.repository import GLib, Gst
 from . import recorder as rec
 from . import transport
 from .dropstats import DropStats
-from .formats import bytes_per_frame, parse_pixel_format
+from .formats import bytes_per_frame, parse_pixel_format, select_encoder
 from .sidecar import SidecarHeader, SidecarWriter
 from .timestamps import FrameStamp
 
@@ -85,6 +85,9 @@ class CapturePipeline:
         self._tile_rec = False             # deinterleave the Bayer mosaic into quadrants for the recorder
         self._tile_mode = "off"            # off | plain | green_diff | rct (recording.bayer_tile)
         self._tiler = None                 # closure: frame_bytes -> tiled bytes (lazy; needs numpy)
+        self.enc_src: Optional[Gst.Element] = None   # encoded appsrc for stream-copy recording
+        self._stream_copy = False          # encoded source -> recorder muxes the delivered bitstream verbatim
+        self._base_lock = threading.Lock()  # base-ts init is shared by the raw + encoded callbacks
 
     # ---- build -------------------------------------------------------------
     @staticmethod
@@ -121,25 +124,36 @@ class CapturePipeline:
             "tee name=t",
         ]
         branches = []
+        is_encoded = self.source.encoded_caps is not None
+        enc_parser = self.source.encoded_parser if is_encoded else None
         rec_desc = None
         if self.cfg.recording.enabled:
             loc = f"{self.cfg.recording.output_dir.rstrip('/')}/{self.cfg.recording.name_prefix}"
-            rec_desc = rec.build_recorder_description(self.cfg.recording, self._bits, loc, fps, self._is_color)
-            # CFA-tile only an 8-bit Bayer mosaic, and only the recorder feed (the tee keeps the mosaic for
-            # transport/preview/raw). The tiled frame is still WxH GRAY8 -> the recorder branch is unchanged;
-            # it just gets a private appsrc (built below) instead of hanging off the tee.
-            if self._bayer and self._bits <= 8:
-                from . import bayer_tile
-                self._tile_mode = bayer_tile.normalize_mode(self.cfg.recording.bayer_tile)
-                if self._tile_mode == "off" and self.cfg.recording.bayer_tile not in (False, None, "", "off"):
-                    log.warning("unknown recording.bayer_tile %r; recording the mosaic untiled",
-                                self.cfg.recording.bayer_tile)
-                if self._tile_mode != "off":
-                    pat, mode = (self._bayer or "rggb"), self._tile_mode
-                    self._tiler = lambda b: bayer_tile.tile_cfa(b, self._width, self._height, mode, pat)
-                    self._tile_rec = True
-            if not self._tile_rec:
-                branches.append("t. ! " + rec_desc)
+            rec_desc = rec.build_recorder_description(self.cfg.recording, self._bits, loc, fps,
+                                                      self._is_color, enc_parser)
+            self._stream_copy = (select_encoder(self.cfg.recording.encoder, self._bits,
+                                                 self._is_color, encoded=is_encoded) == "stream-copy")
+            if self._stream_copy:
+                # Encoded source: the recorder stream-copies the delivered bitstream via a SEPARATE
+                # encoded appsrc (encsrc, appended below) -- NOT a tee branch. The decoded frames still
+                # flow to the consumer tee branches (transport/raw/preview), so live consumers are
+                # unaffected; only the LOG bypasses decode/re-encode.
+                log.info("recorder: stream-copy (%s) for encoded source", self.source.encoded_caps)
+            else:
+                # Raw recorder (raw source, or an encoded source the user forced to re-encode). CFA-tile
+                # only an 8-bit Bayer mosaic, recorder feed only (the tee keeps the mosaic for the rest).
+                if self._bayer and self._bits <= 8:
+                    from . import bayer_tile
+                    self._tile_mode = bayer_tile.normalize_mode(self.cfg.recording.bayer_tile)
+                    if self._tile_mode == "off" and self.cfg.recording.bayer_tile not in (False, None, "", "off"):
+                        log.warning("unknown recording.bayer_tile %r; recording the mosaic untiled",
+                                    self.cfg.recording.bayer_tile)
+                    if self._tile_mode != "off":
+                        pat, mode = (self._bayer or "rggb"), self._tile_mode
+                        self._tiler = lambda b: bayer_tile.tile_cfa(b, self._width, self._height, mode, pat)
+                        self._tile_rec = True
+                if not self._tile_rec:
+                    branches.append("t. ! " + rec_desc)
 
         raw = self.cfg.transport.raw_endpoint
         if raw.enabled:
@@ -166,6 +180,14 @@ class CapturePipeline:
                 f'appsrc name=recsrc is-live=true do-timestamp=false format=time caps="{caps}" '
                 f'! {rec_desc}')
             log.info("recorder: CFA-tiling 8-bit Bayer (%s) mode=%s before encode", self._bayer, self._tile_mode)
+
+        # Stream-copy recorder for an encoded source: a separate encoded appsrc feeds the delivered
+        # bitstream (set by the feeder's on_encoded) straight into <parser> ! splitmuxsink -- no decode,
+        # no re-encode, so the .mkv is byte-exact to what the host received.
+        if self._stream_copy:
+            chains.append(
+                f'appsrc name=encsrc is-live=true do-timestamp=false format=time '
+                f'caps="{self.source.encoded_caps}" ! {rec_desc}')
 
         # Plugin transport endpoint: prefer unixfd (native caps + GstBuffer metadata) where the element
         # exists (JP7 / GStreamer 1.24), else the shm+header endpoint. unixfd REPLACES the header endpoint
@@ -219,6 +241,7 @@ class CapturePipeline:
         self.transport_src = self.pipeline.get_by_name("transport_src")
         self.unixfd_src = self.pipeline.get_by_name("unixfd_src")
         self.rec_src = self.pipeline.get_by_name("recsrc")
+        self.enc_src = self.pipeline.get_by_name("encsrc")
         if self.appsrc is None:
             raise RuntimeError("appsrc 'camsrc' not found after parse_launch")
         return desc
@@ -234,6 +257,15 @@ class CapturePipeline:
             return True
         return False
 
+    def _ensure_base(self, stamp: FrameStamp) -> None:
+        """Set the PTS base + write the sidecar header once, on the first frame from EITHER the raw
+        (on_frame) or encoded (on_encoded) callback. They share the per-frame stamp, so the base is
+        the same regardless of which fires first; locked because the two run on separate threads."""
+        with self._base_lock:
+            if self._base_ts is None:
+                self._base_ts = stamp.timestamp_ns
+                self._write_header()
+
     def _on_frame(self, stamp: FrameStamp, frame_bytes: bytes) -> None:
         """Source callback (runs on the source's feeder thread): a resolved timestamp +
         clean image bytes. Set PTS/offset, push to the main appsrc (tee -> record/raw/
@@ -244,9 +276,7 @@ class CapturePipeline:
         if gap:
             log.warning("frame-id gap: %d frame(s) lost before fid=%s (source/link drop; %d missing total)",
                         gap, stamp.frame_id, self.drops.frames_missing)
-        if self._base_ts is None:
-            self._base_ts = stamp.timestamp_ns
-            self._write_header()
+        self._ensure_base(stamp)
         pts = stamp.timestamp_ns - self._base_ts
         if self._last_pts is not None and pts <= self._last_pts:
             # Non-monotonic timestamp (e.g. the camera clock reset across a reconnect).
@@ -315,6 +345,22 @@ class CapturePipeline:
                      stamp.system_ns, d_cc, d_sc)
         self._n_pushed += 1
 
+    def _on_encoded(self, stamp: FrameStamp, enc_bytes: bytes) -> None:
+        """Encoded-source callback (parallel to on_frame, SAME per-frame stamp): push the delivered
+        bitstream to the stream-copy recorder's appsrc with a stamp-derived PTS, so the .mkv aligns
+        with the sidecar + the raw consumer path. No decode/re-encode -- byte-exact to delivery."""
+        if self._stopping or self.enc_src is None:
+            return
+        self._ensure_base(stamp)
+        pts = stamp.timestamp_ns - self._base_ts
+        if pts < 0:
+            pts = 0
+        ebuf = Gst.Buffer.new_wrapped(enc_bytes)
+        ebuf.pts = pts
+        ebuf.dts = Gst.CLOCK_TIME_NONE
+        ebuf.offset = stamp.frame_id
+        self.enc_src.emit("push-buffer", ebuf)
+
     def _write_header(self) -> None:
         _x, _y, width, height = self.source.geometry()
         self.sidecar.write_header(SidecarHeader(
@@ -341,7 +387,7 @@ class CapturePipeline:
         self._stop_event.set()   # wake the reconnect backoff, if one is in progress
         log.info("stop requested: stopping acquisition + sending EOS to finalize recording")
         self.source.stop()
-        for src in (self.appsrc, self.transport_src, self.rec_src):
+        for src in (self.appsrc, self.transport_src, self.rec_src, self.enc_src):
             if src is not None:
                 src.emit("end-of-stream")
         GLib.timeout_add_seconds(5, self._force_quit)
@@ -360,7 +406,7 @@ class CapturePipeline:
 
         self.loop = GLib.MainLoop()
         self.pipeline.set_state(Gst.State.PLAYING)
-        self.source.start(self._on_frame)
+        self.source.start(self._on_frame, self._on_encoded)
         if self.source.reconnect_enabled:
             GLib.timeout_add_seconds(1, self._watchdog)
         GLib.timeout_add_seconds(30, self._log_health)
@@ -412,7 +458,7 @@ class CapturePipeline:
                     break            # stop requested mid-backoff
                 backoff = min(backoff * 2, self.cfg.camera.reconnect_backoff_max_s)
                 continue
-            self.source.start(self._on_frame)
+            self.source.start(self._on_frame, self._on_encoded)
             log.info("source reconnected after %d attempt(s); resuming capture", attempt)
             self._reconnecting = False
             return

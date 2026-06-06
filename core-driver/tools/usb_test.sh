@@ -25,6 +25,24 @@ docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
 '
 
 echo
+echo "########## ENCODED (dual-output): fake USB MJPEG -> stream-copy record + decode for consumers ##########"
+docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
+  set -e
+  mkdir -p /data/recordings /tmp/cam
+  echo "=== fake USB MJPEG producer (auto -> stream-copy; decodes I420 for the header endpoint) ==="
+  python3 main.py -c config/usb-fake-mjpeg.yaml >/tmp/m.log 2>&1 &
+  CORE=$!
+  sleep 5
+  echo "-- consumers get DECODED I420 via the header endpoint --"
+  python3 tools/shm_probe.py --socket /tmp/cam/frames --count 3 --timeout 5 || true
+  kill -INT "$CORE"; wait "$CORE" 2>/dev/null || true; echo "core done"
+  grep -iE "recorder: stream-copy|drop summary" /tmp/m.log | head -2
+  echo "-- recording is STREAM-COPIED MJPEG (demuxes as image/jpeg + decodes; NOT re-encoded) --"
+  gst-launch-1.0 filesrc location=/data/recordings/usbmjpeg-00000.mkv ! matroskademux ! jpegdec ! fakesink -v 2>&1 \
+    | grep -oE "image/jpeg|Got EOS" | sort -u | head
+'
+
+echo
 echo "########## COLOR: fake USB I420 -> ffv1 (lossless, no chroma resample) ##########"
 docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
   set -e

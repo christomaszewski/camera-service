@@ -47,6 +47,19 @@ class Source(ABC):
     def active_timestamp_source(self) -> str:
         """Resolved provenance for the sidecar (e.g. 'ptp_chunk'|'camera'|'system')."""
 
+    # ---- encoded delivery (optional; raw by default) -----------------------
+    @property
+    def encoded_caps(self):
+        """Caps of the delivered ENCODED bitstream (e.g. 'image/jpeg', 'video/x-h264') for the
+        stream-copy recorder's appsrc, or None for a raw source. An encoded source ALSO decodes
+        and delivers raw frames via on_frame (so transport/consumers are unchanged)."""
+        return None
+
+    @property
+    def encoded_parser(self):
+        """GStreamer parser the stream-copy recorder muxes through (e.g. 'jpegparse'), or None."""
+        return None
+
     # ---- lifecycle ---------------------------------------------------------
     @abstractmethod
     def open(self) -> None:
@@ -57,9 +70,10 @@ class Source(ABC):
         """Apply settings, set up the timestamp policy, and ready the capture stream."""
 
     @abstractmethod
-    def start(self, on_frame: OnFrame) -> None:
-        """Arm the feeder (delivering frames to on_frame) and begin acquisition.
-        Also used to re-arm after reopen()."""
+    def start(self, on_frame: OnFrame, on_encoded: OnFrame = None) -> None:
+        """Arm the feeder and begin acquisition (also used to re-arm after reopen()). Delivers
+        raw frames to on_frame. An encoded source (encoded_caps set) ALSO delivers the encoded
+        bitstream to on_encoded -- when the pipeline supplies it -- for the stream-copy recorder."""
 
     @abstractmethod
     def stop(self) -> None:
