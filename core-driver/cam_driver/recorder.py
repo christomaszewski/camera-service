@@ -59,10 +59,22 @@ def _gop_frames(cfg, fps: float) -> int:
 
 
 def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps: float = 0.0,
-                               is_color: bool = False) -> str:
-    """Return a gst-launch fragment beginning with a sink pad (linkable from `tee.` or an appsrc)."""
-    enc = select_encoder(cfg.encoder, bits_per_pixel, is_color)
+                               is_color: bool = False, encoded_parser: str = None) -> str:
+    """Return a gst-launch fragment beginning with a sink pad (linkable from `tee.` or an appsrc).
+    encoded_parser set => the source is already-encoded: STREAM-COPY through that parser (no
+    decode/re-encode) -- the faithful path for MJPEG/H.264/H.265 delivery."""
+    enc = select_encoder(cfg.encoder, bits_per_pixel, is_color, encoded=bool(encoded_parser))
     sink = _splitmux(location_base, cfg.segment_seconds)
+
+    if enc == "stream-copy":
+        if not encoded_parser:
+            log.warning("stream-copy requested but source isn't encoded; falling back to ffv1")
+            enc = "ffv1"
+        else:
+            log.info("recorder: stream-copy (%s) -> %s-*.mkv (delivered bitstream, no re-encode)",
+                     encoded_parser, location_base)
+            return f"queue max-size-buffers=12 name=rec_q ! {encoded_parser} ! " + sink
+
     gop = _gop_frames(cfg, fps)
     bframes = max(0, int(getattr(cfg, "bframes", 0)))
     preset = _preset_level(getattr(cfg, "nvenc_preset", "")) if enc == "hw-hevc-lossless" else None

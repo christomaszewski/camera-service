@@ -8,7 +8,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from cam_driver.formats import (  # noqa: E402
-    bytes_per_frame, parse_pixel_format, select_encoder,
+    bytes_per_frame, encoded_info, parse_pixel_format, select_encoder,
 )
 
 
@@ -48,6 +48,20 @@ def test_select_encoder_explicit_is_honored():
     assert select_encoder("x265-lossless", 8, is_color=True) == "x265-lossless"
     assert select_encoder("hw-hevc-lossless", 8, is_color=True) == "hw-hevc-lossless"  # override
     assert select_encoder("bogus", 8) == "hw-hevc-lossless"   # unknown -> auto -> mono8 path
+
+
+def test_encoded_info():
+    caps, parser, decoder = encoded_info("MJPEG")
+    assert (caps, parser) == ("image/jpeg", "jpegparse")
+    assert encoded_info("H264")[1] == "h264parse"
+    assert encoded_info("I420") is None        # raw, not encoded
+    assert encoded_info("Mono8") is None
+
+
+def test_select_encoder_encoded_is_stream_copy():
+    assert select_encoder("auto", 8, encoded=True) == "stream-copy"
+    assert select_encoder("auto", 8, is_color=True, encoded=True) == "stream-copy"   # encoded wins
+    assert select_encoder("ffv1", 8, encoded=True) == "ffv1"      # explicit re-encode honored
 
 
 def _main():

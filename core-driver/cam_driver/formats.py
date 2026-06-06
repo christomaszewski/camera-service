@@ -8,6 +8,10 @@ Color formats (YUV/RGB) record via FFV1 to stay BIT-EXACT: the hw-hevc path conv
 NV24 (4:4:4), which for a 4:2:0 source (I420/NV12) is an upsample->encode->downsample round
 trip = not lossless. FFV1 keeps the source's native subsampling. (NVENC color-lossless fed
 the native subsampling -- e.g. NV12 -- is a hardware refinement to verify on-device.)
+
+Already-encoded sources (MJPEG USB, H.264/H.265 RTSP) record via STREAM-COPY: the delivered
+bitstream is muxed verbatim -- faithful to what the host received, and no pointless re-encode
+of already-lossy video. See encoded_info + select_encoder.
 """
 from __future__ import annotations
 
@@ -23,7 +27,23 @@ _GST_COLOR = {"I420", "NV12", "NV24", "YV12", "YUY2", "UYVY",
               "RGB", "BGR", "RGBA", "BGRA", "RGBx", "BGRx"}
 _GST_RAW = _GST_MONO | _GST_COLOR
 
-VALID_ENCODERS = ("auto", "hw-hevc-lossless", "ffv1", "x265-lossless")
+VALID_ENCODERS = ("auto", "hw-hevc-lossless", "ffv1", "x265-lossless", "stream-copy")
+
+# Encoded delivery (already-compressed sources: MJPEG USB, H.264/H.265 RTSP). Per codec:
+#   src_caps -- caps the source tags the encoded buffers with (= the recorder appsrc caps)
+#   parser   -- the recorder stream-copies through this into the muxer (no re-encode)
+#   decoder  -- SOFTWARE decoder for the raw consumer path (HW nvv4l2decoder = hardware refinement)
+_ENCODED = {
+    "MJPEG": ("image/jpeg", "jpegparse", "jpegdec"),
+    "JPEG":  ("image/jpeg", "jpegparse", "jpegdec"),
+    "H264":  ("video/x-h264", "h264parse", "avdec_h264"),
+    "H265":  ("video/x-h265", "h265parse", "avdec_h265"),
+}
+
+
+def encoded_info(fmt):
+    """(src_caps, parser, decoder) for an encoded codec string, or None if `fmt` is raw."""
+    return _ENCODED.get((fmt or "").upper())
 
 
 def parse_pixel_format(pixel_format):
@@ -58,14 +78,18 @@ def bytes_per_frame(gst_format, width, height):
     return px                                      # GRAY8 / 8-bit single plane (incl. Bayer8)
 
 
-def select_encoder(encoder, bits_per_pixel, is_color=False):
-    """Resolve `auto`: color -> ffv1 (lossless, no chroma resample); mono/Bayer 8-bit ->
-    hw-hevc-lossless; >8-bit -> ffv1. An explicit (non-auto) encoder is honored as-is."""
+def select_encoder(encoder, bits_per_pixel, is_color=False, encoded=False):
+    """Resolve `auto`: an already-encoded source -> stream-copy (mux the delivered bitstream
+    verbatim -- faithful + no pointless re-encode); color -> ffv1 (lossless, no chroma
+    resample); mono/Bayer 8-bit -> hw-hevc-lossless; >8-bit -> ffv1. An explicit (non-auto)
+    encoder is honored (e.g. force ffv1 to re-encode a decoded encoded source)."""
     if encoder not in VALID_ENCODERS:
         log.warning("unknown encoder %r; falling back to auto", encoder)
         encoder = "auto"
     if encoder != "auto":
         return encoder
+    if encoded:
+        return "stream-copy"
     if is_color:
         return "ffv1"
     return "hw-hevc-lossless" if bits_per_pixel <= 8 else "ffv1"
