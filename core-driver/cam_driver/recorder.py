@@ -1,11 +1,14 @@
 """Pluggable lossless recorder branch, built as a GStreamer launch fragment.
 
-Encoder selection (``auto``):
-  * 8-bit input  -> hardware HEVC lossless (NVENC, NV24/YUV444; bit-exact, temporal).
-                    A mono/Bayer mosaic rides in the Y plane (chroma neutral) and is
-                    recovered by dropping chroma in post.
-  * >8-bit input -> FFV1 (lossless, high-bit-depth; INTRA-only, no temporal) by
-                    default, or x265 --lossless (temporal, CPU-bound) if requested.
+Encoder selection (``auto``, see formats.select_encoder):
+  * 8-bit mono/Bayer -> hardware HEVC lossless (NVENC, NV24/YUV444; bit-exact, temporal).
+                    The mosaic rides in the Y plane (chroma neutral), recovered by dropping
+                    chroma in post.
+  * color (YUV/RGB)  -> FFV1 -- avoids the NV24 (4:4:4) conversion, which would resample a
+                    4:2:0 source and break bit-exactness. (NVENC color-lossless fed the
+                    native subsampling is a hardware refinement.)
+  * >8-bit input     -> FFV1 (lossless, high-bit-depth; INTRA-only) by default, or
+                    x265 --lossless (temporal, CPU) if requested.
 
 Validated on a JetPack 7.2 Orin AGX (L4T r39.x, driver R595.78): the
 NV24/NVMM -> nvv4l2h265enc enable-lossless=1 path is BIT-EXACT for 8-bit mono --
@@ -21,9 +24,9 @@ import logging
 
 from gi.repository import Gst
 
-log = logging.getLogger(__name__)
+from .formats import select_encoder
 
-VALID_ENCODERS = ("auto", "hw-hevc-lossless", "ffv1", "x265-lossless")
+log = logging.getLogger(__name__)
 
 # nvv4l2h265enc preset-level enum (HW search depth: bigger = smaller lossless file, slower encode).
 _PRESET_LEVEL = {"disable": 0, "ultrafast": 1, "fast": 2, "medium": 3, "slow": 4}
@@ -37,15 +40,6 @@ def _preset_level(value):
     if s.isdigit() and 0 <= int(s) <= 4:
         return int(s)
     return None
-
-
-def select_encoder(encoder: str, bits_per_pixel: int) -> str:
-    if encoder not in VALID_ENCODERS:
-        log.warning("unknown encoder %r; falling back to auto", encoder)
-        encoder = "auto"
-    if encoder != "auto":
-        return encoder
-    return "hw-hevc-lossless" if bits_per_pixel <= 8 else "ffv1"
 
 
 def _splitmux(location_base: str, seconds: int, muxer: str = "matroskamux") -> str:
@@ -64,9 +58,10 @@ def _gop_frames(cfg, fps: float) -> int:
     return 0
 
 
-def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps: float = 0.0) -> str:
+def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps: float = 0.0,
+                               is_color: bool = False) -> str:
     """Return a gst-launch fragment beginning with a sink pad (linkable from `tee.` or an appsrc)."""
-    enc = select_encoder(cfg.encoder, bits_per_pixel)
+    enc = select_encoder(cfg.encoder, bits_per_pixel, is_color)
     sink = _splitmux(location_base, cfg.segment_seconds)
     gop = _gop_frames(cfg, fps)
     bframes = max(0, int(getattr(cfg, "bframes", 0)))

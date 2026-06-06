@@ -23,3 +23,15 @@ docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
   gst-launch-1.0 filesrc location=/data/recordings/usbfake-00000.mkv ! matroskademux ! avdec_ffv1 ! fakesink 2>&1 \
     | grep -iE "error|got eos" | head -4
 '
+
+echo
+echo "########## COLOR: fake USB I420 -> ffv1 (lossless, no chroma resample) ##########"
+docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
+  set -e
+  mkdir -p /data/recordings /tmp/cam
+  echo "=== fake USB COLOR (videotestsrc I420) producer (auto encoder should pick ffv1) ==="
+  timeout -s INT 6 python3 main.py -c config/usb-fake-color.yaml 2>&1 | grep -iE "recorder: encoder|drop summary" | head -3 || true
+  echo "=== recording stores I420 natively (NOT NV24/GRAY8 => no resample) + decodes ==="
+  gst-launch-1.0 filesrc location=/data/recordings/usbcolor-00000.mkv ! matroskademux ! avdec_ffv1 ! fakesink -v 2>&1 \
+    | grep -oE "format=\(string\)[A-Za-z0-9_]+|Got EOS" | sort -u | head
+'

@@ -42,6 +42,13 @@ def test_16bit_and_system_source():
     assert out.ts_source == "system"
 
 
+def test_color_pixfmt_roundtrip():
+    # color formats now have header codes so the core can carry a color source without crashing
+    for fmt in ("I420", "NV12", "YUY2", "RGB"):
+        out = unpack_header(FrameHeader(timestamp_ns=7, frame_id=3, width=8, height=8, pixfmt=fmt).pack())
+        assert out.pixfmt == fmt
+
+
 def test_bad_magic():
     try:
         unpack_header(b"XXXX" + bytes(HEADER_SIZE - 4))
@@ -60,7 +67,8 @@ def test_truncated():
 
 def test_unsupported_pixfmt_rejected():
     try:
-        FrameHeader(timestamp_ns=0, frame_id=0, width=1, height=1, pixfmt="NV12").pack()
+        # NV21 is a real GStreamer format we deliberately don't carry (no header code)
+        FrameHeader(timestamp_ns=0, frame_id=0, width=1, height=1, pixfmt="NV21").pack()
         assert False, "expected TransportError"
     except TransportError:
         pass

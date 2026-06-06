@@ -41,8 +41,12 @@ _FORMAT = "<4sHHQQHHIBBH"
 HEADER_SIZE = struct.calcsize(_FORMAT)  # 36
 _U64 = 0xFFFFFFFFFFFFFFFF
 
-# pixfmt codes <-> GStreamer raw video formats (keep in sync with the C++ bridge)
-_CODE_TO_GST = {1: "GRAY8", 2: "GRAY16_LE", 3: "GRAY16_BE"}
+# pixfmt codes <-> GStreamer raw video formats (keep in sync with the C++ bridges).
+# Codes 1-3 (mono) are what the C++ ros bridges map today; 4+ (color) are carried by the
+# header so the core never crashes on a color source -- color-CONSUMER support in the C++
+# bridges is a later slice (unixfd already carries color via native caps).
+_CODE_TO_GST = {1: "GRAY8", 2: "GRAY16_LE", 3: "GRAY16_BE",
+                4: "I420", 5: "NV12", 6: "YUY2", 7: "RGB", 8: "BGR"}
 _GST_TO_CODE = {v: k for k, v in _CODE_TO_GST.items()}
 
 # ts_source codes mirror cam_driver.timestamps.TimestampSource values
