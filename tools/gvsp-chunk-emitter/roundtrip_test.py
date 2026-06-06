@@ -17,7 +17,7 @@ Then it decodes the recording and verifies, per recorded frame:
   * the sidecar chunk_ns equals the timestamp embedded in that frame (timestamp fidelity).
 
 Self-aligning: each frame carries its index, so dropped/missed frames don't desync the
-comparison. Run inside the gige-chunks container (see roundtrip_test.sh).
+comparison. Run inside the cam-chunks container (see roundtrip_test.sh).
 """
 import argparse
 import csv

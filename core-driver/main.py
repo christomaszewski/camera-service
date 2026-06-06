@@ -12,16 +12,16 @@ import os
 import signal
 import sys
 
-from gige_driver.camera import CameraError, GigECamera
-from gige_driver.config import load_config
-from gige_driver.pipeline import CapturePipeline
-from gige_driver.sidecar import SidecarWriter
-from gige_driver.timestamps import TimestampExtractor, TimestampSource
+from cam_driver.camera import CameraError, GigECamera
+from cam_driver.config import load_config
+from cam_driver.pipeline import CapturePipeline
+from cam_driver.sidecar import SidecarWriter
+from cam_driver.timestamps import TimestampExtractor, TimestampSource
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="GigE Vision core driver")
-    ap.add_argument("-c", "--config", default=os.environ.get("GIGE_CONFIG", "config/camera.yaml"))
+    ap.add_argument("-c", "--config", default=os.environ.get("CAM_CONFIG", "config/camera.yaml"))
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
 
@@ -29,7 +29,7 @@ def main(argv=None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
-    log = logging.getLogger("gige")
+    log = logging.getLogger("cam")
 
     cfg = load_config(args.config)
     log.info("config: camera=%s pixel_format=%s ts=%s encoder=%s",

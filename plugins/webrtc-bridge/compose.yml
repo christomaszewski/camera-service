@@ -5,53 +5,53 @@
 services:
   webrtc-bridge:
     profiles: ["webrtc-bridge"]
-    image: ${GIGE_WEBRTC_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}webrtc-bridge}  # rig: RIG_IMAGE_REGISTRY; standalone: gige-up sets GIGE_WEBRTC_IMAGE from GIGE_REGISTRY
+    image: ${CAM_WEBRTC_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}webrtc-bridge}  # rig: RIG_IMAGE_REGISTRY; standalone: cam-up sets CAM_WEBRTC_IMAGE from CAM_REGISTRY
     build:
       context: ../..
       dockerfile: plugins/webrtc-bridge/Dockerfile
     init: true
-    network_mode: ${GIGE_NETWORK:-host}     # host = expose signalling + WebRTC media to viewers
+    network_mode: ${CAM_NETWORK:-host}     # host = expose signalling + WebRTC media to viewers
     ipc: host                               # share /dev/shm with the core (JP6 raw endpoint; harmless for unixfd)
     volumes:
-      - gige_sock:/tmp/gige
+      - cam_sock:/tmp/cam
     environment:
       # Transport selection (mirrors the ros2 bridge; must match the core): unixfd on JP7 (rides the
-      # core's plugin_endpoint /tmp/gige/unixfd -- shared with the ros2 bridge, unixfdsink broadcasts),
-      # raw shm on JP6 (/tmp/gige/raw, needs transport.raw_endpoint.enabled). gige-up exports
-      # GIGE_PLATFORM; GIGE_TRANSPORT ({unixfd|shm}) overrides.
-      - GIGE_PLATFORM=${GIGE_PLATFORM:-jp6}
-      - GIGE_TRANSPORT=${GIGE_TRANSPORT:-}
-      - GIGE_TRANSPORT_SOCKET=${GIGE_TRANSPORT_SOCKET:-/tmp/gige/unixfd}
-      - GIGE_SHM_SOCKET=${GIGE_SHM_SOCKET:-/tmp/gige/raw}
+      # core's plugin_endpoint /tmp/cam/unixfd -- shared with the ros2 bridge, unixfdsink broadcasts),
+      # raw shm on JP6 (/tmp/cam/raw, needs transport.raw_endpoint.enabled). cam-up exports
+      # CAM_PLATFORM; CAM_TRANSPORT ({unixfd|shm}) overrides.
+      - CAM_PLATFORM=${CAM_PLATFORM:-jp6}
+      - CAM_TRANSPORT=${CAM_TRANSPORT:-}
+      - CAM_TRANSPORT_SOCKET=${CAM_TRANSPORT_SOCKET:-/tmp/cam/unixfd}
+      - CAM_SHM_SOCKET=${CAM_SHM_SOCKET:-/tmp/cam/raw}
       # Bayer color: sensor_env derives the pattern from the camera pixel_format. Non-empty -> webrtc
-      # debayers the CFA preview to color (bayer2rgb); '' = mono. GIGE_WEBRTC_DEBAYER=false forces the
+      # debayers the CFA preview to color (bayer2rgb); '' = mono. CAM_WEBRTC_DEBAYER=false forces the
       # raw mosaic. On JP7 the unixfd caps carry the pattern; on JP6 raw-shm run.sh applies it.
-      - GIGE_BAYER=${GIGE_BAYER:-}
-      - GIGE_WEBRTC_DEBAYER=${GIGE_WEBRTC_DEBAYER:-auto}
+      - CAM_BAYER=${CAM_BAYER:-}
+      - CAM_WEBRTC_DEBAYER=${CAM_WEBRTC_DEBAYER:-auto}
       # JP6 raw shm carries no caps -> geometry from the sensor config (must match the camera frame).
       # Ignored on JP7 (unixfd caps are self-describing).
-      - GIGE_WIDTH=${GIGE_WIDTH:-512}
-      - GIGE_HEIGHT=${GIGE_HEIGHT:-512}
-      - GIGE_FORMAT=${GIGE_FORMAT:-GRAY8}
-      - GIGE_FPS=${GIGE_FPS:-25}
-      - SIGNALLING_PORT=${GIGE_SIGNALLING_PORT:-8443}
+      - CAM_WIDTH=${CAM_WIDTH:-512}
+      - CAM_HEIGHT=${CAM_HEIGHT:-512}
+      - CAM_FORMAT=${CAM_FORMAT:-GRAY8}
+      - CAM_FPS=${CAM_FPS:-25}
+      - SIGNALLING_PORT=${CAM_SIGNALLING_PORT:-8443}
       # Fleet discovery (docs/DISCOVERY.md): once streaming, the bridge advertises this stream over
-      # Zenoh at fleet/<VEHICLE_ID>/media/<GIGE_INSTANCE> -- a liveliness token (presence) + a queryable
-      # (JSON descriptor). Best-effort + additive: GIGE_ADVERTISE=0 (or GIGE_LAUNCHER=gst-launch) turns
+      # Zenoh at fleet/<VEHICLE_ID>/media/<CAM_INSTANCE> -- a liveliness token (presence) + a queryable
+      # (JSON descriptor). Best-effort + additive: CAM_ADVERTISE=0 (or CAM_LAUNCHER=gst-launch) turns
       # it off and the video path is untouched. VEHICLE_ID empty -> the container hostname.
-      - GIGE_INSTANCE=${GIGE_INSTANCE:-camera}
+      - CAM_INSTANCE=${CAM_INSTANCE:-camera}
       - VEHICLE_ID=${VEHICLE_ID:-}
       - ZENOH_CONNECT=${ZENOH_CONNECT:-tcp/localhost:7447}   # the vehicle's local zenohd; set empty to scout
-      - GIGE_ADVERTISE=${GIGE_ADVERTISE:-1}
-      - GIGE_LAUNCHER=${GIGE_LAUNCHER:-}
-      - GIGE_PRODUCER_ID=${GIGE_PRODUCER_ID:-}              # default <vehicle>-<sensor>; == webrtcsink meta.name
-      - GIGE_STREAM_ROLE=${GIGE_STREAM_ROLE:-}              # human label; default = sensor id
-      - GIGE_SIGNALLING_URL=${GIGE_SIGNALLING_URL:-}        # full override; else <scheme>://<host>:<port>
-      - GIGE_SIGNALLING_HOST=${GIGE_SIGNALLING_HOST:-}      # default = hostname (reachability is deployment's job)
-      - GIGE_SIGNALLING_SCHEME=${GIGE_SIGNALLING_SCHEME:-ws}
-      - GIGE_SIGNALLING_PROTOCOL=${GIGE_SIGNALLING_PROTOCOL:-gstwebrtc-api}
-      - GIGE_ROS_TOPIC=${GIGE_ROS_TOPIC:-}                  # OPTIONAL linkage if a ros bridge coexists
-      - GIGE_RECORDING_GLOB=${GIGE_RECORDING_GLOB:-}        # OPTIONAL recording linkage
+      - CAM_ADVERTISE=${CAM_ADVERTISE:-1}
+      - CAM_LAUNCHER=${CAM_LAUNCHER:-}
+      - CAM_PRODUCER_ID=${CAM_PRODUCER_ID:-}              # default <vehicle>-<sensor>; == webrtcsink meta.name
+      - CAM_STREAM_ROLE=${CAM_STREAM_ROLE:-}              # human label; default = sensor id
+      - CAM_SIGNALLING_URL=${CAM_SIGNALLING_URL:-}        # full override; else <scheme>://<host>:<port>
+      - CAM_SIGNALLING_HOST=${CAM_SIGNALLING_HOST:-}      # default = hostname (reachability is deployment's job)
+      - CAM_SIGNALLING_SCHEME=${CAM_SIGNALLING_SCHEME:-ws}
+      - CAM_SIGNALLING_PROTOCOL=${CAM_SIGNALLING_PROTOCOL:-gstwebrtc-api}
+      - CAM_ROS_TOPIC=${CAM_ROS_TOPIC:-}                  # OPTIONAL linkage if a ros bridge coexists
+      - CAM_RECORDING_GLOB=${CAM_RECORDING_GLOB:-}        # OPTIONAL recording linkage
       - VIDEO_CAPS=${VIDEO_CAPS:-}                          # pin a codec (e.g. video/x-h264) -> descriptor hint
     command: ["bash", "run.sh"]
     depends_on:
@@ -59,6 +59,6 @@ services:
     restart: unless-stopped
 
 volumes:
-  gige_sock:
+  cam_sock:
     external: true
-    name: ${GIGE_SOCK_VOLUME:-gige_sock}
+    name: ${CAM_SOCK_VOLUME:-cam_sock}

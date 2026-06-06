@@ -5,7 +5,7 @@
 # stage keeps only runtime deps + the staged install, NOT the meson/ninja/gcc/-dev toolchain.
 #
 # Build (from repo root):
-#   docker build -f tools/gvsp-chunk-emitter/Dockerfile -t gige-chunks .
+#   docker build -f tools/gvsp-chunk-emitter/Dockerfile -t cam-chunks .
 ARG BASE_IMAGE=ubuntu:22.04
 ARG ARAVIS_TAG=0.8.36
 

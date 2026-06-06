@@ -7,12 +7,12 @@ window only do anything if the encoder emits delta frames that are meaningfully 
 It matters most for the Jetson HW path -- whether NVENC's *lossless* mode does inter prediction (vs going
 all-intra) is firmware-dependent and has to be measured on-device, not assumed.
 
-GStreamer-only (runs in the gige-core image); no ffmpeg/ffprobe needed. Reads the per-AU
+GStreamer-only (runs in the cam-core image); no ffmpeg/ffprobe needed. Reads the per-AU
 GST_BUFFER_FLAG_DELTA_UNIT after h265parse: keyframes lack it, P/B frames carry it.
 
 Make a test recording on the Orin first (HW encoder, a long GOP, a few seconds of MOVING scene), e.g. a
 config with `recording.encoder: auto`, `bayer_tile: plain`, `keyframe_interval_s: 4`, then:
-  docker run --rm -v /data/recordings:/rec --entrypoint python3 gige-core:jp7 \
+  docker run --rm -v /data/recordings:/rec --entrypoint python3 cam-core:jp7 \
       tools/probe_temporal.py /rec/<prefix>-00000.mkv
 (static or noise-only scenes won't show a temporal win even if inter works -- use real motion.)
 """

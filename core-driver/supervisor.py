@@ -27,7 +27,7 @@ import sys
 import time
 from typing import Optional
 
-from gige_driver.config import load_config
+from cam_driver.config import load_config
 
 log = logging.getLogger("supervisor")
 
@@ -39,7 +39,7 @@ STARTUP_STAGGER_S = 2.0  # let the core bring up its endpoints before plugins at
 
 
 def _ros2_bridge_command(params: dict) -> list:
-    cmd = ["ros2", "run", "gige_ros2_bridge", "gige_ros2_bridge", "--ros-args"]
+    cmd = ["ros2", "run", "cam_ros2_bridge", "cam_ros2_bridge", "--ros-args"]
     for k, v in params.items():
         cmd += ["-p", f"{k}:={v}"]
     return cmd
@@ -177,7 +177,7 @@ class Supervisor:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Per-sensor process supervisor")
-    ap.add_argument("-c", "--config", default=os.environ.get("GIGE_CONFIG", "config/camera.yaml"))
+    ap.add_argument("-c", "--config", default=os.environ.get("CAM_CONFIG", "config/camera.yaml"))
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
     logging.basicConfig(

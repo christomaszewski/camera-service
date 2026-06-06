@@ -5,8 +5,8 @@
 # NVIDIA hardware elements. Use it to exercise capture + timestamps + sidecar + the
 # software (FFV1) recorder + the shm transport against the Aravis *fake* camera.
 #
-# Build (from repo root):  docker build -f core-driver/Dockerfile.dev -t gige-dev .
-# Iterate with live code:  docker run --rm -v "$PWD/core-driver:/app" gige-dev ...
+# Build (from repo root):  docker build -f core-driver/Dockerfile.dev -t cam-dev .
+# Iterate with live code:  docker run --rm -v "$PWD/core-driver:/app" cam-dev ...
 FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY core-driver/ /app/
-ENV GIGE_CONFIG=/app/config/fake-camera.yaml
+ENV CAM_CONFIG=/app/config/fake-camera.yaml
 
 # Default: the fake-camera smoke test (capture -> timestamp -> FFV1 record -> shm).
 CMD ["python3", "main.py", "-c", "config/fake-camera.yaml", "-v"]

@@ -14,7 +14,7 @@ The plugin transport endpoint has two implementations, picked at build() by capa
     cost, the win is cleanliness. frame_id rides in buffer.offset, the absolute capture ns
     in buffer.offset_end (an absolute-ns PTS stalls downstream flow); PTS stays relative.
   - JP6 (GStreamer 1.20, no unixfd): a `shmsink` carrying a custom 36-byte
-    `application/x-gige-frame` header (shm drops caps/PTS/meta, so we prepend our own).
+    `application/x-cam-frame` header (shm drops caps/PTS/meta, so we prepend our own).
 
 unixfd REPLACES the header endpoint where available (not both); the raw headless shm sink
 (raw_endpoint) is independent and config-gated on both platforms.
@@ -190,7 +190,7 @@ class CapturePipeline:
             from gi.repository import GstAllocators
             self._GstAllocators = GstAllocators
             self._fd_alloc = GstAllocators.FdAllocator.new()
-            self._unixfd_path = os.path.join(os.path.dirname(pe.socket_path) or "/tmp/gige", "unixfd")
+            self._unixfd_path = os.path.join(os.path.dirname(pe.socket_path) or "/tmp/cam", "unixfd")
             self._ensure_socket_dir(self._unixfd_path)
             # unixfdsink binds a fresh AF_UNIX socket and will NOT rebind over a stale one. A hard
             # restart (crash / container restart with a persistent socket volume) leaves the socket
@@ -302,7 +302,7 @@ class CapturePipeline:
             # relative. JP6 (no unixfd): the legacy shm+header endpoint.
             if self._should_publish(stamp.timestamp_ns):
                 if self.unixfd_src is not None:
-                    fd = os.memfd_create("gige", 0)
+                    fd = os.memfd_create("cam", 0)
                     os.ftruncate(fd, len(frame_bytes))
                     os.pwrite(fd, frame_bytes, 0)
                     mem = self._GstAllocators.FdAllocator.alloc(

@@ -45,7 +45,7 @@ class SidecarHeader:
     tick_frequency_hz: int            # GevTimestampTickFrequency (1e9 under PTP)
     # How recorded frames are arranged: off = the raw mosaic; plain/green_diff/rct = CFA-tiled into 4
     # quadrant sub-planes (+ optional colour transform). Anything but 'off' means playback must un-tile
-    # with gige_driver.bayer_tile.untile_cfa(..., mode=cfa_tile_mode, pattern=bayer_pattern) before demosaicing.
+    # with cam_driver.bayer_tile.untile_cfa(..., mode=cfa_tile_mode, pattern=bayer_pattern) before demosaicing.
     cfa_tile_mode: str = "off"
     pts_convention: str = "pts_ns = timestamp_ns - base_timestamp_ns"
     absolute_time: str = "absolute_ns = pts_ns + base_timestamp_ns (epoch per timestamp_source)"
@@ -53,7 +53,7 @@ class SidecarHeader:
 
 class SidecarWriter:
     def __init__(self, path_base: str):
-        # path_base e.g. /data/recordings/gige  ->  gige.csv + gige.json
+        # path_base e.g. /data/recordings/cam  ->  cam.csv + cam.json
         self._csv_path = path_base + ".csv"
         self._json_path = path_base + ".json"
         self._q: "queue.Queue[Optional[tuple]]" = queue.Queue(maxsize=20000)

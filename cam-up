@@ -1,33 +1,33 @@
 #!/usr/bin/env bash
-# gige-up [--dev|--jp6|--jp7] <sensor-config.yaml> [docker-compose subcommand + args...]
+# cam-up [--dev|--jp6|--jp7] <sensor-config.yaml> [docker-compose subcommand + args...]
 #
 # Bring up ONE GigE sensor's stack from ONE config (the single source of truth). Reads the
 # config, turns its enabled `isolation: container` plugins into compose profiles, parameterizes
 # the stack (project name, shared shm volume, per-plugin env), and runs `docker compose`.
 # It SELECTS + PARAMETERIZES — it never generates a compose file.
 #
-#   gige-up config/sensors/cam_a.yaml             # prod: auto-detects the JP6/JP7 host, host net (foreground up)
-#   gige-up --dev config/sensors/cam_a.yaml       # dev (no Jetson): gige-dev core, bridge net
-#   gige-up --jp7 config/sensors/cam_a.yaml up -d # force JetPack 7 (Orin): runc + CDI NVENC device
-#   gige-up --jp6 config/sensors/cam_a.yaml up -d # force JetPack 6: l4t base + nvidia runtime (CSV)
-#   gige-up --dev config/sensors/cam_a.yaml up -d # detached
-#   gige-up --zenohd config/sensors/cam_a.yaml up -d # also start the shared host zenoh router (ros2, standalone)
-#   gige-up --jp6 --roscore config/sensors/cam_a.yaml up -d # ros1-bridge: jp6-class core + shared roscore
-#   gige-up --dev config/sensors/cam_a.yaml down  # tear the sensor down
-#   gige-up --dev config/sensors/cam_a.yaml config  # just render the merged compose
-#   gige-up /any/host/path/cam_front.yaml up -d      # config from an arbitrary path (e.g. via `rig`)
+#   cam-up config/sensors/cam_a.yaml             # prod: auto-detects the JP6/JP7 host, host net (foreground up)
+#   cam-up --dev config/sensors/cam_a.yaml       # dev (no Jetson): cam-dev core, bridge net
+#   cam-up --jp7 config/sensors/cam_a.yaml up -d # force JetPack 7 (Orin): runc + CDI NVENC device
+#   cam-up --jp6 config/sensors/cam_a.yaml up -d # force JetPack 6: l4t base + nvidia runtime (CSV)
+#   cam-up --dev config/sensors/cam_a.yaml up -d # detached
+#   cam-up --zenohd config/sensors/cam_a.yaml up -d # also start the shared host zenoh router (ros2, standalone)
+#   cam-up --jp6 --roscore config/sensors/cam_a.yaml up -d # ros1-bridge: jp6-class core + shared roscore
+#   cam-up --dev config/sensors/cam_a.yaml down  # tear the sensor down
+#   cam-up --dev config/sensors/cam_a.yaml config  # just render the merged compose
+#   cam-up /any/host/path/cam_front.yaml up -d      # config from an arbitrary path (e.g. via `rig`)
 #
 # Multiple cameras = run it per config; each is its own compose project + shm volume + ports.
-# Another stack reads a sensor's frames by mounting its volume (gige_<name>_sock) + --ipc=host.
+# Another stack reads a sensor's frames by mounting its volume (cam_<name>_sock) + --ipc=host.
 #
 # Platform (JP6/JP7) is auto-detected per host from /etc/nv_tegra_release; override with --jp6/--jp7
-# or GIGE_PLATFORM={jp6,jp7}. It's a HOST fact (same for every sensor on the box), so rig pins it
+# or CAM_PLATFORM={jp6,jp7}. It's a HOST fact (same for every sensor on the box), so rig pins it
 # per host (env), never per sensor.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")" && pwd)"
-PYTHON="${GIGE_PYTHON:-python3}"
+PYTHON="${CAM_PYTHON:-python3}"
 
-DEV=0; ZENOHD=0; ROSCORE=0; PLATFORM="${GIGE_PLATFORM:-auto}"   # auto -> detect JP6/JP7; jp6|jp7 to pin
+DEV=0; ZENOHD=0; ROSCORE=0; PLATFORM="${CAM_PLATFORM:-auto}"   # auto -> detect JP6/JP7; jp6|jp7 to pin
 while :; do case "${1:-}" in
   --dev) DEV=1; shift;;
   --jp7) PLATFORM=jp7; shift;;   # force JetPack 7 (Orin): runc + the CDI NVENC device overlay
@@ -36,14 +36,14 @@ while :; do case "${1:-}" in
   --roscore) ROSCORE=1; shift;;  # bring up the shared host roscore first (ROS 1 / ros1-bridge; rig owns it in prod)
   *) break;;
 esac; done
-CONFIG="${1:?usage: gige-up [--dev|--jp6|--jp7] <sensor-config.yaml> [compose args...]}"; shift || true
+CONFIG="${1:?usage: cam-up [--dev|--jp6|--jp7] <sensor-config.yaml> [compose args...]}"; shift || true
 # Accept the config as given (abs / cwd-relative -- e.g. a rig-supplied vehicle path), or fall back to
 # the documented short form resolved against the in-repo config dir (config/sensors/foo.yaml lives
-# under core-driver/, which isn't the repo root) so `gige-up config/sensors/foo.yaml` works anywhere.
+# under core-driver/, which isn't the repo root) so `cam-up config/sensors/foo.yaml` works anywhere.
 if [ ! -f "$CONFIG" ] && [ -f "$REPO/core-driver/$CONFIG" ]; then
   CONFIG="$REPO/core-driver/$CONFIG"
 fi
-[ -f "$CONFIG" ] || { echo "gige-up: config not found: $CONFIG" >&2; exit 1; }
+[ -f "$CONFIG" ] || { echo "cam-up: config not found: $CONFIG" >&2; exit 1; }
 CONFIG_ABS="$(cd "$(dirname "$CONFIG")" && pwd)/$(basename "$CONFIG")"
 # Tolerate a missing sensors dir: a VENDORED launch surface (rig deploy) doesn't ship it, so this
 # cd would die under `set -e`. Empty SENSORS_DIR => every config is treated as external (correct --
@@ -51,21 +51,21 @@ CONFIG_ABS="$(cd "$(dirname "$CONFIG")" && pwd)/$(basename "$CONFIG")"
 SENSORS_DIR="$(cd "$REPO/core-driver/config/sensors" 2>/dev/null && pwd || true)"
 
 if ! docker compose version >/dev/null 2>&1; then
-  echo "gige-up: needs the Docker Compose v2 plugin ('docker compose'); 'include' needs >= 2.20" >&2
+  echo "cam-up: needs the Docker Compose v2 plugin ('docker compose'); 'include' needs >= 2.20" >&2
   exit 1
 fi
 
 # config -> env (selection + parameterization). Values are simple tokens (no spaces).
 eval "$("$PYTHON" "$REPO/tools/sensor_env.py" "$CONFIG" | sed 's/^/export /')"
-export GIGE_CONFIG="config/sensors/$(basename "$CONFIG")"   # in-container path (config dir is mounted)
-export GIGE_NETWORK="${GIGE_NETWORK:-host}"
-[ "$DEV" = 1 ] && export GIGE_NETWORK=bridge
+export CAM_CONFIG="config/sensors/$(basename "$CONFIG")"   # in-container path (config dir is mounted)
+export CAM_NETWORK="${CAM_NETWORK:-host}"
+[ "$DEV" = 1 ] && export CAM_NETWORK=bridge
 # ROS 2 middleware: rmw_zenoh_cpp is the default across the stack (discovers via a shared host
 # `rmw_zenohd` router; see --zenohd / tools/zenohd.sh). FastDDS stays selectable via RMW_IMPLEMENTATION.
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
 
 # shm transport = a stable EXTERNAL volume, so sibling and other-stack containers can attach
-docker volume create "$GIGE_SOCK_VOLUME" >/dev/null
+docker volume create "$CAM_SOCK_VOLUME" >/dev/null
 
 # Resolve auto -> jp6/jp7 from the L4T release line (R36 = JP6; R38+ = JP7). Skipped under --dev
 # (non-Jetson host); a missing release file falls back to jp6 (the conservative l4t/nvidia path).
@@ -74,48 +74,48 @@ if [ "$DEV" = 0 ] && [ "$PLATFORM" = auto ]; then
   if [ "${REL:-0}" -ge 38 ] 2>/dev/null; then PLATFORM=jp7; else PLATFORM=jp6; fi
 fi
 # Dev / unresolved -> the conservative shm+header transport. Export the resolved platform so the
-# ros2-bridge picks the matching consumer (GigeUnixfdBridge on jp7, GigeHeaderBridge otherwise) -- the
+# ros2-bridge picks the matching consumer (CamUnixfdBridge on jp7, CamHeaderBridge otherwise) -- the
 # core selects its transport the same way (unixfd exactly when GStreamer >= 1.24 / jp7).
 [ "$PLATFORM" = auto ] && PLATFORM=jp6
-export GIGE_PLATFORM="$PLATFORM"
+export CAM_PLATFORM="$PLATFORM"
 
 FILES=(-f "$REPO/docker-compose.yml")
 [ "$DEV" = 1 ] && FILES+=(-f "$REPO/docker-compose.dev.yml")
 # One host fact drives both axes. JP7: the runc + CDI-device overlay, and default the build base to
 # 24.04. JP6: the base compose's nvidia runtime + l4t base (its existing defaults). The image TAG
-# stays ${GIGE_CORE_IMAGE:-gige-core}; set GIGE_CORE_IMAGE to a registry tag for pull-based deploys.
+# stays ${CAM_CORE_IMAGE:-cam-core}; set CAM_CORE_IMAGE to a registry tag for pull-based deploys.
 if [ "$DEV" = 0 ] && [ "$PLATFORM" = jp7 ]; then
   FILES+=(-f "$REPO/docker-compose.jp7.yml")
-  export GIGE_CORE_BASE="${GIGE_CORE_BASE:-ubuntu:24.04}"
+  export CAM_CORE_BASE="${CAM_CORE_BASE:-ubuntu:24.04}"
 fi
-# Registry deploy (no per-vehicle build): GIGE_REGISTRY points every image at <registry>/<name>:<tag>,
+# Registry deploy (no per-vehicle build): CAM_REGISTRY points every image at <registry>/<name>:<tag>,
 # tag following the detected platform (matches tools/build-images.sh) so one var pulls the whole stack.
-# Per-image vars still override individually. Then `gige-up <cfg> pull` + `up -d` runs the pulled images.
-# rig injects RIG_IMAGE_REGISTRY fleet-wide; honor it here so gige's PLATFORM-TAGGED refs (gige-core:jp7)
-# come out right -- the raw ${RIG_IMAGE_REGISTRY}/gige-core prefix in the composes would resolve :latest.
-GIGE_REGISTRY="${GIGE_REGISTRY:-${RIG_IMAGE_REGISTRY:-}}"
-if [ "$DEV" = 0 ] && [ -n "${GIGE_REGISTRY:-}" ]; then
-  IMG_TAG="${GIGE_IMAGE_TAG:-$PLATFORM}"
-  export GIGE_CORE_IMAGE="${GIGE_CORE_IMAGE:-$GIGE_REGISTRY/gige-core:$IMG_TAG}"
-  export GIGE_ROS2_IMAGE="${GIGE_ROS2_IMAGE:-$GIGE_REGISTRY/ros2-bridge:$IMG_TAG}"
-  export GIGE_ROS1_IMAGE="${GIGE_ROS1_IMAGE:-$GIGE_REGISTRY/ros1-bridge:$IMG_TAG}"   # Noetic; ros1-bridge is jp6-class
-  export GIGE_WEBRTC_IMAGE="${GIGE_WEBRTC_IMAGE:-$GIGE_REGISTRY/webrtc-bridge:$IMG_TAG}"
+# Per-image vars still override individually. Then `cam-up <cfg> pull` + `up -d` runs the pulled images.
+# rig injects RIG_IMAGE_REGISTRY fleet-wide; honor it here so cam's PLATFORM-TAGGED refs (cam-core:jp7)
+# come out right -- the raw ${RIG_IMAGE_REGISTRY}/cam-core prefix in the composes would resolve :latest.
+CAM_REGISTRY="${CAM_REGISTRY:-${RIG_IMAGE_REGISTRY:-}}"
+if [ "$DEV" = 0 ] && [ -n "${CAM_REGISTRY:-}" ]; then
+  IMG_TAG="${CAM_IMAGE_TAG:-$PLATFORM}"
+  export CAM_CORE_IMAGE="${CAM_CORE_IMAGE:-$CAM_REGISTRY/cam-core:$IMG_TAG}"
+  export CAM_ROS2_IMAGE="${CAM_ROS2_IMAGE:-$CAM_REGISTRY/ros2-bridge:$IMG_TAG}"
+  export CAM_ROS1_IMAGE="${CAM_ROS1_IMAGE:-$CAM_REGISTRY/ros1-bridge:$IMG_TAG}"   # Noetic; ros1-bridge is jp6-class
+  export CAM_WEBRTC_IMAGE="${CAM_WEBRTC_IMAGE:-$CAM_REGISTRY/webrtc-bridge:$IMG_TAG}"
 fi
 # --zenohd: ensure the single shared host zenoh router is up before the stack (standalone convenience;
 # rig runs it per host in production). Idempotent + one-per-host; reuses the resolved ros2-bridge image.
-if [ "$ZENOHD" = 1 ]; then GIGE_ROS2_IMAGE="${GIGE_ROS2_IMAGE:-ros2-bridge}" "$REPO/tools/zenohd.sh" up; fi
+if [ "$ZENOHD" = 1 ]; then CAM_ROS2_IMAGE="${CAM_ROS2_IMAGE:-ros2-bridge}" "$REPO/tools/zenohd.sh" up; fi
 # --roscore: same, for the ROS 1 master (ros1-bridge consumers; mirrors --zenohd). One per host, idempotent.
-if [ "$ROSCORE" = 1 ]; then GIGE_ROS1_IMAGE="${GIGE_ROS1_IMAGE:-ros1-bridge}" "$REPO/tools/roscore.sh" up; fi
+if [ "$ROSCORE" = 1 ]; then CAM_ROS1_IMAGE="${CAM_ROS1_IMAGE:-ros1-bridge}" "$REPO/tools/roscore.sh" up; fi
 # Config from an arbitrary host path (e.g. a vehicle-level config managed by `rig`): bind-mount
 # that single file into the container so the core/supervisor loads it. In-repo configs (under
 # core-driver/config/sensors/) already live in the mounted config dir, so no overlay is needed.
 if [ "$(dirname "$CONFIG_ABS")" != "$SENSORS_DIR" ]; then
-  export GIGE_CONFIG_HOST="$CONFIG_ABS"
-  export GIGE_CONFIG="/run/gige-sensor.yaml"   # mount target OUTSIDE the read-only /app/config mount
+  export CAM_CONFIG_HOST="$CONFIG_ABS"
+  export CAM_CONFIG="/run/cam-sensor.yaml"   # mount target OUTSIDE the read-only /app/config mount
   FILES+=(-f "$REPO/docker-compose.external-config.yml")
 fi
 
 ARGS=("$@"); [ ${#ARGS[@]} -eq 0 ] && ARGS=(up)
 PLAT_LABEL="$([ "$DEV" = 1 ] && echo dev || echo "$PLATFORM")"
-echo "gige-up: project=$COMPOSE_PROJECT_NAME platform=$PLAT_LABEL${GIGE_REGISTRY:+ registry=$GIGE_REGISTRY} profiles=[${COMPOSE_PROFILES:-<none>}] sock=$GIGE_SOCK_VOLUME net=$GIGE_NETWORK rmw=$RMW_IMPLEMENTATION config=$GIGE_CONFIG${GIGE_CONFIG_HOST:+ (external: $GIGE_CONFIG_HOST)}" >&2
+echo "cam-up: project=$COMPOSE_PROJECT_NAME platform=$PLAT_LABEL${CAM_REGISTRY:+ registry=$CAM_REGISTRY} profiles=[${COMPOSE_PROFILES:-<none>}] sock=$CAM_SOCK_VOLUME net=$CAM_NETWORK rmw=$RMW_IMPLEMENTATION config=$CAM_CONFIG${CAM_CONFIG_HOST:+ (external: $CAM_CONFIG_HOST)}" >&2
 exec docker compose "${FILES[@]}" "${ARGS[@]}"

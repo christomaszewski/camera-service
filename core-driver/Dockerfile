@@ -2,7 +2,7 @@
 # install, NOT the build toolchain (meson/cmake/-dev/git). A builder stage compiles Aravis 0.8.x
 # (>= 0.8.32, for FLIR extended-chunk payloads) from source; the runtime stage copies just the result.
 #
-# BASE_IMAGE (build-arg), matched to the host platform by gige-up:
+# BASE_IMAGE (build-arg), matched to the host platform by cam-up:
 #   JP6 -> nvcr.io/nvidia/l4t-base:r36.2.0 (slim L4T base, NOT the ~14 GB l4t-jetpack -- we use no CUDA
 #                                          SDK. r36.2.0 is the last published l4t-base tag; fine for any
 #                                          r36.x host since nvv4l2* are CSV-injected from the host.)
@@ -58,7 +58,7 @@ WORKDIR /app
 # Only Python dep is PyYAML (apt python3-yaml above); gi/GStreamer/Aravis are system bindings.
 COPY core-driver/ /app/
 
-ENV GIGE_CONFIG=/app/config/camera.yaml
+ENV CAM_CONFIG=/app/config/camera.yaml
 # Sensor container: the supervisor spawns the core + any enabled in-image (process) plugins. ENTRYPOINT
 # is python3, so run the core alone with `main.py -c ...`, and non-python tools need `--entrypoint`.
 ENTRYPOINT ["python3"]

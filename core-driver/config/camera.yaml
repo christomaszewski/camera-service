@@ -26,7 +26,7 @@ recording:
   enabled: true
   encoder: auto                # auto | hw-hevc-lossless | ffv1 | x265-lossless
   output_dir: /data/recordings
-  name_prefix: gige
+  name_prefix: cam
   segment_seconds: 60
   bayer_pattern: null          # set when recording raw Bayer (e.g. rggb) for post-debayer
 
@@ -35,15 +35,15 @@ preview:
   sink: "fakesink sync=false"  # on a display: "nv3dsink" (Jetson) or "autovideosink"
 
 transport:
-  # `application/x-gige-frame` endpoint (36-byte header + frame) for our plugins:
+  # `application/x-cam-frame` endpoint (36-byte header + frame) for our plugins:
   plugin_endpoint:
     enabled: true
-    socket_path: /tmp/gige/frames
+    socket_path: /tmp/cam/frames
     max_rate_hz: 0             # 0 = every frame; e.g. 10 caps publishing at 10 Hz
   # optional clean `video/x-raw` shm for generic same-host tools (no metadata):
   raw_endpoint:
     enabled: false
-    socket_path: /tmp/gige/raw
+    socket_path: /tmp/cam/raw
 
 plugins: []                   # IN-IMAGE plugins the supervisor spawns as separate processes.
 # The ros2-bridge is heavy (ROS2/DDS) and runs as a SIBLING CONTAINER (see docker-compose.yml),

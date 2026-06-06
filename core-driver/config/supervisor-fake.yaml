@@ -16,9 +16,9 @@ recording:
 transport:
   plugin_endpoint:
     enabled: true
-    socket_path: /tmp/gige/frames
+    socket_path: /tmp/cam/frames
 
 plugins:
   - name: probe
     enabled: true
-    command: ["python3", "tools/shm_probe.py", "--socket", "/tmp/gige/frames", "--count", "1000000", "--timeout", "30"]
+    command: ["python3", "tools/shm_probe.py", "--socket", "/tmp/cam/frames", "--count", "1000000", "--timeout", "30"]

@@ -5,13 +5,13 @@
 # software FFV1 recording -> shm transport (header round-trip via shm_probe) ->
 # clean EOS shutdown -> mkv decode check.
 #
-# Prereq:  docker build -f core-driver/Dockerfile.dev -t gige-dev .
+# Prereq:  docker build -f core-driver/Dockerfile.dev -t cam-dev .
 # Run from the repo root:  ./core-driver/tools/dev_test.sh
 set -euo pipefail
 
-docker run --rm -v "$PWD/core-driver:/app" gige-dev bash -c '
+docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
   set -e
-  mkdir -p /data/recordings /tmp/gige
+  mkdir -p /data/recordings /tmp/cam
   echo "=== unit tests ==="
   python3 tests/test_transport.py
   python3 tests/test_config.py
@@ -21,7 +21,7 @@ docker run --rm -v "$PWD/core-driver:/app" gige-dev bash -c '
   python3 main.py -c config/fake-camera.yaml >/tmp/core.log 2>&1 &
   CORE=$!
   sleep 5
-  python3 tools/shm_probe.py --socket /tmp/gige/frames --count 5 --timeout 5
+  python3 tools/shm_probe.py --socket /tmp/cam/frames --count 5 --timeout 5
   kill -INT "$CORE"; wait "$CORE"; echo "core exit: $?"
 
   echo "=== outputs ==="

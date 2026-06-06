@@ -32,7 +32,7 @@ Cross-container and cross-GStreamer-version (1.20↔1.24) shm both work.
   Random-noise frames by default; `roundtrip_test.sh <video>` round-trips a real decoded file
 - `plugins/webrtc-bridge/tools/webrtc_test.sh` — WebRTC egress: raw shm → `webrtcsink` → signalling →
   `webrtcsrc` decode, frames counted (headless, no browser)
-- `tools/orchestration_test.sh` — config-driven multi-sensor deploy: `gige-up` profile selection, two
+- `tools/orchestration_test.sh` — config-driven multi-sensor deploy: `cam-up` profile selection, two
   cameras side by side as isolated projects, cross-stack shm read (no Jetson, no camera)
 - `tools/gvsp-chunk-emitter/reconnect_test.sh` — camera reconnect/backoff: kill the GVSP emitter
   mid-stream + restart it; assert the core detects, backs off, reconnects, resumes, stays alive, and
@@ -55,7 +55,7 @@ Cross-container and cross-GStreamer-version (1.20↔1.24) shm both work.
 
 1. Read [DESIGN.md](DESIGN.md) (architecture + decisions) and this file.
 2. Build + run the test suites above to confirm the current state is green (`docker build` the four
-   images: `gige-dev`, `ros2-bridge`, `gige-chunks`, `webrtc-bridge`, then the `*_test.sh` scripts).
+   images: `cam-dev`, `ros2-bridge`, `cam-chunks`, `webrtc-bridge`, then the `*_test.sh` scripts).
 3. Recalled memory (this machine's Claude) holds the same facts in condensed form; the in-repo docs
    are canonical and shareable.
 
@@ -77,7 +77,7 @@ Cross-container and cross-GStreamer-version (1.20↔1.24) shm both work.
   detection → backoff reconnect in its own thread while the pipeline stays PLAYING (recording not
   finalized, consumers keep shm). Release the old stream's socket before reopen; monotonic-PTS guard
   absorbs a clock reset (true ts stays in the CSV).
-- Deployment = one **sensor config** per camera + **`gige-up`** (Compose `include` + profiles); plugins
+- Deployment = one **sensor config** per camera + **`cam-up`** (Compose `include` + profiles); plugins
   split by `isolation` (process → supervisor, container → compose profile); multi-camera = multiple
   Compose projects; shm shared as an external named volume + `ipc:host` (not pod-scoped). No generated
   compose. Podman/pods rejected (would wall off the shm). `service:` tag reserved for a future fleet launcher.

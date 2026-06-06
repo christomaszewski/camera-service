@@ -1,29 +1,29 @@
-// GigeHeaderBridge (JP6 / GStreamer 1.20): consume the core's `application/x-gige-frame` shm endpoint
+// CamHeaderBridge (JP6 / GStreamer 1.20): consume the core's `application/x-cam-frame` shm endpoint
 // and republish each frame as sensor_msgs/Image, with header.stamp from the per-frame hardware (PTP)
 // timestamp carried in the 36-byte header. This is the legacy transport: shm drops caps/PTS/meta, so
-// the core prepends a header. (JP7 uses the header-free unixfd transport -- see gige_unixfd_bridge.cpp.)
+// the core prepends a header. (JP7 uses the header-free unixfd transport -- see cam_unixfd_bridge.cpp.)
 //
 // Color on JP6: this component always publishes the mosaic labeled bayer_* (option A). When debayer is
 // requested the launch file composes image_proc::DebayerNode into the same container (intra-process,
 // zero-copy) -- so there is no in-process demosaic here anymore.
 //
-// The FrameHeader below MUST match gige_driver/transport.py (struct "<4sHHQQHHIBBH", 36 bytes, LE).
+// The FrameHeader below MUST match cam_driver/transport.py (struct "<4sHHQQHHIBBH", 36 bytes, LE).
 // Jetson (arm64) and x86 are both little-endian, so a packed struct maps the wire bytes directly.
 #include <cstring>
 
 #include <rclcpp_components/register_node_macro.hpp>
 
-#include "gige_bridge_base.hpp"
+#include "cam_bridge_base.hpp"
 
-namespace gige_ros2_bridge {
+namespace cam_ros2_bridge {
 namespace {
 
-constexpr char kMagic[4] = {'G', 'I', 'G', 'E'};
+constexpr char kMagic[4] = {'C', 'A', 'M', 'F'};
 constexpr uint16_t kVersion = 1;
 
 #pragma pack(push, 1)
 struct FrameHeader {
-  char     magic[4];     // "GIGE"
+  char     magic[4];     // "CAMF"
   uint16_t version;
   uint16_t header_len;   // offset to pixel data
   uint64_t timestamp_ns; // absolute capture time (ns); PTP epoch when locked
@@ -55,17 +55,17 @@ bool pixfmt_info(uint32_t code, PixInfo& out) {
 
 }  // namespace
 
-class GigeHeaderBridge : public GigeBridgeBase {
+class CamHeaderBridge : public CamBridgeBase {
  public:
-  explicit GigeHeaderBridge(const rclcpp::NodeOptions& options)
-      : GigeBridgeBase("gige_ros2_bridge", options, /*default_socket=*/"/tmp/gige/frames") {
+  explicit CamHeaderBridge(const rclcpp::NodeOptions& options)
+      : CamBridgeBase("cam_ros2_bridge", options, /*default_socket=*/"/tmp/cam/frames") {
     start_pipeline();
   }
 
  protected:
   std::string pipeline_desc() const override {
     return "shmsrc socket-path=" + socket_path_ + " is-live=true ! "
-           "application/x-gige-frame ! "
+           "application/x-cam-frame ! "
            "appsink name=sink emit-signals=true max-buffers=4 drop=true sync=false";
   }
 
@@ -89,7 +89,7 @@ class GigeHeaderBridge : public GigeBridgeBase {
     out.size = map.size - hdr.header_len;
     out.width = hdr.width;
     out.height = hdr.height;
-    // A bayer camera is labeled by the GIGE_ROS_ENCODING hint (the header only knows GRAY8); mono falls
+    // A bayer camera is labeled by the CAM_ROS_ENCODING hint (the header only knows GRAY8); mono falls
     // back to the header's pixfmt. image_proc (composed by the launch) does any debayering.
     out.encoding = (!encoding_.empty() && pix.bytes_per_px == 1) ? encoding_ : pix.encoding;
     out.big_endian = pix.big_endian;
@@ -99,6 +99,6 @@ class GigeHeaderBridge : public GigeBridgeBase {
   }
 };
 
-}  // namespace gige_ros2_bridge
+}  // namespace cam_ros2_bridge
 
-RCLCPP_COMPONENTS_REGISTER_NODE(gige_ros2_bridge::GigeHeaderBridge)
+RCLCPP_COMPONENTS_REGISTER_NODE(cam_ros2_bridge::CamHeaderBridge)

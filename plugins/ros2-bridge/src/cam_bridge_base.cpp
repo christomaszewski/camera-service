@@ -1,9 +1,9 @@
-#include "gige_bridge_base.hpp"
+#include "cam_bridge_base.hpp"
 
 #include <cstdlib>
 #include <stdexcept>
 
-namespace gige_ros2_bridge {
+namespace cam_ros2_bridge {
 
 int bytes_per_pixel(const std::string& enc) {
   if (enc == "rgb8" || enc == "bgr8") return 3;
@@ -22,7 +22,7 @@ const char* env_or(const char* key, const char* def) {
   return (v && *v) ? v : def;
 }
 
-GigeBridgeBase::GigeBridgeBase(const std::string& node_name, const rclcpp::NodeOptions& options,
+CamBridgeBase::CamBridgeBase(const std::string& node_name, const rclcpp::NodeOptions& options,
                                const std::string& default_socket_path)
     : rclcpp::Node(node_name, options) {
   // As a composable component there is no main() to gst_init() for us (component_container_mt knows
@@ -32,22 +32,22 @@ GigeBridgeBase::GigeBridgeBase(const std::string& node_name, const rclcpp::NodeO
   socket_path_ = declare_parameter<std::string>("socket_path", default_socket_path);
   topic_ = declare_parameter<std::string>("topic", "image_raw");
   frame_id_ = declare_parameter<std::string>("frame_id", "camera");
-  encoding_ = declare_parameter<std::string>("encoding", env_or("GIGE_ROS_ENCODING", ""));
-  debayer_ = declare_parameter<bool>("debayer", std::string(env_or("GIGE_DEBAYER", "false")) == "true");
+  encoding_ = declare_parameter<std::string>("encoding", env_or("CAM_ROS_ENCODING", ""));
+  debayer_ = declare_parameter<bool>("debayer", std::string(env_or("CAM_DEBAYER", "false")) == "true");
 
   // image_transport gives the raw topic + a lazy `<topic>/compressed` (JPEG/PNG via
   // compressed_image_transport) that only costs CPU when something subscribes.
   pub_ = image_transport::create_publisher(this, topic_, rclcpp::SensorDataQoS().get_rmw_qos_profile());
 }
 
-GigeBridgeBase::~GigeBridgeBase() {
+CamBridgeBase::~CamBridgeBase() {
   if (pipeline_) {
     gst_element_set_state(pipeline_, GST_STATE_NULL);
     gst_object_unref(pipeline_);
   }
 }
 
-void GigeBridgeBase::start_pipeline() {
+void CamBridgeBase::start_pipeline() {
   const std::string desc = pipeline_desc();
   RCLCPP_INFO(get_logger(), "pipeline: %s", desc.c_str());
   GError* err = nullptr;
@@ -59,18 +59,18 @@ void GigeBridgeBase::start_pipeline() {
   }
   GstElement* sink = gst_bin_get_by_name(GST_BIN(pipeline_), "sink");
   if (!sink) throw std::runtime_error("pipeline has no `appsink name=sink`");
-  g_signal_connect(sink, "new-sample", G_CALLBACK(&GigeBridgeBase::on_new_sample_static), this);
+  g_signal_connect(sink, "new-sample", G_CALLBACK(&CamBridgeBase::on_new_sample_static), this);
   gst_object_unref(sink);
   gst_element_set_state(pipeline_, GST_STATE_PLAYING);
   RCLCPP_INFO(get_logger(), "consuming %s -> publishing '%s' (frame_id=%s, debayer=%s)",
               socket_path_.c_str(), topic_.c_str(), frame_id_.c_str(), debayer_ ? "true" : "false");
 }
 
-GstFlowReturn GigeBridgeBase::on_new_sample_static(GstAppSink* sink, gpointer self) {
-  return static_cast<GigeBridgeBase*>(self)->on_new_sample(sink);
+GstFlowReturn CamBridgeBase::on_new_sample_static(GstAppSink* sink, gpointer self) {
+  return static_cast<CamBridgeBase*>(self)->on_new_sample(sink);
 }
 
-GstFlowReturn GigeBridgeBase::on_new_sample(GstAppSink* sink) {
+GstFlowReturn CamBridgeBase::on_new_sample(GstAppSink* sink) {
   GstSample* sample = gst_app_sink_pull_sample(sink);
   if (!sample) return GST_FLOW_OK;
   GstBuffer* buf = gst_sample_get_buffer(sample);
@@ -86,7 +86,7 @@ GstFlowReturn GigeBridgeBase::on_new_sample(GstAppSink* sink) {
   return GST_FLOW_OK;
 }
 
-void GigeBridgeBase::publish(const FrameMeta& m) {
+void CamBridgeBase::publish(const FrameMeta& m) {
   const int bpp = bytes_per_pixel(m.encoding);
   const size_t step = static_cast<size_t>(m.width) * bpp;
   const size_t need = step * m.height;
@@ -112,4 +112,4 @@ void GigeBridgeBase::publish(const FrameMeta& m) {
   pub_.publish(msg);   // raw on <topic>; compressed_image_transport adds <topic>/compressed on demand
 }
 
-}  // namespace gige_ros2_bridge
+}  // namespace cam_ros2_bridge

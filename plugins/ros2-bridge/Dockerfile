@@ -17,9 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ros-${ROS_DISTRO}-image-transport ros-${ROS_DISTRO}-rclcpp-components \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /ws
-COPY plugins/ros2-bridge /ws/src/gige_ros2_bridge
+COPY plugins/ros2-bridge /ws/src/cam_ros2_bridge
 RUN . /opt/ros/${ROS_DISTRO}/setup.sh && \
-    colcon build --packages-select gige_ros2_bridge --cmake-args -DCMAKE_BUILD_TYPE=Release
+    colcon build --packages-select cam_ros2_bridge --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 # ---- runtime: ros-base + runtime GStreamer/ROS + the built component lib ----
 FROM ros:${ROS_DISTRO}-ros-base
@@ -44,5 +44,5 @@ COPY plugins/ros2-bridge/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
-# Default to the env-driven launch composition (gige-up exports GIGE_PLATFORM/TRANSPORT/INSTANCE/...).
-CMD ["ros2", "launch", "gige_ros2_bridge", "bridge.launch.py"]
+# Default to the env-driven launch composition (cam-up exports CAM_PLATFORM/TRANSPORT/INSTANCE/...).
+CMD ["ros2", "launch", "cam_ros2_bridge", "bridge.launch.py"]

@@ -1,12 +1,12 @@
-// gige_ros1_bridge: ROS 1 (Noetic) mirror of the ros2-bridge's GigeHeaderBridge. Consumes the core's
-// `application/x-gige-frame` shm endpoint -- the JP6 / GStreamer-<1.24 transport, since ROS 1 ships
+// cam_ros1_bridge: ROS 1 (Noetic) mirror of the ros2-bridge's CamHeaderBridge. Consumes the core's
+// `application/x-cam-frame` shm endpoint -- the JP6 / GStreamer-<1.24 transport, since ROS 1 ships
 // GStreamer 1.16 which has no unixfd -- and republishes each frame as sensor_msgs/Image, with
 // header.stamp from the per-frame hardware (PTP) timestamp carried in the 36-byte header.
 //
 // Color: publishes the mosaic labeled bayer_* (option A); for color, run a ROS 1 image_proc/debayer
 // nodelet (the launch file does this when params/debayer is set). A mono camera publishes mono8/16.
 //
-// The FrameHeader below MUST match gige_driver/transport.py (struct "<4sHHQQHHIBBH", 36 bytes, LE) --
+// The FrameHeader below MUST match cam_driver/transport.py (struct "<4sHHQQHHIBBH", 36 bytes, LE) --
 // identical to the ros2 bridge's. arm64 + x86 are little-endian, so the packed struct maps wire bytes.
 #include <cstdint>
 #include <cstdlib>
@@ -24,12 +24,12 @@
 
 namespace {
 
-constexpr char kMagic[4] = {'G', 'I', 'G', 'E'};
+constexpr char kMagic[4] = {'C', 'A', 'M', 'F'};
 constexpr uint16_t kVersion = 1;
 
 #pragma pack(push, 1)
 struct FrameHeader {
-  char     magic[4];     // "GIGE"
+  char     magic[4];     // "CAMF"
   uint16_t version;
   uint16_t header_len;   // offset to pixel data
   uint64_t timestamp_ns; // absolute capture time (ns); PTP epoch when locked
@@ -66,13 +66,13 @@ const char* env_or(const char* key, const char* def) {
 
 }  // namespace
 
-class GigeRos1Bridge {
+class CamRos1Bridge {
  public:
-  GigeRos1Bridge(ros::NodeHandle& nh, ros::NodeHandle& pnh) {
-    pnh.param<std::string>("socket_path", socket_path_, "/tmp/gige/frames");
+  CamRos1Bridge(ros::NodeHandle& nh, ros::NodeHandle& pnh) {
+    pnh.param<std::string>("socket_path", socket_path_, "/tmp/cam/frames");
     pnh.param<std::string>("topic", topic_, "image_raw");
     pnh.param<std::string>("frame_id", frame_id_, "camera");
-    pnh.param<std::string>("encoding", encoding_, env_or("GIGE_ROS_ENCODING", ""));  // bayer_*; "" = mono
+    pnh.param<std::string>("encoding", encoding_, env_or("CAM_ROS_ENCODING", ""));  // bayer_*; "" = mono
     it_.reset(new image_transport::ImageTransport(nh));
     // image_transport gives the raw topic + a lazy <topic>/compressed (JPEG/PNG via
     // compressed_image_transport) that only costs CPU when something subscribes.
@@ -80,7 +80,7 @@ class GigeRos1Bridge {
     start_pipeline();
   }
 
-  ~GigeRos1Bridge() {
+  ~CamRos1Bridge() {
     if (pipeline_) {
       gst_element_set_state(pipeline_, GST_STATE_NULL);
       gst_object_unref(pipeline_);
@@ -91,7 +91,7 @@ class GigeRos1Bridge {
   void start_pipeline() {
     const std::string desc =
         "shmsrc socket-path=" + socket_path_ + " is-live=true ! "
-        "application/x-gige-frame ! "
+        "application/x-cam-frame ! "
         "appsink name=sink emit-signals=true max-buffers=4 drop=true sync=false";
     GError* err = nullptr;
     pipeline_ = gst_parse_launch(desc.c_str(), &err);
@@ -101,7 +101,7 @@ class GigeRos1Bridge {
       throw std::runtime_error("failed to build pipeline: " + m);
     }
     GstElement* sink = gst_bin_get_by_name(GST_BIN(pipeline_), "sink");
-    g_signal_connect(sink, "new-sample", G_CALLBACK(&GigeRos1Bridge::on_sample_static), this);
+    g_signal_connect(sink, "new-sample", G_CALLBACK(&CamRos1Bridge::on_sample_static), this);
     gst_object_unref(sink);
     gst_element_set_state(pipeline_, GST_STATE_PLAYING);
     ROS_INFO("consuming %s -> publishing '%s' (frame_id=%s)",
@@ -109,7 +109,7 @@ class GigeRos1Bridge {
   }
 
   static GstFlowReturn on_sample_static(GstAppSink* sink, gpointer self) {
-    return static_cast<GigeRos1Bridge*>(self)->on_sample(sink);
+    return static_cast<CamRos1Bridge*>(self)->on_sample(sink);
   }
 
   GstFlowReturn on_sample(GstAppSink* sink) {
@@ -147,7 +147,7 @@ class GigeRos1Bridge {
       ROS_WARN_THROTTLE(1.0, "buffer too small: %zu < %zu", size, pixel_off + expected);
       return;
     }
-    // A bayer camera is labeled by the GIGE_ROS_ENCODING hint (the header only knows GRAY8); mono falls
+    // A bayer camera is labeled by the CAM_ROS_ENCODING hint (the header only knows GRAY8); mono falls
     // back to the header's pixfmt. A ROS 1 image_proc/debayer (run by the launch) does any debayering.
     const std::string enc = (!encoding_.empty() && pix.bytes_per_px == 1) ? encoding_ : pix.encoding;
 
@@ -171,10 +171,10 @@ class GigeRos1Bridge {
 
 int main(int argc, char** argv) {
   gst_init(&argc, &argv);
-  ros::init(argc, argv, "gige_ros1_bridge");
+  ros::init(argc, argv, "cam_ros1_bridge");
   ros::NodeHandle nh, pnh("~");
   try {
-    GigeRos1Bridge bridge(nh, pnh);  // GStreamer streaming thread publishes; ROS spinner keeps us alive
+    CamRos1Bridge bridge(nh, pnh);  // GStreamer streaming thread publishes; ROS spinner keeps us alive
     ros::spin();
   } catch (const std::exception& e) {
     ROS_FATAL("%s", e.what());

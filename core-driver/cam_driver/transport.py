@@ -4,7 +4,7 @@ GStreamer's shmsink/shmsrc transmit ONLY the raw buffer bytes -- PTS/DTS and all
 GstMeta are dropped across the process boundary. So we carry per-frame metadata
 (absolute capture timestamp, frame id, geometry, provenance) explicitly as a fixed
 binary header prepended to each frame's pixel bytes, under the custom caps
-`application/x-gige-frame`:
+`application/x-cam-frame`:
 
     [ 36-byte FrameHeader ][ raw pixel bytes ]
 
@@ -17,7 +17,7 @@ bridge must mirror this exact layout. Rules: little-endian; never reorder v1 fie
 bump `version` and read `header_len` for forward compatibility.
 
 Layout (little-endian, fixed 36 bytes for v1 -- struct "<4sHHQQHHIBBH"):
-    magic        4s   b"GIGE"
+    magic        4s   b"CAMF"
     version      u16  = 1
     header_len   u16  = 36  (offset to pixel data; lets consumers skip unknown v2+ fields)
     timestamp_ns u64  absolute capture time (ns); PTP epoch when locked
@@ -34,8 +34,8 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
-CAPS = "application/x-gige-frame"
-MAGIC = b"GIGE"
+CAPS = "application/x-cam-frame"
+MAGIC = b"CAMF"
 VERSION = 1
 _FORMAT = "<4sHHQQHHIBBH"
 HEADER_SIZE = struct.calcsize(_FORMAT)  # 36
@@ -45,7 +45,7 @@ _U64 = 0xFFFFFFFFFFFFFFFF
 _CODE_TO_GST = {1: "GRAY8", 2: "GRAY16_LE", 3: "GRAY16_BE"}
 _GST_TO_CODE = {v: k for k, v in _CODE_TO_GST.items()}
 
-# ts_source codes mirror gige_driver.timestamps.TimestampSource values
+# ts_source codes mirror cam_driver.timestamps.TimestampSource values
 TS_SOURCE_CODE = {"ptp_chunk": 0, "camera": 1, "system": 2}
 TS_SOURCE_NAME = {v: k for k, v in TS_SOURCE_CODE.items()}
 

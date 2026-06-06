@@ -7,7 +7,7 @@ is runtime, not build-time: `pipeline.build()` selects `unixfdsink` when `Gst.El
 GStreamer 1.20), which keeps the shm+header transport. So one core codebase, the right transport per host.
 
 ## Why
-Today the plugin transport is `shmsink`/`shmsrc` carrying a custom 36-byte `application/x-gige-frame`
+Today the plugin transport is `shmsink`/`shmsrc` carrying a custom 36-byte `application/x-cam-frame`
 header (shm drops caps + PTS + GstMeta, so we prepend our own). That header is the root of several
 hacks. `unixfd` (gst-plugins-bad, 1.24) passes buffers over a Unix socket via SCM_RIGHTS **with native
 caps + serialized GstMeta**, so the header disappears.
@@ -41,7 +41,7 @@ endpoint a non-GStreamer / `mmap` consumer reads (it never carried the header an
       `video/x-bayer,format=<rggb|grbg|gbrg|bggr>` for 8-bit Bayer, `video/x-raw,GRAY8/16` for mono — same
       bytes; the **recorder keeps its GRAY8 Y-plane trick untouched** (the unixfd branch is a separate
       appsrc, not the recorder path). A consumer reads the format off the negotiated caps -> the bridge can
-      **drop the `GIGE_ROS_ENCODING` config plumbing** (it only exists because the 36-byte header can't
+      **drop the `CAM_ROS_ENCODING` config plumbing** (it only exists because the 36-byte header can't
       carry "this is Bayer rggb"). *Validated: consumer negotiated `video/x-bayer,format=rggb` end-to-end.*
 - [x] **Timestamp + frame_id via native buffer fields:** `buffer.offset` = frame_id, `buffer.offset_end`
       = absolute capture ns (these serialize across unixfd and aren't time-interpreted, unlike PTS). PTS
@@ -52,13 +52,13 @@ endpoint a non-GStreamer / `mmap` consumer reads (it never carried the header an
 
 **Bridge (next phase — ROS2 component refactor):**
 - [ ] **Header-free bridge pipeline:** `unixfdsrc ! video/x-bayer ! [bayer2rgb] ! appsink` (vs today's
-      `shmsrc ! application/x-gige-frame ! appsink` + C++ header parse).
+      `shmsrc ! application/x-cam-frame ! appsink` + C++ header parse).
 - [ ] **Color option B becomes a real GStreamer element:** in-pipeline `bayer2rgb` (bilinear, full-res)
       replaces the interim C++ 2x2-cell `demosaic_rgb8()`. (Option A — publish `bayer_*` and let
       `image_proc` debayer — is unchanged and already full quality.)
 
 ## Validated on GStreamer 1.24 (2026-06-04, in Docker)
-**End-to-end against the real `pipeline.py`** (gige-core:jp7 image, fake camera, a `unixfdsrc` consumer in
+**End-to-end against the real `pipeline.py`** (cam-core:jp7 image, fake camera, a `unixfdsrc` consumer in
 a separate container sharing only a named socket volume):
 - ✅ Mono8: consumer negotiated `video/x-raw,format=GRAY8,512x512,25/1`; 10 frames -> clean EOS.
 - ✅ BayerRG8: consumer negotiated `video/x-bayer,format=rggb,512x512,25/1`; the camsrc/recorder path stays
@@ -70,7 +70,7 @@ a separate container sharing only a named socket volume):
 
 Mechanism findings:
 - ✅ `unixfdsink`/`unixfdsrc` exist on 1.24; **`video/x-bayer,format=rggb` caps cross intact** + data
-  flows -> the bridge reads the Bayer format off the negotiated caps (drops the `GIGE_ROS_ENCODING`
+  flows -> the bridge reads the Bayer format off the negotiated caps (drops the `CAM_ROS_ENCODING`
   config plumbing).
 - ⚠️ **Don't put the absolute timestamp in `buffer.pts`** -- a ~56-year "future" epoch-ns PTS stalls
   downstream flow even at `sync=false`. Carry it in `buffer.offset_end` (+ `offset` = frame_id); those
@@ -98,6 +98,6 @@ bandwidth prize is **`nvunixfd`** (DeepStream 8): `NvBufSurface` DMABUF across c
 GPU→GPU. Worth it only when a consumer is bandwidth-bound (4K, multiple readers). Scope separately.
 
 ## Interim (header era) — what exists today and why
-Until this lands, color uses: a config-derived `GIGE_ROS_ENCODING` (option A) + a simple C++ demosaic
+Until this lands, color uses: a config-derived `CAM_ROS_ENCODING` (option A) + a simple C++ demosaic
 (option B). Deliberately interim — both are replaced by the caps-driven, `bayer2rgb`-in-pipeline version
 above. So **don't over-invest in the C++ demosaic's quality**; it retires with this migration.

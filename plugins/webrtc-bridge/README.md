@@ -8,30 +8,30 @@ multi-viewer fan-out itself, so the pipeline just feeds it color frames.
 
 ## Transport (mirrors the ros2 bridge)
 
-The transport is selected by `GIGE_PLATFORM` (gige-up exports it), so the bridge matches whatever
-the core publishes — exactly like the ros2 bridge picking GigeUnixfdBridge vs GigeHeaderBridge:
+The transport is selected by `CAM_PLATFORM` (cam-up exports it), so the bridge matches whatever
+the core publishes — exactly like the ros2 bridge picking CamUnixfdBridge vs CamHeaderBridge:
 
 ```
-JP7  core (unixfd  /tmp/gige/unixfd) ─► unixfdsrc ──► bayer2rgb ─► videoconvert ! I420 ─► webrtcsink ─► viewers
+JP7  core (unixfd  /tmp/cam/unixfd) ─► unixfdsrc ──► bayer2rgb ─► videoconvert ! I420 ─► webrtcsink ─► viewers
        self-describing caps (geometry + Bayer format from the stream)        ▲                  ▲
-JP6  core (raw shm /tmp/gige/raw)    ─► shmsrc do-timestamp ! video/x-bayer ─┘   gst-webrtc-signalling-server (:8443)
-       caps from config (GIGE_WIDTH/HEIGHT/FORMAT + GIGE_BAYER)
+JP6  core (raw shm /tmp/cam/raw)    ─► shmsrc do-timestamp ! video/x-bayer ─┘   gst-webrtc-signalling-server (:8443)
+       caps from config (CAM_WIDTH/HEIGHT/FORMAT + CAM_BAYER)
 ```
 
-- **JP7 → unixfd.** Rides the core's `plugin_endpoint` (`/tmp/gige/unixfd`) — the **same socket the
+- **JP7 → unixfd.** Rides the core's `plugin_endpoint` (`/tmp/cam/unixfd`) — the **same socket the
   ros2 bridge uses**; `unixfdsink` broadcasts to every connected client, so both consume it at full
   rate. Caps are self-describing: geometry **and** the Bayer pattern come from the stream, so no
-  `GIGE_*` geometry is needed and no separate endpoint has to be enabled.
-- **JP6 → raw shm.** Reads the headless `raw_endpoint` (`/tmp/gige/raw`). Raw shm carries no caps, so
-  geometry comes from the sensor config and, for a CFA camera, the Bayer pattern (`GIGE_BAYER`) is
+  `CAM_*` geometry is needed and no separate endpoint has to be enabled.
+- **JP6 → raw shm.** Reads the headless `raw_endpoint` (`/tmp/cam/raw`). Raw shm carries no caps, so
+  geometry comes from the sensor config and, for a CFA camera, the Bayer pattern (`CAM_BAYER`) is
   applied as `video/x-bayer` caps. **The core must enable it** (`transport.raw_endpoint.enabled: true`).
 
 ## Color (debayer)
 
-For a **Bayer** camera (`GIGE_BAYER` set — sensor_env derives it from the camera `pixel_format`) the
+For a **Bayer** camera (`CAM_BAYER` set — sensor_env derives it from the camera `pixel_format`) the
 bridge debayers to color **in-pipeline** with `bayer2rgb`, so the browser sees RGB, not a grayscale
 mosaic. `bayer2rgb` reads the pattern from the input caps (unixfd carries it; the JP6 capsfilter sets
-it). Set `GIGE_WEBRTC_DEBAYER=false` to preview the raw mosaic instead. **Mono** cameras pass straight
+it). Set `CAM_WEBRTC_DEBAYER=false` to preview the raw mosaic instead. **Mono** cameras pass straight
 through (the encoder reads the format off caps; chroma is neutralized by the I420 conversion).
 
 ## Why a sibling container (not in-image)
@@ -46,28 +46,28 @@ exactly like the ros2-bridge.
 ```bash
 docker build -f plugins/webrtc-bridge/Dockerfile -t webrtc-bridge .       # ~15-25 min (Rust)
 # JP7 (unixfd, self-describing — no geometry needed), sharing the core's transport volume:
-docker run --rm -v gige_sock:/tmp/gige --network host \
-  -e GIGE_PLATFORM=jp7 -e GIGE_BAYER=rggb webrtc-bridge
+docker run --rm -v cam_sock:/tmp/cam --network host \
+  -e CAM_PLATFORM=jp7 -e CAM_BAYER=rggb webrtc-bridge
 # JP6 (raw shm — geometry must match the camera):
-docker run --rm --ipc=host -v gige_sock:/tmp/gige --network host \
-  -e GIGE_PLATFORM=jp6 -e GIGE_BAYER=rggb \
-  -e GIGE_WIDTH=2448 -e GIGE_HEIGHT=2048 -e GIGE_FPS=24 webrtc-bridge
+docker run --rm --ipc=host -v cam_sock:/tmp/cam --network host \
+  -e CAM_PLATFORM=jp6 -e CAM_BAYER=rggb \
+  -e CAM_WIDTH=2448 -e CAM_HEIGHT=2048 -e CAM_FPS=24 webrtc-bridge
 ```
 
-Or via the per-sensor stack: `gige-up <sensor>.yaml up -d webrtc-bridge` (gige-up exports
-`GIGE_PLATFORM` + sensor_env derives `GIGE_BAYER`/geometry from the config).
+Or via the per-sensor stack: `cam-up <sensor>.yaml up -d webrtc-bridge` (cam-up exports
+`CAM_PLATFORM` + sensor_env derives `CAM_BAYER`/geometry from the config).
 
 | Env | Default | Meaning |
 |---|---|---|
-| `GIGE_PLATFORM` | `jp6` | `jp7` → unixfd, else raw shm (gige-up sets it per host) |
-| `GIGE_TRANSPORT` | _(auto)_ | override the platform default: `unixfd` \| `shm` |
-| `GIGE_TRANSPORT_SOCKET` | `/tmp/gige/unixfd` | unixfd socket (JP7; the core's plugin_endpoint) |
-| `GIGE_SHM_SOCKET` | `/tmp/gige/raw` | raw shm socket (JP6) |
-| `GIGE_BAYER` | _(empty)_ | Bayer pattern (`rggb`/`grbg`/`gbrg`/`bggr`) → debayer to color; empty → mono |
-| `GIGE_WEBRTC_DEBAYER` | `auto` | `false` to preview the raw mosaic instead of debayering |
-| `GIGE_WIDTH` / `GIGE_HEIGHT` | `512` | **JP6 raw shm only** — must match the camera geometry |
-| `GIGE_FORMAT` | `GRAY8` | **JP6 raw shm only** — mono raw format when not debayering |
-| `GIGE_FPS` | `25` | **JP6 raw shm only** — frame rate |
+| `CAM_PLATFORM` | `jp6` | `jp7` → unixfd, else raw shm (cam-up sets it per host) |
+| `CAM_TRANSPORT` | _(auto)_ | override the platform default: `unixfd` \| `shm` |
+| `CAM_TRANSPORT_SOCKET` | `/tmp/cam/unixfd` | unixfd socket (JP7; the core's plugin_endpoint) |
+| `CAM_SHM_SOCKET` | `/tmp/cam/raw` | raw shm socket (JP6) |
+| `CAM_BAYER` | _(empty)_ | Bayer pattern (`rggb`/`grbg`/`gbrg`/`bggr`) → debayer to color; empty → mono |
+| `CAM_WEBRTC_DEBAYER` | `auto` | `false` to preview the raw mosaic instead of debayering |
+| `CAM_WIDTH` / `CAM_HEIGHT` | `512` | **JP6 raw shm only** — must match the camera geometry |
+| `CAM_FORMAT` | `GRAY8` | **JP6 raw shm only** — mono raw format when not debayering |
+| `CAM_FPS` | `25` | **JP6 raw shm only** — frame rate |
 | `VIDEO_CAPS` | _(unset)_ | e.g. `video/x-h264` to pin the codec; unset → webrtcsink picks |
 | `SIGNALLING_PORT` | `8443` | signalling server port |
 | `RUN_SIGNALLING` | `1` | run the bundled signalling server in-container |
@@ -79,7 +79,7 @@ can find it — presence + a descriptor — following the system-wide convention
 [docs/DISCOVERY.md](../../docs/DISCOVERY.md). It advertises at:
 
 ```
-fleet/<VEHICLE_ID>/media/<GIGE_INSTANCE>
+fleet/<VEHICLE_ID>/media/<CAM_INSTANCE>
 ```
 
 a **liveliness token** (presence; appears on `PLAYING`, auto-withdrawn when this process dies — no
@@ -90,21 +90,21 @@ signalling server's producers line up with discovery.
 
 The advertiser runs **inside this bridge process** (`tools/bridge_stream.py`, which now owns the
 pipeline) so the token's lifetime equals the stream's. It's **additive + best-effort**: if Zenoh is
-unreachable it logs and keeps streaming; `GIGE_ADVERTISE=0` (or `GIGE_LAUNCHER=gst-launch`) turns it off
+unreachable it logs and keeps streaming; `CAM_ADVERTISE=0` (or `CAM_LAUNCHER=gst-launch`) turns it off
 entirely. Generic half: [`tools/zenoh_advertiser.py`](tools/zenoh_advertiser.py) (no webrtc knowledge).
 
 | Env | Default | Meaning |
 |---|---|---|
-| `GIGE_ADVERTISE` | `1` | advertise over Zenoh; `0` disables (video unaffected) |
-| `GIGE_LAUNCHER` | `python` | `gst-launch` = legacy bare pipeline, no discovery |
+| `CAM_ADVERTISE` | `1` | advertise over Zenoh; `0` disables (video unaffected) |
+| `CAM_LAUNCHER` | `python` | `gst-launch` = legacy bare pipeline, no discovery |
 | `VEHICLE_ID` | _(hostname)_ | `<vehicle_id>` key segment |
-| `GIGE_INSTANCE` | `camera` | `<sensor_id>` key segment (sensor_env sets it from the config name) |
+| `CAM_INSTANCE` | `camera` | `<sensor_id>` key segment (sensor_env sets it from the config name) |
 | `ZENOH_CONNECT` | `tcp/localhost:7447` | the vehicle's local zenohd; set **empty** to scout |
-| `GIGE_PRODUCER_ID` | _(`<vehicle>-<sensor>`)_ | descriptor `producer_id` == `webrtcsink` `meta.name` |
-| `GIGE_STREAM_ROLE` | _(= sensor id)_ | human `role` label |
-| `GIGE_SIGNALLING_URL` | _(`ws://<host>:<port>`)_ | advertised signalling URL; or set `GIGE_SIGNALLING_HOST`/`_SCHEME` |
-| `GIGE_SIGNALLING_PROTOCOL` | `gstwebrtc-api` | descriptor `protocol` |
-| `GIGE_ROS_TOPIC` / `GIGE_RECORDING_GLOB` | _(unset)_ | optional descriptor cross-links (omitted if unset) |
+| `CAM_PRODUCER_ID` | _(`<vehicle>-<sensor>`)_ | descriptor `producer_id` == `webrtcsink` `meta.name` |
+| `CAM_STREAM_ROLE` | _(= sensor id)_ | human `role` label |
+| `CAM_SIGNALLING_URL` | _(`ws://<host>:<port>`)_ | advertised signalling URL; or set `CAM_SIGNALLING_HOST`/`_SCHEME` |
+| `CAM_SIGNALLING_PROTOCOL` | `gstwebrtc-api` | descriptor `protocol` |
+| `CAM_ROS_TOPIC` / `CAM_RECORDING_GLOB` | _(unset)_ | optional descriptor cross-links (omitted if unset) |
 
 ## Viewing
 
@@ -150,7 +150,7 @@ Brings up a `rmw_zenohd` router + core + bridge, and a Zenoh probe
 
 - **JP6 geometry must be configured** (raw shm has no caps). JP7/unixfd is self-describing, so this
   only applies to the JP6 path. A future JP6 option could consume the **header endpoint**
-  (`application/x-gige-frame`) and parse the 36-byte header for self-describing geometry there too.
+  (`application/x-cam-frame`) and parse the 36-byte header for self-describing geometry there too.
 - **Capture PTP timestamp.** unixfd carries the core's buffer fields (capture-ns / frame-id); a future
   version could thread them through `webrtcsink do-clock-signalling=true` + the `ntp-64` RTP header
   extension so a `webrtcsrc` consumer recovers absolute capture time (`GstReferenceTimestampMeta`).

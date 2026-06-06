@@ -7,35 +7,35 @@
 services:
   ros1-bridge:
     profiles: ["ros1-bridge"]
-    image: ${GIGE_ROS1_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}ros1-bridge}  # rig: RIG_IMAGE_REGISTRY
+    image: ${CAM_ROS1_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}ros1-bridge}  # rig: RIG_IMAGE_REGISTRY
     build:
       context: ../..
       dockerfile: plugins/ros1-bridge/Dockerfile
     init: true
-    network_mode: ${GIGE_NETWORK:-host}     # host = join the host ROS 1 graph (TCPROS + the shared roscore)
+    network_mode: ${CAM_NETWORK:-host}     # host = join the host ROS 1 graph (TCPROS + the shared roscore)
     ipc: host                               # REQUIRED: the shm transport data lives in /dev/shm
     volumes:
-      - gige_sock:/tmp/gige
+      - cam_sock:/tmp/cam
     environment:
       # ROS 1 reads the shm + 36-byte header transport (no unixfd in GStreamer 1.16) -> JP6-class core.
-      - GIGE_TRANSPORT_SOCKET=${GIGE_TRANSPORT_SOCKET:-/tmp/gige/frames}
+      - CAM_TRANSPORT_SOCKET=${CAM_TRANSPORT_SOCKET:-/tmp/cam/frames}
       # Per-sensor identity (sensor_env derives these from the config): ROS namespace, topic, frame_id.
-      - GIGE_INSTANCE=${GIGE_INSTANCE:-camera}
-      - GIGE_ROS_TOPIC=${GIGE_ROS_TOPIC:-image_raw}
-      - GIGE_FRAME_ID=${GIGE_FRAME_ID:-camera}
-      # Bayer color: GIGE_ROS_ENCODING labels a mosaic (e.g. bayer_rggb8); '' = mono. GIGE_DEBAYER=true
+      - CAM_INSTANCE=${CAM_INSTANCE:-camera}
+      - CAM_ROS_TOPIC=${CAM_ROS_TOPIC:-image_raw}
+      - CAM_FRAME_ID=${CAM_FRAME_ID:-camera}
+      # Bayer color: CAM_ROS_ENCODING labels a mosaic (e.g. bayer_rggb8); '' = mono. CAM_DEBAYER=true
       # makes the launch run a ROS 1 image_proc/debayer nodelet -> <ns>/image_color.
-      - GIGE_ROS_ENCODING=${GIGE_ROS_ENCODING:-}
-      - GIGE_DEBAYER=${GIGE_DEBAYER:-false}
-      # ROS 1 master: the shared host roscore (tools/roscore.sh / gige-up --roscore). Defaults to localhost
+      - CAM_ROS_ENCODING=${CAM_ROS_ENCODING:-}
+      - CAM_DEBAYER=${CAM_DEBAYER:-false}
+      # ROS 1 master: the shared host roscore (tools/roscore.sh / cam-up --roscore). Defaults to localhost
       # over host networking. Set ROS_IP/ROS_HOSTNAME to the host's address for off-board consumers.
       - ROS_MASTER_URI=${ROS_MASTER_URI:-http://localhost:11311}
-    command: ["roslaunch", "gige_ros1_bridge", "bridge.launch"]
+    command: ["roslaunch", "cam_ros1_bridge", "bridge.launch"]
     depends_on:
       - core-driver
     restart: unless-stopped
 
 volumes:
-  gige_sock:
+  cam_sock:
     external: true
-    name: ${GIGE_SOCK_VOLUME:-gige_sock}
+    name: ${CAM_SOCK_VOLUME:-cam_sock}

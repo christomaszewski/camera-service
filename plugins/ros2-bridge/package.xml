@@ -1,12 +1,12 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>gige_ros2_bridge</name>
+  <name>cam_ros2_bridge</name>
   <version>0.0.1</version>
-  <description>Bridges the gige-vision-service transport (JP6 shm+header / JP7 unixfd) to
+  <description>Bridges the camera-service transport (JP6 shm+header / JP7 unixfd) to
     sensor_msgs/Image as rclcpp composable components, stamping header.stamp from the per-frame
     hardware (PTP) timestamp.</description>
-  <maintainer email="maintainer@example.com">gige-vision-service</maintainer>
+  <maintainer email="maintainer@example.com">camera-service</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>

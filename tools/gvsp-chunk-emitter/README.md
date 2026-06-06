@@ -24,7 +24,7 @@ Four edits to Aravis 0.8.36, gated on a new `ChunkModeActive` register (0x140):
 ## Build & run
 
 ```bash
-docker build -f tools/gvsp-chunk-emitter/Dockerfile -t gige-chunks .   # patched Aravis + our code
+docker build -f tools/gvsp-chunk-emitter/Dockerfile -t cam-chunks .   # patched Aravis + our code
 ./tools/gvsp-chunk-emitter/gvsp_test.sh                                  # chunk extraction over GVSP
 ./tools/gvsp-chunk-emitter/roundtrip_test.sh [video]                     # round-trip vs exact bytes (noise, or a real file)
 ./tools/gvsp-chunk-emitter/reconnect_test.sh                             # camera reconnect/backoff (kill + restart emitter)

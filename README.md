@@ -1,4 +1,4 @@
-# gige-vision-service
+# camera-service
 
 A generic GigE Vision (GVSP) camera driver built on **GStreamer + Aravis**, targeting
 **NVIDIA Jetson** (AGX Orin on JetPack 6 or 7; portable to Jetson Thor). It captures
@@ -46,7 +46,7 @@ The recorder is **pluggable / capability-detecting**:
 
 ```
 core-driver/            # the producer service
-  gige_driver/          # config, camera (Aravis), timestamps, sidecar, recorder, pipeline
+  cam_driver/          # config, camera (Aravis), timestamps, sidecar, recorder, pipeline
   main.py               # entry point
   config/camera.yaml    # camera + recording + preview settings
   Dockerfile
@@ -56,11 +56,11 @@ docker-compose.yml
 
 ## Outputs
 
-For a recording named `gige`, the core writes:
-- `gige-00000.mkv`, `gige-00001.mkv`, ... — bounded, lossless video segments (Matroska).
-- `gige.csv` — one row per frame: `frame_id, pts_ns, timestamp_ns, source, chunk_ns, camera_ns, system_ns`
+For a recording named `cam`, the core writes:
+- `cam-00000.mkv`, `cam-00001.mkv`, ... — bounded, lossless video segments (Matroska).
+- `cam.csv` — one row per frame: `frame_id, pts_ns, timestamp_ns, source, chunk_ns, camera_ns, system_ns`
   (the three candidate timestamps are logged side-by-side — see the PTP experiment below).
-- `gige.json` — header: absolute `base_timestamp_ns`, time-base source, pixel format,
+- `cam.json` — header: absolute `base_timestamp_ns`, time-base source, pixel format,
   Bayer pattern, bit depth, geometry, tick frequency, and the PTS↔absolute-time convention.
 
 `absolute_ns = pts_ns + base_timestamp_ns` (epoch defined by `timestamp_source`; PTP time when locked).
@@ -75,11 +75,11 @@ sudo sysctl -w net.core.rmem_max=33554432      # larger socket receive buffers
 #   sudo ptp4l -i <cam-iface> -m   &&   sudo phc2sys -a -r
 ```
 
-Build & run — one **sensor config** drives one camera's stack via `gige-up`:
+Build & run — one **sensor config** drives one camera's stack via `cam-up`:
 ```bash
 mkdir -p recordings
 cp core-driver/config/sensors/cam_a.yaml core-driver/config/sensors/my-cam.yaml   # then edit it
-./gige-up config/sensors/my-cam.yaml             # brings up core + the plugins the config enables
+./cam-up config/sensors/my-cam.yaml             # brings up core + the plugins the config enables
 ```
 
 ## Testing without a camera
@@ -113,30 +113,30 @@ on any machine: fake camera → timestamps → CSV/JSON → software **FFV1** re
 (It can't exercise the NVENC recorder or real PTP/chunk timestamps — those need the Orin.)
 
 ```bash
-docker build -f core-driver/Dockerfile.dev -t gige-dev .
+docker build -f core-driver/Dockerfile.dev -t cam-dev .
 ./core-driver/tools/dev_test.sh     # unit tests + fake producer + shm_probe header round-trip + mkv decode
 ```
 
 For iteration, mount the code live so edits need no rebuild:
-`docker run --rm -v "$PWD/core-driver:/app" gige-dev <cmd>`. The [shm_probe](core-driver/tools/shm_probe.py)
+`docker run --rm -v "$PWD/core-driver:/app" cam-dev <cmd>`. The [shm_probe](core-driver/tools/shm_probe.py)
 tool reads the plugin endpoint and prints each frame's parsed header — the same thing the C++ bridge will do.
 
 ## Post-processing (verify lossless + recover original frames)
 
 ```bash
 # Decode back to raw frames
-ffmpeg -i gige-00000.mkv -f rawvideo -pix_fmt gray8 frames.raw      # 8-bit (Y plane = mosaic)
+ffmpeg -i cam-00000.mkv -f rawvideo -pix_fmt gray8 frames.raw      # 8-bit (Y plane = mosaic)
 # Confirm bit-exact round trip
-ffmpeg -i gige-00000.mkv -i source.y4m -lavfi psnr -f null -        # expect psnr_avg:inf
+ffmpeg -i cam-00000.mkv -i source.y4m -lavfi psnr -f null -        # expect psnr_avg:inf
 ```
 For raw Bayer recorded as gray, debayer using `bayer_pattern` from the JSON header after extraction.
 
 ## Transport endpoints (for plugins)
 
 The core publishes frames to same-host consumers over GStreamer shm. Because shm carries only
-bytes (no PTS/metadata), per-frame metadata travels in a 36-byte header ([transport.py](core-driver/gige_driver/transport.py)):
+bytes (no PTS/metadata), per-frame metadata travels in a 36-byte header ([transport.py](core-driver/cam_driver/transport.py)):
 
-- **`plugin_endpoint`** (`application/x-gige-frame`, default `/tmp/gige/frames`) — `[36-byte FrameHeader][pixels]`,
+- **`plugin_endpoint`** (`application/x-cam-frame`, default `/tmp/cam/frames`) — `[36-byte FrameHeader][pixels]`,
   carrying absolute PTP `timestamp_ns` + `frame_id` + geometry + provenance. Our plugins (e.g. the C++
   ros2-bridge) read the header and stamp their messages from it. Optional `max_rate_hz` caps publish rate.
 - **`raw_endpoint`** (`video/x-raw`, default off) — a standard, header-free shm stream for generic same-host
@@ -149,18 +149,18 @@ Both are configured under `transport:` in the camera config. The `plugins:` list
 ## Per-sensor deployment
 
 One sensor = one config under [core-driver/config/sensors/](core-driver/config/sensors/) — the single
-source of truth. **[`gige-up`](gige-up)** reads it, turns the enabled `isolation: container` plugins into
+source of truth. **[`cam-up`](cam-up)** reads it, turns the enabled `isolation: container` plugins into
 Docker Compose **profiles**, and brings up that sensor's stack:
 
 ```bash
-./gige-up config/sensors/cam_a.yaml          # Jetson: auto-detects JP6 (l4t/nvidia) or JP7 (runc/CDI), host net
-./gige-up --dev config/sensors/cam_a.yaml    # no Jetson (laptop/CI): gige-dev core, no NVIDIA
-./gige-up config/sensors/cam_a.yaml down     # tear it down
+./cam-up config/sensors/cam_a.yaml          # Jetson: auto-detects JP6 (l4t/nvidia) or JP7 (runc/CDI), host net
+./cam-up --dev config/sensors/cam_a.yaml    # no Jetson (laptop/CI): cam-dev core, no NVIDIA
+./cam-up config/sensors/cam_a.yaml down     # tear it down
 ```
 
 - **JP6/JP7 is auto-detected per host** (`/etc/nv_tegra_release`): a JetPack 7 Orin gets the runc + CDI
   NVENC overlay automatically, JetPack 6 the l4t base + nvidia runtime. Override with `--jp6`/`--jp7` or
-  `GIGE_PLATFORM`. It's a host fact, so `rig` pins it per host, never per sensor.
+  `CAM_PLATFORM`. It's a host fact, so `rig` pins it per host, never per sensor.
 - **Each heavy plugin is its own compose fragment** (`plugins/<x>/compose.yml`), pulled into
   [docker-compose.yml](docker-compose.yml) via `include:` and run only when its profile is on. Adding a
   plugin to a sensor = flipping `enabled: true` in the config, not editing compose. (Needs Compose ≥ 2.20.)
@@ -168,13 +168,13 @@ Docker Compose **profiles**, and brings up that sensor's stack:
   **supervisor** ([supervisor.py](core-driver/supervisor.py)) — the core container's entrypoint, which also
   forwards shutdown so the core finalizes its recording. Heavy ones (`isolation: container` — ros2-bridge,
   webrtc-bridge) are compose siblings.
-- **Multiple cameras** = the same files run as multiple projects. `gige-up cam_a` and `gige-up cam_b`
+- **Multiple cameras** = the same files run as multiple projects. `cam-up cam_a` and `cam-up cam_b`
   coexist — each its own compose project, shm volume, ROS namespace, and WebRTC port, all derived from the
   per-sensor config (host networking is shared, so ports/topics are namespaced per camera).
 - **shm is a host-level interface, not stack-scoped:** the transport is a stable external volume
-  (`gige_<name>_sock`) + `ipc: host`, so *other* sensor or autonomy stacks read a sensor's frames by
+  (`cam_<name>_sock`) + `ipc: host`, so *other* sensor or autonomy stacks read a sensor's frames by
   mounting that volume + `--ipc=host`.
-- **Drops into a vehicle-level orchestrator** (e.g. `rig`) without coupling this repo to it. `gige-up`
+- **Drops into a vehicle-level orchestrator** (e.g. `rig`) without coupling this repo to it. `cam-up`
   accepts a config from **any host path** (a vehicle-wide inventory, not only `core-driver/config/sensors/`
   — it auto-mounts an out-of-repo config into the container); exposes `up -d` / `down` / `ps` / `logs` on
   one config; passes `ROS_DOMAIN_ID` / `RMW_IMPLEMENTATION` through so every stack shares one ROS 2 graph
@@ -215,7 +215,7 @@ chunk-parse path** via a patched chunk-emitting GV camera:
 - [tools/gvsp-chunk-emitter/gvsp_test.sh](tools/gvsp-chunk-emitter) — **real GVSP + chunk-timestamp extraction** (patched Aravis fake camera)
 - [tools/gvsp-chunk-emitter/roundtrip_test.sh](tools/gvsp-chunk-emitter) — **full input→output round-trip**: known frames+timestamps → GVSP → recording, compared **bit-exact against the exact transmitted bytes** (lossless + timestamp fidelity). Defaults to random noise; pass a video file (`roundtrip_test.sh clip.mkv`) to round-trip real footage instead.
 - [plugins/webrtc-bridge/tools/webrtc_test.sh](plugins/webrtc-bridge/tools/webrtc_test.sh) — **WebRTC egress**: raw shm → `webrtcsink` → `webrtcsrc` decode (headless, no browser)
-- [tools/orchestration_test.sh](tools/orchestration_test.sh) — **config-driven multi-sensor deploy**: `gige-up` profile selection, two cameras side by side (isolated projects), cross-stack shm read
+- [tools/orchestration_test.sh](tools/orchestration_test.sh) — **config-driven multi-sensor deploy**: `cam-up` profile selection, two cameras side by side (isolated projects), cross-stack shm read
 - [tools/gvsp-chunk-emitter/reconnect_test.sh](tools/gvsp-chunk-emitter) — **camera reconnect/backoff**: kill the GVSP emitter mid-stream, restart it; the core detects, backs off, reconnects, resumes, and finalizes a valid recording
 
 ### Still needs the Orin / a real camera

@@ -3,12 +3,12 @@
 # chunk-emitting GV fake camera + our pipeline over GVSP (loopback), and check
 # ChunkTimestamp extraction + lossless recording.
 #
-# Prereq:  docker build -f tools/gvsp-chunk-emitter/Dockerfile -t gige-chunks .
+# Prereq:  docker build -f tools/gvsp-chunk-emitter/Dockerfile -t cam-chunks .
 # Run:     ./tools/gvsp-chunk-emitter/gvsp_test.sh
 set -u
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 
-docker run --rm -v "$REPO/core-driver:/app" -v "$REPO/tools/gvsp-chunk-emitter:/t" gige-chunks bash -c '
+docker run --rm -v "$REPO/core-driver:/app" -v "$REPO/tools/gvsp-chunk-emitter:/t" cam-chunks bash -c '
   set -e
   echo "== unit tests =="
   python3 tests/test_timestamps.py | tail -1

@@ -47,7 +47,7 @@ goes away — including the implicit teardown of an unplugged camera or a droppe
 ## Stream descriptor (queryable reply)
 
 UTF-8 **JSON**, replied with `application/json` encoding. It is deliberately **abstract** (not
-gige/webrtc specific) so USB / RTSP / other producers emit the same shape. Populate only fields the
+cam/webrtc specific) so USB / RTSP / other producers emit the same shape. Populate only fields the
 producer actually knows; **omit** what it can't substantiate.
 
 ```jsonc
@@ -55,7 +55,7 @@ producer actually knows; **omit** what it can't substantiate.
   "schema_version": 1,
   "id": "front-left",            // REQUIRED. matches the <sensor_id> key segment
   "role": "front-left",          // human label; config-supplied, default = id
-  "producer": "gige-vision-service",   // REQUIRED. which stack produced this
+  "producer": "camera-service",   // REQUIRED. which stack produced this
   "protocol": "gstwebrtc-api",   // REQUIRED. signalling protocol (gstwebrtc-api | whep | ...)
   "signalling": "ws://host:8443",// REQUIRED. signalling URL the producer serves. scheme MUST match how
                                  //   it's served (ws/wss) — not hardcoded. Remote reachability
@@ -67,7 +67,7 @@ producer actually knows; **omit** what it can't substantiate.
   "fps": 30,                     // OPTIONAL
   "pixel_format": "GRAY8",       // OPTIONAL sensor format (GRAY8 / GRAY16_LE / bayer_rggb8 / ...)
   "ros_topic": "/front/image_raw",  // OPTIONAL cross-link to the same stream on the ROS graph
-  "recording": "gige-front-*.mkv"   // OPTIONAL cross-link to its on-vehicle recording
+  "recording": "cam-front-*.mkv"   // OPTIONAL cross-link to its on-vehicle recording
 }
 ```
 

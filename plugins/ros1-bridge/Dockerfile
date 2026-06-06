@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ros-${ROS_DISTRO}-image-transport \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /ws
-COPY plugins/ros1-bridge /ws/src/gige_ros1_bridge
+COPY plugins/ros1-bridge /ws/src/cam_ros1_bridge
 RUN . /opt/ros/${ROS_DISTRO}/setup.sh && catkin_make install -DCMAKE_BUILD_TYPE=Release
 
 # ---- runtime: ros-base + runtime GStreamer/ROS + the built node ----
@@ -34,4 +34,4 @@ COPY plugins/ros1-bridge/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["roslaunch", "gige_ros1_bridge", "bridge.launch"]
+CMD ["roslaunch", "cam_ros1_bridge", "bridge.launch"]

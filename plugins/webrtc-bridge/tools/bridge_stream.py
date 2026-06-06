@@ -4,16 +4,16 @@ over Zenoh for fleet discovery.
 
 It replaces a bare `gst-launch-1.0` so the advertiser shares the bridge PROCESS — the Zenoh liveliness
 token then lives exactly as long as this process: a crash/kill auto-withdraws presence, a graceful
-SIGINT/SIGTERM undeclares it. run.sh builds the pipeline string (naming the source `gige_src` and the
-sink `gige_webrtcsink`) and passes it in GIGE_PIPELINE, so this owns the SAME pipeline gst-launch would.
+SIGINT/SIGTERM undeclares it. run.sh builds the pipeline string (naming the source `cam_src` and the
+sink `cam_webrtcsink`) and passes it in CAM_PIPELINE, so this owns the SAME pipeline gst-launch would.
 
 Separation of concerns (so the generic half is liftable by the next producer):
   - zenoh_advertiser.StreamAdvertiser : GENERIC  — session + liveliness token + descriptor queryable.
   - this file                         : WebRTC   — BUILDS the abstract descriptor from env + negotiated
                                                    caps and ties advertise()/close() to PLAYING / shutdown.
 
-Discovery is additive + best-effort: GIGE_ADVERTISE=0 disables it; any Zenoh error is logged and the
-video keeps flowing. GIGE_LAUNCHER=gst-launch (handled in run.sh) bypasses this entirely.
+Discovery is additive + best-effort: CAM_ADVERTISE=0 disables it; any Zenoh error is logged and the
+video keeps flowing. CAM_LAUNCHER=gst-launch (handled in run.sh) bypasses this entirely.
 """
 import json
 import logging
@@ -52,19 +52,19 @@ def vehicle_id():
 
 
 def sensor_id():
-    return _env("GIGE_INSTANCE", "camera")
+    return _env("CAM_INSTANCE", "camera")
 
 
 def producer_id():
-    return _env("GIGE_PRODUCER_ID", "{}-{}".format(vehicle_id(), sensor_id()))
+    return _env("CAM_PRODUCER_ID", "{}-{}".format(vehicle_id(), sensor_id()))
 
 
 def signalling_url():
-    url = _env("GIGE_SIGNALLING_URL")
+    url = _env("CAM_SIGNALLING_URL")
     if url:
         return url
-    scheme = _env("GIGE_SIGNALLING_SCHEME", "ws")            # bundled signalling server is plain ws (no --cert)
-    host = _env("GIGE_SIGNALLING_HOST", socket.gethostname())
+    scheme = _env("CAM_SIGNALLING_SCHEME", "ws")            # bundled signalling server is plain ws (no --cert)
+    host = _env("CAM_SIGNALLING_HOST", socket.gethostname())
     port = _env("SIGNALLING_PORT", "8443")
     return "{}://{}:{}".format(scheme, host, port)
 
@@ -80,19 +80,19 @@ def base_descriptor():
     d = {
         "schema_version": 1,
         "id": sensor_id(),                                  # matches the key's <sensor_id> segment
-        "role": _env("GIGE_STREAM_ROLE", sensor_id()),      # human label; config-supplied, default = id
-        "producer": "gige-vision-service",
-        "protocol": _env("GIGE_SIGNALLING_PROTOCOL", "gstwebrtc-api"),
+        "role": _env("CAM_STREAM_ROLE", sensor_id()),      # human label; config-supplied, default = id
+        "producer": "camera-service",
+        "protocol": _env("CAM_SIGNALLING_PROTOCOL", "gstwebrtc-api"),
         "signalling": signalling_url(),
         "producer_id": producer_id(),                       # == webrtcsink meta.name (selector on a shared server)
     }
     codec = _CODEC_FROM_CAPS.get((_env("VIDEO_CAPS", "") or "").split(",")[0].strip())
     if codec:                                               # omit unless a codec is actually pinned
         d["codec"] = codec
-    topic = _env("GIGE_ROS_TOPIC")                          # OPTIONAL config-supplied linkage
+    topic = _env("CAM_ROS_TOPIC")                          # OPTIONAL config-supplied linkage
     if topic:
         d["ros_topic"] = topic if topic.startswith("/") else "/" + topic
-    rec = _env("GIGE_RECORDING_GLOB")                       # OPTIONAL config-supplied linkage
+    rec = _env("CAM_RECORDING_GLOB")                       # OPTIONAL config-supplied linkage
     if rec:
         d["recording"] = rec
     return d
@@ -101,7 +101,7 @@ def base_descriptor():
 def fill_dims_from_caps(d, src):
     """Populate width/height/fps/pixel_format from the negotiated SOURCE caps — accurate on BOTH the JP6
     raw-shm path (caps set from config) and the JP7 unixfd path (geometry self-described by the stream,
-    not in env). Falls back to GIGE_WIDTH/HEIGHT/FPS/FORMAT when the caps can't be read."""
+    not in env). Falls back to CAM_WIDTH/HEIGHT/FPS/FORMAT when the caps can't be read."""
     w = h = fps = pix = None
     try:
         pad = src.get_static_pad("src") if src is not None else None
@@ -127,12 +127,12 @@ def fill_dims_from_caps(d, src):
         except (TypeError, ValueError):
             return None
 
-    d["width"] = w or envint("GIGE_WIDTH")
-    d["height"] = h or envint("GIGE_HEIGHT")
-    d["fps"] = fps or envint("GIGE_FPS")
+    d["width"] = w or envint("CAM_WIDTH")
+    d["height"] = h or envint("CAM_HEIGHT")
+    d["fps"] = fps or envint("CAM_FPS")
     if not pix:
-        bayer = _env("GIGE_BAYER")
-        pix = ("bayer_" + bayer + "8") if bayer else _env("GIGE_FORMAT", "GRAY8")
+        bayer = _env("CAM_BAYER")
+        pix = ("bayer_" + bayer + "8") if bayer else _env("CAM_FORMAT", "GRAY8")
     d["pixel_format"] = pix
     for k in ("width", "height", "fps"):                    # omit what we can't substantiate
         if d.get(k) is None:
@@ -150,14 +150,14 @@ class Bridge:
 
     def build(self):
         Gst.init(None)
-        desc = _env("GIGE_PIPELINE")
+        desc = _env("CAM_PIPELINE")
         if not desc:
-            log.error("GIGE_PIPELINE not set; nothing to run")
+            log.error("CAM_PIPELINE not set; nothing to run")
             return False
         log.info("pipeline: %s", desc)
         self.pipeline = Gst.parse_launch(desc)
         # webrtcsink meta.name == producer_id, so discovery + signalling line up (one server, many producers).
-        sink = self.pipeline.get_by_name("gige_webrtcsink")
+        sink = self.pipeline.get_by_name("cam_webrtcsink")
         if sink is not None:
             try:
                 pid = producer_id()
@@ -196,11 +196,11 @@ class Bridge:
 
     def _advertise(self):
         self._advertised = True                              # one-shot, even if advertising fails
-        if not _truthy(_env("GIGE_ADVERTISE", "1")):
-            log.info("GIGE_ADVERTISE=0; discovery disabled")
+        if not _truthy(_env("CAM_ADVERTISE", "1")):
+            log.info("CAM_ADVERTISE=0; discovery disabled")
             return
         try:
-            d = fill_dims_from_caps(base_descriptor(), self.pipeline.get_by_name("gige_src"))
+            d = fill_dims_from_caps(base_descriptor(), self.pipeline.get_by_name("cam_src"))
             key = "fleet/{}/media/{}".format(vehicle_id(), sensor_id())
             self.advertiser = StreamAdvertiser(key, d, connect=zenoh_connect(), enabled=True)
             self.advertiser.advertise()

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(gige_ros2_bridge)
+project(cam_ros2_bridge)
 
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
@@ -19,14 +19,14 @@ pkg_check_modules(GST REQUIRED IMPORTED_TARGET gstreamer-1.0 gstreamer-app-1.0)
 
 # One shared library holds the base + both transport components, so they can be loaded into a
 # component_container_mt (and share a process with image_proc on JP6 for intra-process debayering).
-add_library(gige_bridge_components SHARED
-  src/gige_bridge_base.cpp
-  src/gige_header_bridge.cpp
-  src/gige_unixfd_bridge.cpp)
-target_include_directories(gige_bridge_components PRIVATE src)
+add_library(cam_bridge_components SHARED
+  src/cam_bridge_base.cpp
+  src/cam_header_bridge.cpp
+  src/cam_unixfd_bridge.cpp)
+target_include_directories(cam_bridge_components PRIVATE src)
 # Modern CMake linkage (works on Jazzy + Lyrical). `ament_target_dependencies` was removed in Lyrical;
 # link the exported targets directly -- they carry their include dirs transitively.
-target_link_libraries(gige_bridge_components
+target_link_libraries(cam_bridge_components
   PkgConfig::GST
   rclcpp::rclcpp
   rclcpp_components::component
@@ -35,11 +35,11 @@ target_link_libraries(gige_bridge_components
 
 # Register both nodes so `component_container_mt` can load them by class name (writes the ament index
 # resource the container reads).
-rclcpp_components_register_nodes(gige_bridge_components
-  "gige_ros2_bridge::GigeHeaderBridge"
-  "gige_ros2_bridge::GigeUnixfdBridge")
+rclcpp_components_register_nodes(cam_bridge_components
+  "cam_ros2_bridge::CamHeaderBridge"
+  "cam_ros2_bridge::CamUnixfdBridge")
 
-install(TARGETS gige_bridge_components
+install(TARGETS cam_bridge_components
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
