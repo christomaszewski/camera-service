@@ -98,6 +98,17 @@ def test_usb_config_parsed():
     assert c.usb.device == "/dev/video2"
 
 
+def test_rtsp_config_defaults():
+    r = parse_config({}).rtsp
+    assert (r.codec, r.latency_ms) == ("h264", 200) and r.url.startswith("rtsp://")
+
+
+def test_rtsp_config_parsed():
+    c = parse_config({"source": {"type": "rtsp"}, "rtsp": {"url": "rtsp://x/y", "codec": "mjpeg"}})
+    assert c.source.type == "rtsp"
+    assert (c.rtsp.url, c.rtsp.codec) == ("rtsp://x/y", "mjpeg")
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

@@ -68,6 +68,19 @@ class UsbConfig:
 
 
 @dataclass
+class RtspConfig:
+    # RTSP source (used when source.type == rtsp). Always encoded -> stream-copy recording +
+    # decode for consumers. First cut: configured geometry must match the stream; dynamic caps
+    # negotiation + RTP/RTCP->NTP timestamp provenance are follow-ups.
+    url: str = "rtsp://127.0.0.1:8554/test"
+    codec: str = "h264"               # h264 | h265 | mjpeg
+    latency_ms: int = 200             # rtspsrc jitter-buffer latency
+    width: int = 640
+    height: int = 480
+    frame_rate: float = 30.0          # informational; the stream sets the real rate
+
+
+@dataclass
 class RecordingConfig:
     enabled: bool = True
     encoder: str = "auto"
@@ -145,6 +158,7 @@ class AppConfig:
     source: SourceConfig = field(default_factory=SourceConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)   # gige source params
     usb: UsbConfig = field(default_factory=UsbConfig)            # usb source params
+    rtsp: RtspConfig = field(default_factory=RtspConfig)         # rtsp source params
     recording: RecordingConfig = field(default_factory=RecordingConfig)
     preview: PreviewConfig = field(default_factory=PreviewConfig)
     transport: TransportConfig = field(default_factory=TransportConfig)
@@ -198,6 +212,7 @@ def parse_config(raw: dict) -> AppConfig:
         source=_build(SourceConfig, raw.get("source")),
         camera=camera,
         usb=_build(UsbConfig, raw.get("usb")),
+        rtsp=_build(RtspConfig, raw.get("rtsp")),
         recording=_build(RecordingConfig, raw.get("recording")),
         preview=_build(PreviewConfig, raw.get("preview")),
         transport=transport_cfg,

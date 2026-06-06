@@ -1,0 +1,34 @@
+# Test config: FAKE RTSP source -- connects to a local test RTSP server
+# (tools/fake_rtsp_server.py) serving MJPEG over RTP. Exercises the encoded dual-output for a
+# network/RTSP source -- stream-copy the delivered bitstream (faithful log) AND decode for live
+# consumers -- with no real camera. (Real cameras: point url at the device; codec h264/h265.)
+source:
+  type: rtsp
+
+rtsp:
+  url: rtsp://127.0.0.1:8554/test
+  codec: mjpeg                  # h264 | h265 | mjpeg
+  latency_ms: 100
+  width: 512                    # must match the stream (dynamic caps negotiation is a follow-up)
+  height: 512
+  frame_rate: 25.0
+
+recording:
+  enabled: true
+  encoder: auto                 # encoded -> stream-copy
+  output_dir: /data/recordings
+  name_prefix: rtspmjpeg
+  segment_seconds: 30
+
+preview:
+  enabled: false
+
+transport:
+  plugin_endpoint:
+    enabled: true               # carries the DECODED I420 to consumers
+    socket_path: /tmp/cam/frames
+  raw_endpoint:
+    enabled: false
+    socket_path: /tmp/cam/raw
+
+plugins: []
