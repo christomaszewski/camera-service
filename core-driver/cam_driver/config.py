@@ -22,6 +22,13 @@ class ROI:
 
 
 @dataclass
+class SourceConfig:
+    # Which capture-source strategy drives the pipeline frontend. Everything downstream
+    # (appsrc -> tee -> recorder/transport/preview) is identical regardless of source.
+    type: str = "gige"        # gige (GVSP/Aravis) | usb (v4l2, future)
+
+
+@dataclass
 class CameraConfig:
     camera_id: Optional[str] = None          # serial / name; None = first device found
     fake: bool = False                        # use Aravis in-process "Fake" camera (no hardware/network)
@@ -123,6 +130,7 @@ class PluginConfig:
 
 @dataclass
 class AppConfig:
+    source: SourceConfig = field(default_factory=SourceConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
     recording: RecordingConfig = field(default_factory=RecordingConfig)
     preview: PreviewConfig = field(default_factory=PreviewConfig)
@@ -174,6 +182,7 @@ def parse_config(raw: dict) -> AppConfig:
             params={k: v for k, v in p.items() if k not in reserved}))
 
     return AppConfig(
+        source=_build(SourceConfig, raw.get("source")),
         camera=camera,
         recording=_build(RecordingConfig, raw.get("recording")),
         preview=_build(PreviewConfig, raw.get("preview")),

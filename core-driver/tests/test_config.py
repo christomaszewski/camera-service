@@ -8,6 +8,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from cam_driver.config import parse_config  # noqa: E402
+from cam_driver.sources import make_source  # noqa: E402
 
 
 def test_defaults():
@@ -65,6 +66,23 @@ def test_fake_and_roi():
     c = parse_config({"camera": {"fake": True, "roi": {"x": 4, "y": 8, "width": 64, "height": 32}}})
     assert c.camera.fake is True
     assert (c.camera.roi.x, c.camera.roi.width, c.camera.roi.height) == (4, 64, 32)
+
+
+def test_source_defaults_to_gige():
+    assert parse_config({}).source.type == "gige"
+
+
+def test_source_type_parsed():
+    assert parse_config({"source": {"type": "usb"}}).source.type == "usb"
+
+
+def test_make_source_unknown_raises():
+    # factory dispatch is testable without a source's native deps (the gige impl imports lazily)
+    try:
+        make_source(parse_config({"source": {"type": "nope"}}))
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
 
 
 def _main():
