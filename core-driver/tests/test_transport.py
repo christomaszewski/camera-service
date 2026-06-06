@@ -8,7 +8,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from cam_driver.transport import (  # noqa: E402
-    CAPS, HEADER_SIZE, FrameHeader, TransportError, unpack_header,
+    CAPS, HEADER_SIZE, TS_SOURCE_CODE, FrameHeader, TransportError, unpack_header,
 )
 
 
@@ -47,6 +47,20 @@ def test_color_pixfmt_roundtrip():
     for fmt in ("I420", "NV12", "YUY2", "RGB"):
         out = unpack_header(FrameHeader(timestamp_ns=7, frame_id=3, width=8, height=8, pixfmt=fmt).pack())
         assert out.pixfmt == fmt
+
+
+def test_ts_source_codes_stable():
+    # additive provenance rungs; 0-2 must NOT shift (the C++ bridges hard-code them)
+    assert TS_SOURCE_CODE == {"ptp_chunk": 0, "camera": 1, "system": 2, "sof": 3, "rtp_ntp": 4}
+
+
+def test_new_ts_sources_roundtrip():
+    # usb SOF + rtsp RTCP->NTP provenance survive pack/unpack at their wire codes
+    for src, code in (("sof", 3), ("rtp_ntp", 4)):
+        raw = FrameHeader(timestamp_ns=123, frame_id=4, width=8, height=8,
+                          pixfmt="I420", ts_source=src).pack()
+        assert raw[32] == code          # ts_source byte (offset 32 in the 36-byte v1 header)
+        assert unpack_header(raw).ts_source == src
 
 
 def test_bad_magic():

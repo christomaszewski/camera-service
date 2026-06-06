@@ -1,20 +1,23 @@
 # Dev/test image: the full producer pipeline WITHOUT the Jetson HW stack (no NVENC).
 #
-# Runs on any Docker host (x86 or arm64). Ubuntu 22.04 mirrors JetPack 6's userspace
-# (GStreamer 1.20 + Aravis 0.8), so behaviour closely matches the Orin minus the
-# NVIDIA hardware elements. Use it to exercise capture + timestamps + sidecar + the
-# software (FFV1) recorder + the shm transport against the Aravis *fake* camera.
+# Runs on any Docker host (x86 or arm64). The BASE arg selects the userspace generation:
+#   ubuntu:22.04 (default) mirrors JetPack 6 (GStreamer 1.20 + Aravis 0.8)
+#   ubuntu:24.04           mirrors JetPack 7 (GStreamer 1.24) -- needed to exercise the
+#                          RTSP RTCP->NTP path (rtspsrc add-reference-timestamp-meta is gst>=1.24).
+# Either way it's the SOFTWARE stack (FFV1 record, CPU decode) -- the NVIDIA HW elements come
+# from the host L4T and only exist on a real Jetson.
 #
 # Build (from repo root):  docker build -f core-driver/Dockerfile.dev -t cam-dev .
+#                          docker build -f core-driver/Dockerfile.dev --build-arg BASE=ubuntu:24.04 -t cam-dev-jp7 .
 # Iterate with live code:  docker run --rm -v "$PWD/core-driver:/app" cam-dev ...
-FROM ubuntu:22.04
+ARG BASE=ubuntu:22.04
+FROM ${BASE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-gi python3-yaml python3-numpy \
       gir1.2-glib-2.0 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gir1.2-aravis-0.8 \
       gir1.2-gst-rtsp-server-1.0 \
-
       gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
       gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
       aravis-tools \
