@@ -11,4 +11,7 @@ def make_source(cfg) -> Source:
     if stype == "gige":
         from .gige import GigeSource
         return GigeSource(cfg.camera)
-    raise ValueError(f"unknown source type {cfg.source.type!r} (known: gige)")
+    if stype == "usb":
+        from .usb import UsbSource
+        return UsbSource(cfg.usb)
+    raise ValueError(f"unknown source type {cfg.source.type!r} (known: gige, usb)")

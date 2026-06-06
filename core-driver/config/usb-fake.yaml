@@ -1,0 +1,38 @@
+# Test config: FAKE USB source (videotestsrc, no /dev/video device needed).
+#
+# Exercises the usb Source through the SHARED pipeline (appsink -> on_frame -> appsrc ->
+# tee -> recorder/transport), proving a second source type works end to end without real
+# v4l2. The step-3 usb source delivers raw GRAY8 with an arrival timestamp.
+# (Real v4l2 + color/decode + SOF timestamps + device mgmt come in step 4.)
+#
+# Run:  docker run --rm -v "$PWD/core-driver:/app" cam-dev python3 main.py -c config/usb-fake.yaml
+source:
+  type: usb
+
+usb:
+  fake: true                     # videotestsrc instead of v4l2src
+  pixel_format: GRAY8
+  width: 512
+  height: 512
+  frame_rate: 25.0
+
+recording:
+  enabled: true
+  encoder: ffv1                  # CPU + robust for a smoke test (no NVENC dependency)
+  output_dir: /data/recordings
+  name_prefix: usbfake
+  segment_seconds: 30
+
+preview:
+  enabled: false
+
+transport:
+  plugin_endpoint:
+    enabled: true
+    socket_path: /tmp/cam/frames
+    max_rate_hz: 0
+  raw_endpoint:
+    enabled: false
+    socket_path: /tmp/cam/raw
+
+plugins: []
