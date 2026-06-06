@@ -7,15 +7,17 @@ file plus ROADMAP.md should get you oriented without re-deriving anything.
 
 ## Goal & context
 
-A **generic GigE Vision (GVSP) camera driver** on **GStreamer + Aravis**, deployed on **NVIDIA
-Jetson** (AGX Orin on JetPack 6 or 7; also Thor). It works with any GVSP-compliant
-camera. It must: extract **per-frame hardware (PTP) timestamps** so we record true sensor-capture time
+A **multi-source camera service** on **GStreamer**, deployed on **NVIDIA Jetson** (AGX Orin on
+JetPack 6 or 7; also Thor). Capture sources are pluggable behind a `Source` interface: **GigE
+Vision (GVSP, via Aravis)** is the validated source today, and a **USB/v4l2** source is scaffolded
+behind the same seam (real-device color/decode + device mgmt in progress). It must: extract
+**per-frame hardware timestamps** (PTP/chunk on GigE) so we record true sensor-capture time
 (not arrival time, which carries network + processing latency/jitter); record **losslessly with
 temporal compression**; and **distribute** frames to consumer "plugins" (ROS2, WebRTC, MQTT, …).
 Dev happens on macOS; everything actually runs on the Jetson in Docker (and in CI-style container
 tests — see ROADMAP).
 
-## Architecture spine (two unifying ideas)
+## Architecture spine (three unifying ideas)
 
 1. **The hardware timestamp is the pipeline's time base.** Each frame's PTP/chunk timestamp is
    mapped onto the GstBuffer PTS (offset to a per-recording base; the absolute base is stored in the
@@ -25,6 +27,13 @@ tests — see ROADMAP).
    timestamping, lossless recording — in one tightly-controlled pipeline. WebRTC, ROS2, MQTT are
    best-effort **consumers** of a published transport, added without touching the core. WebRTC is
    "just another consumer," not an in-core tee.
+3. **Pluggable capture sources behind one pipeline.** A `Source` owns the frontend (device,
+   per-frame timestamp policy, feeder) and delivers each frame to the shared pipeline as
+   `(FrameStamp, image_bytes)` via one callback — so everything downstream (appsrc → tee → recorder /
+   transport / preview / discovery) is source-agnostic and every source shares the *same*
+   timestamp-provenance, recording, and distribution path. GigE Vision (Aravis) is the validated
+   source; a USB/v4l2 source (`v4l2src`/`videotestsrc` → appsink → the same callback) is scaffolded
+   behind the seam. `source.type` (default `gige`) selects it.
 
 ## Pipeline
 
