@@ -56,8 +56,9 @@ class RtspSource(GstPipelineSource):
         # recorder). Mirrors the working UsbSource structure. rtspsrc is named so _configure_pipeline can
         # turn on the RTCP->NTP reference meta (gst>=1.24); the NTP stamp rides the pre-tee buffer, so the
         # stamp probe there gives BOTH the recording and the live consumers the same wall-clock stamp.
+        proto = f" protocols={self.cfg.protocols}" if getattr(self.cfg, "protocols", "") else ""
         return (
-            f"rtspsrc name=src location={self.cfg.url} latency={int(self.cfg.latency_ms)} ! "
+            f"rtspsrc name=src location={self.cfg.url} latency={int(self.cfg.latency_ms)}{proto} ! "
             f"{self._depay} ! tee name=st "
             f"st. ! queue ! {parser} ! {decoder} ! {conv} ! "
             f"video/x-raw,format=I420,width={w},height={h} ! "

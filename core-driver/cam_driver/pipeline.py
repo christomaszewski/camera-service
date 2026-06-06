@@ -86,6 +86,7 @@ class CapturePipeline:
         self._tile_mode = "off"            # off | plain | green_diff | rct (recording.bayer_tile)
         self._tiler = None                 # closure: frame_bytes -> tiled bytes (lazy; needs numpy)
         self.enc_src: Optional[Gst.Element] = None   # encoded appsrc for stream-copy recording
+        self._enc_caps_applied = False     # set the encoded appsrc's real negotiated caps once (1st buffer)
         self._stream_copy = False          # encoded source -> recorder muxes the delivered bitstream verbatim
         self._base_lock = threading.Lock()  # base-ts init is shared by the raw + encoded callbacks
 
@@ -345,12 +346,19 @@ class CapturePipeline:
                      stamp.system_ns, d_cc, d_sc)
         self._n_pushed += 1
 
-    def _on_encoded(self, stamp: FrameStamp, enc_bytes: bytes) -> None:
+    def _on_encoded(self, stamp: FrameStamp, enc_bytes: bytes, caps_str: str = None) -> None:
         """Encoded-source callback (parallel to on_frame, SAME per-frame stamp): push the delivered
         bitstream to the stream-copy recorder's appsrc with a stamp-derived PTS, so the .mkv aligns
         with the sidecar + the raw consumer path. No decode/re-encode -- byte-exact to delivery."""
         if self._stopping or self.enc_src is None:
             return
+        # Apply the source's NEGOTIATED encoded caps once (carries stream-format + codec_data -- e.g.
+        # the H.264/H.265 VPS/SPS/PPS that hvc1/avc keep in caps, not in the bytes) so the appsrc ->
+        # h26xparse -> matroskamux chain negotiates. The build-time caps were the bare media type
+        # ("video/x-h265"), enough for MJPEG (no codec_data) but not for H.264/H.265.
+        if caps_str and not self._enc_caps_applied:
+            self.enc_src.set_property("caps", Gst.Caps.from_string(caps_str))
+            self._enc_caps_applied = True
         self._ensure_base(stamp)
         pts = stamp.timestamp_ns - self._base_ts
         if pts < 0:

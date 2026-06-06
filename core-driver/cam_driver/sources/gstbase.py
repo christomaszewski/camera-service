@@ -21,7 +21,7 @@ gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
 from ..timestamps import FrameStamp, TimestampSource
-from .base import OnFrame, Source
+from .base import OnEncoded, OnFrame, Source
 
 log = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ class GstPipelineSource(Source):
         to HW on a JP7 host (with the GPU exposed) -- no code change. See formats.select_decoder."""
         return Gst.ElementFactory.find("nvv4l2decoder") is not None
 
-    def start(self, on_frame: OnFrame, on_encoded: OnFrame = None) -> None:
+    def start(self, on_frame: OnFrame, on_encoded: OnEncoded = None) -> None:
         self._on_frame = on_frame
         self._on_encoded = on_encoded
         self._rawsink.connect("new-sample", self._on_raw)
@@ -140,7 +140,9 @@ class GstPipelineSource(Source):
         buf = sample.get_buffer()
         data = buf.extract_dup(0, buf.get_size())
         if self._on_encoded is not None:
-            self._on_encoded(self._stamp_for(buf), data)
+            # carry the negotiated caps (stream-format + codec_data) so the recorder appsrc can mux
+            caps = sample.get_caps()
+            self._on_encoded(self._stamp_for(buf), data, caps.to_string() if caps else None)
         return Gst.FlowReturn.OK
 
     @property
