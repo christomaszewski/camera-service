@@ -1,0 +1,33 @@
+# REAL USB/UVC camera (not the videotestsrc fake). A NexiGo HD Webcam on /dev/video0 delivering
+# MJPEG -> stream-copy the delivered JPEG (faithful) + decode I420 for consumers. (The cam also
+# offers YUY2 raw at lower res -- see usb-real-raw.yaml -- which records via FFV1.)
+source:
+  type: usb
+
+usb:
+  device: /dev/video0
+  fake: false
+  pixel_format: MJPEG           # NexiGo offers MJPEG up to 1080p60 + YUY2 raw at lower res
+  width: 1280
+  height: 720
+  frame_rate: 30.0
+
+recording:
+  enabled: true
+  encoder: auto                 # encoded -> stream-copy (the delivered JPEG, no re-encode)
+  output_dir: /data/recordings
+  name_prefix: usbmjpeg
+  segment_seconds: 30
+
+preview:
+  enabled: false
+
+transport:
+  plugin_endpoint:
+    enabled: true               # carries the DECODED I420 to consumers
+    socket_path: /tmp/cam/frames
+  raw_endpoint:
+    enabled: false
+    socket_path: /tmp/cam/raw
+
+plugins: []

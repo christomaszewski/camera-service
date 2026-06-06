@@ -13,7 +13,15 @@ import os
 import signal
 import sys
 
-from cam_driver.camera import CameraError
+# CameraError is GigE/Aravis-specific (camera.py loads the Aravis GI namespace at import). Import it
+# defensively so a USB/RTSP-only deployment doesn't require Aravis installed -- the placeholder is only
+# ever used when Aravis is absent, in which case no GigE source can run anyway.
+try:
+    from cam_driver.camera import CameraError
+except (ImportError, ValueError):
+    class CameraError(Exception):
+        pass
+
 from cam_driver.config import load_config
 from cam_driver.pipeline import CapturePipeline
 from cam_driver.sidecar import SidecarWriter

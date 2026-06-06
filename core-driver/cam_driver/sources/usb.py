@@ -52,10 +52,14 @@ class UsbSource(GstPipelineSource):
                 enc = _FAKE_ENCODER.get(self.cfg.pixel_format.upper(), "jpegenc")
                 head = (f"videotestsrc is-live=true do-timestamp=true ! "
                         f"video/x-raw,width={w},height={h},framerate={fps}/1 ! {enc}")
+                tee_caps = caps                 # jpegenc output: bare media type is fine
             else:
+                # real v4l2: pin width/height/framerate so the device negotiates the exact encoded mode
+                # (a UVC cam offers many MJPEG resolutions; bare "image/jpeg" would let it pick any).
                 head = f"v4l2src device={self.cfg.device} do-timestamp=true"
+                tee_caps = f"{caps},width={w},height={h},framerate={fps}/1"
             return (
-                f"{head} ! {caps} ! tee name=st "
+                f"{head} ! {tee_caps} ! tee name=st "
                 f"st. ! queue ! {parser} ! {decoder} ! videoconvert ! "
                 f"video/x-raw,format=I420,width={w},height={h} ! {raw_sink} "
                 # encoded branch must-not-drop: it's the faithful recording
