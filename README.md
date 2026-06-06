@@ -1,10 +1,13 @@
 # camera-service
 
-A generic GigE Vision (GVSP) camera driver built on **GStreamer + Aravis**, targeting
-**NVIDIA Jetson** (AGX Orin on JetPack 6 or 7; portable to Jetson Thor). It captures
-from any GigE Vision (GVSP) camera, extracts **hardware PTP timestamps**
-from the GVSP chunk data, records a **lossless, temporally-compressed** video file, and
-fans the stream out to consumer "plugins" (ROS2, WebRTC, MQTT, ...).
+A multi-source **camera service** on **GStreamer**, targeting **NVIDIA Jetson** (AGX Orin
+on JetPack 6 or 7; portable to Jetson Thor). Capture sources are pluggable behind a small
+`Source` interface: **GigE Vision (GVSP, via Aravis)** is the hardware-validated source
+today, and a **USB/v4l2** source is scaffolded behind the same seam (real-device
+color/decode + device management are in progress). Whatever the source, the core attaches a
+**per-frame hardware timestamp** (PTP/chunk on GigE), records a **lossless,
+temporally-compressed** video file, and fans the stream out to consumer "plugins"
+(ROS2, ROS1, WebRTC, MQTT, ...).
 
 > **Design & decisions** → [docs/DESIGN.md](docs/DESIGN.md) · **Status & roadmap** → [docs/ROADMAP.md](docs/ROADMAP.md) · **PTP experiment** → [docs/ptp-timestamp-experiment.md](docs/ptp-timestamp-experiment.md) · **JetPack 7 (Orin) bring-up** → [docs/jetpack7-bringup.md](docs/jetpack7-bringup.md)
 
@@ -17,7 +20,12 @@ fans the stream out to consumer "plugins" (ROS2, WebRTC, MQTT, ...).
 - **Producer / consumer split.** The **core** does the frame-loss-critical work — capture,
   timestamping, lossless recording — in one tightly-controlled pipeline. WebRTC, ROS2, and
   MQTT are best-effort **consumers** of a published transport, added without touching the core.
-- **A small custom appsrc feeder, not a custom GStreamer plugin.** The stock `aravissrc`
+- **Pluggable capture sources, one shared pipeline.** A `Source` owns the frontend — device,
+  per-frame timestamp policy, and a feeder — and hands every frame downstream as
+  `(timestamp, frame_id, bytes)`. So GigE (Aravis) and USB (v4l2) share the *same* transport →
+  recorder → ROS/WebRTC/discovery and the *same* timestamp-provenance handling; `source.type`
+  (default `gige`) picks the frontend.
+- **The GigE source is a small appsrc feeder, not a custom GStreamer plugin.** The stock `aravissrc`
   element hides `frame_id` and chunk data and recycles the camera buffer internally, so it
   can't give us a per-frame PTP timestamp keyed by frame id. Instead a ~30-line Python loop
   pops Aravis buffers, reads `frame_id` + `ChunkTimestamp`, stamps the PTS, and pushes into a
@@ -46,7 +54,8 @@ The recorder is **pluggable / capability-detecting**:
 
 ```
 core-driver/            # the producer service
-  cam_driver/          # config, camera (Aravis), timestamps, sidecar, recorder, pipeline
+  cam_driver/          # config, pipeline, recorder, sidecar, transport
+    sources/            # the capture-source seam: base (Source), gige (Aravis), usb (v4l2), factory
   main.py               # entry point
   config/camera.yaml    # camera + recording + preview settings
   Dockerfile
