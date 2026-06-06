@@ -53,7 +53,7 @@ class RecordingConfig:
     enabled: bool = True
     encoder: str = "auto"
     output_dir: str = "/data/recordings"
-    name_prefix: str = "gige"
+    name_prefix: str = "cam"
     segment_seconds: int = 60
     bayer_pattern: Optional[str] = None
     # Pre-encode CFA tiling: deinterleave an 8-bit Bayer mosaic into 4 quadrant sub-planes so the lossless
@@ -62,7 +62,7 @@ class RecordingConfig:
     #   off | plain (== true) | green_diff | rct
     # plain = quadrant tiling (the big win); green_diff = + (Gb-Gr) residual (safe, near-free); rct = +
     # a reversible R-G/B-G/Gb-Gr colour transform (higher ceiling, but the 8-bit wrap taxes a predictive
-    # HW codec -- measure it). See gige_driver.bayer_tile. A plain `true`/`false` still works.
+    # HW codec -- measure it). See cam_driver.bayer_tile. A plain `true`/`false` still works.
     bayer_tile: str = "off"
     # Temporal-compression window: the I-frame ("keyframe") interval in SECONDS -> the longest span the
     # encoder can predict across. Bigger = smaller files but coarser seek + less corruption resilience.
@@ -101,12 +101,12 @@ class TransportEndpoint:
 
 @dataclass
 class TransportConfig:
-    # `application/x-gige-frame` endpoint (36-byte header + frame) for out-of-process plugins:
+    # `application/x-cam-frame` endpoint (36-byte header + frame) for out-of-process plugins:
     plugin_endpoint: TransportEndpoint = field(
-        default_factory=lambda: TransportEndpoint(enabled=True, socket_path="/tmp/gige/frames"))
+        default_factory=lambda: TransportEndpoint(enabled=True, socket_path="/tmp/cam/frames"))
     # optional clean `video/x-raw` endpoint for generic same-host tools (no metadata):
     raw_endpoint: TransportEndpoint = field(
-        default_factory=lambda: TransportEndpoint(enabled=False, socket_path="/tmp/gige/raw"))
+        default_factory=lambda: TransportEndpoint(enabled=False, socket_path="/tmp/cam/raw"))
 
 
 @dataclass

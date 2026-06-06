@@ -33,7 +33,7 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
                        │ (custom appsrc, ~Python)
                        ▼
                      appsrc ─► tee ─┬─► recorder (lossless, temporal) ─► splitmuxsink .mkv + .csv/.json
-                                    ├─► shm publish (application/x-gige-frame header endpoint) ─► plugins
+                                    ├─► shm publish (application/x-cam-frame header endpoint) ─► plugins
                                     ├─► (optional) raw video/x-raw shm endpoint ─► generic tools
                                     └─► webrtcsink (lossy, low-latency) ─► remote viewers
 ```
@@ -61,7 +61,7 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
   x265 as an explicit option. A mono/Bayer mosaic rides in the Y plane of NV24; the Bayer pattern is
   recorded in the sidecar for post-debayer.
 
-- **Transport = shm + a 36-byte header (`application/x-gige-frame`).** GStreamer's `shmsink`/`shmsrc`
+- **Transport = shm + a 36-byte header (`application/x-cam-frame`).** GStreamer's `shmsink`/`shmsrc`
   transmit **only raw bytes** — PTS, DTS, and all `GstMeta` are dropped across the process boundary
   (confirmed at source level). So per-frame metadata (absolute timestamp, frame_id, geometry,
   provenance) travels in a fixed header prepended to each frame; the consumer parses it and stamps
@@ -89,25 +89,25 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
   in-image plugins as managed processes; heavy plugins (ROS2/DDS) run as **sibling containers**
   sharing the shm transport (`ipc: host` + a socket volume). Same plugin code either way.
 
-- **Config-driven multi-sensor orchestration (`gige-up` + Compose `include`/profiles).** Deployment is
-  driven by one **sensor config** (`config/sensors/<name>.yaml`) — never hand-edited compose. `gige-up`
+- **Config-driven multi-sensor orchestration (`cam-up` + Compose `include`/profiles).** Deployment is
+  driven by one **sensor config** (`config/sensors/<name>.yaml`) — never hand-edited compose. `cam-up`
   reads the config and turns its enabled `isolation: container` plugins into Compose **profiles**; each
   heavy plugin owns a `plugins/<x>/compose.yml` fragment that the top compose pulls in via **`include`**
   (Compose ≥ 2.20, verified present on JP6's `docker compose` v2). A plugin is thus added to a sensor by
   flipping `enabled` in the config, and the compose files stay static — **no generated compose artifact**
   (a step the user explicitly didn't want). The `plugins[]` list now feeds two consumers, split by
   `isolation`: `process` → the in-image supervisor; `container` → a compose profile (the supervisor skips
-  those). **Multiple cameras** run the same files as separate Compose **projects** (`gige-up cam_a` /
+  those). **Multiple cameras** run the same files as separate Compose **projects** (`cam-up cam_a` /
   `cam_b`), each with its own project name, shm volume, ROS namespace, and signalling port derived from
   the config; because GigE forces host networking, those ports/topics must be namespaced per camera.
   **shm is a host-level interface, not pod/project-scoped:** a stable **external** named volume
-  (`gige_<name>_sock`) + `ipc: host` lets any other sensor/autonomy stack read a sensor's frames by
+  (`cam_<name>_sock`) + `ipc: host` lets any other sensor/autonomy stack read a sensor's frames by
   mounting that volume + `--ipc=host` (validated: a container in neither project read cam_a's stream).
   Podman pods were weighed and rejected for exactly this reason — pod-scoped IPC would wall the shm off
-  from other stacks. `service: gige-vision` in each config is the routing hook for a future machine-level
-  launcher (scan `config/sensors/`, dispatch each to its stack); `gige-up` is deliberately the reusable
-  per-sensor unit that layer would call. A dev override (`docker-compose.dev.yml`, `gige-up --dev`) swaps
-  the l4t core for the `gige-dev` image so the whole model runs on a laptop/CI.
+  from other stacks. `service: camera-service` in each config is the routing hook for a future machine-level
+  launcher (scan `config/sensors/`, dispatch each to its stack); `cam-up` is deliberately the reusable
+  per-sensor unit that layer would call. A dev override (`docker-compose.dev.yml`, `cam-up --dev`) swaps
+  the l4t core for the `cam-dev` image so the whole model runs on a laptop/CI.
 
 - **Camera reconnect/backoff (a watchdog + a backoff thread, not a pipeline restart).** A GigE camera
   dropping off the link is the most common field failure, so the core recovers without dying or
@@ -128,30 +128,30 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
 - **"rig-compatible" launcher contract (vehicle-level orchestration, one-way dependency).** A separate
   machine-level tool, **`rig`**, brings up every sensor stack on one vehicle by looping over a manifest
   and DELEGATING to each service's own per-sensor launcher — it never reimplements per-stack logic.
-  gige-vision is one such service and **`gige-up` is its launcher** — and the exemplar of the contract
+  camera-service is one such service and **`cam-up` is its launcher** — and the exemplar of the contract
   (read one config → derive instance identity → select+parameterize a STATIC compose via profiles →
   create the external shm volume → run it). The dependency is strictly **one-way**: rig depends on this
-  repo; this repo stays fully usable standalone and never imports or knows about rig. `gige-up` stays
-  gige-specific (it only brings up gige camera stacks; it is not generalized to other services). The
+  repo; this repo stays fully usable standalone and never imports or knows about rig. `cam-up` stays
+  camera-specific (it only brings up camera stacks; it is not generalized to other services). The
   contract is four small things:
-  (1) `gige-up <config> {up -d | down | ps | logs | config}` operates on ONE sensor config;
-  (2) the config may live at an **arbitrary host path** — gige-up auto-detects a config outside
+  (1) `cam-up <config> {up -d | down | ps | logs | config}` operates on ONE sensor config;
+  (2) the config may live at an **arbitrary host path** — cam-up auto-detects a config outside
   `core-driver/config/sensors/`, and a small overlay (`docker-compose.external-config.yml`) bind-mounts
-  that single (self-contained) file at an absolute in-container path (`/run/gige-sensor.yaml`), pointing
-  `GIGE_CONFIG` there. It mounts OUTSIDE the read-only `/app/config` mount on purpose: Docker can't
+  that single (self-contained) file at an absolute in-container path (`/run/cam-sensor.yaml`), pointing
+  `CAM_CONFIG` there. It mounts OUTSIDE the read-only `/app/config` mount on purpose: Docker can't
   create a nested mount point inside a `:ro` mount. In-repo configs take no overlay and are byte-for-byte
   unchanged. One file suffices because a sensor config is self-contained (`load_config` reads one YAML +
   dataclass defaults; it doesn't merge `camera.yaml`);
   (3) the ros2-bridge passes through **`ROS_DOMAIN_ID` / `RMW_IMPLEMENTATION`** so every stack shares one
   ROS 2 graph (rig exports them; the defaults — domain 0, **`rmw_zenoh_cpp`** discovering via a shared
-  per-host `rmw_zenohd` router (`gige-up --zenohd` / `tools/zenohd.sh`; rig runs it in prod) — are correct
+  per-host `rmw_zenohd` router (`cam-up --zenohd` / `tools/zenohd.sh`; rig runs it in prod) — are correct
   standalone too; FastDDS stays selectable via `RMW_IMPLEMENTATION`. Zenoh also clears a FastDDS
   default-config bottleneck on large image messages — full-rate full-res color vs a few Hz);
   (4) a repo-root **`rigging.yaml`** descriptor tells rig how to invoke the launcher (logical verbs →
   compose subcommands, `ros_distro`) — descriptive metadata only, not code this repo runs.
   A core-driver **HEALTHCHECK** (the shm transport socket exists) makes `rig status` (= `docker compose
   ps`) report real health instead of "n/a". Invariants kept throughout: `ipc:host` + the external
-  `gige_<name>_sock` volume + host networking, so other stacks still read a camera's frames by mounting
+  `cam_<name>_sock` volume + host networking, so other stacks still read a camera's frames by mounting
   that volume + `--ipc=host`; static compose + profiles (no generated compose, no pod-scoping).
 
 - **SEI timestamp injection — considered, declined as primary.** `user_data_unregistered` SEI is the

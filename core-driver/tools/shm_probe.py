@@ -1,12 +1,12 @@
 """Validate the plugin transport endpoint.
 
-Reads `application/x-gige-frame` buffers off the core's shm socket, unpacks the
-36-byte header (gige_driver.transport), and prints timestamp_ns / frame_id /
+Reads `application/x-cam-frame` buffers off the core's shm socket, unpacks the
+36-byte header (cam_driver.transport), and prints timestamp_ns / frame_id /
 geometry per frame -- i.e. exactly what the C++ ros2-bridge will do, but in a few
 lines for validation. Same-host consumer; run alongside the core (same container or
 shared /dev/shm + socket volume).
 
-Usage: python3 tools/shm_probe.py [--socket /tmp/gige/frames] [--count 10]
+Usage: python3 tools/shm_probe.py [--socket /tmp/cam/frames] [--count 10]
 """
 import argparse
 import os
@@ -18,12 +18,12 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst  # noqa: E402
 
-from gige_driver import transport  # noqa: E402
+from cam_driver import transport  # noqa: E402
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Probe the gige plugin transport endpoint")
-    ap.add_argument("--socket", default="/tmp/gige/frames")
+    ap = argparse.ArgumentParser(description="Probe the cam plugin transport endpoint")
+    ap.add_argument("--socket", default="/tmp/cam/frames")
     ap.add_argument("--count", type=int, default=10)
     ap.add_argument("--timeout", type=float, default=10.0, help="seconds to wait per frame")
     args = ap.parse_args()

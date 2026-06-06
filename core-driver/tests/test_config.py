@@ -7,13 +7,13 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from gige_driver.config import parse_config  # noqa: E402
+from cam_driver.config import parse_config  # noqa: E402
 
 
 def test_defaults():
     c = parse_config({})
     assert c.transport.plugin_endpoint.enabled is True
-    assert c.transport.plugin_endpoint.socket_path == "/tmp/gige/frames"
+    assert c.transport.plugin_endpoint.socket_path == "/tmp/cam/frames"
     assert c.transport.plugin_endpoint.max_rate_hz == 0.0
     assert c.transport.raw_endpoint.enabled is False
     assert c.plugins == []
@@ -25,7 +25,7 @@ def test_partial_endpoint_overlay_keeps_defaults():
     c = parse_config({"transport": {"plugin_endpoint": {"max_rate_hz": 10}}})
     assert c.transport.plugin_endpoint.max_rate_hz == 10
     assert c.transport.plugin_endpoint.enabled is True
-    assert c.transport.plugin_endpoint.socket_path == "/tmp/gige/frames"
+    assert c.transport.plugin_endpoint.socket_path == "/tmp/cam/frames"
 
 
 def test_raw_endpoint_enable():

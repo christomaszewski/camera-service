@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from gige_driver.transport import (  # noqa: E402
+from cam_driver.transport import (  # noqa: E402
     CAPS, HEADER_SIZE, FrameHeader, TransportError, unpack_header,
 )
 
@@ -52,7 +52,7 @@ def test_bad_magic():
 
 def test_truncated():
     try:
-        unpack_header(b"GIGE")
+        unpack_header(b"CAMF")
         assert False, "expected TransportError"
     except TransportError:
         pass
@@ -67,7 +67,7 @@ def test_unsupported_pixfmt_rejected():
 
 
 def test_caps_constant():
-    assert CAPS == "application/x-gige-frame"
+    assert CAPS == "application/x-cam-frame"
 
 
 def _main():

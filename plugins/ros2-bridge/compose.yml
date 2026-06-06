@@ -1,6 +1,6 @@
 # ros2-bridge — heavy plugin, runs as its own container (ROS2/DDS on a Lyrical Luth LTS base).
 # Pulled into the per-sensor stack by the top-level docker-compose.yml via `include:`, and
-# activated only when the `ros2-bridge` profile is enabled (gige-up derives the profile set
+# activated only when the `ros2-bridge` profile is enabled (cam-up derives the profile set
 # from the sensor config's enabled `isolation: container` plugins).
 #
 # Note: with `include`, relative paths here resolve relative to THIS file's directory, so the
@@ -8,46 +8,46 @@
 services:
   ros2-bridge:
     profiles: ["ros2-bridge"]
-    image: ${GIGE_ROS2_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}ros2-bridge}  # rig: RIG_IMAGE_REGISTRY; standalone: gige-up sets GIGE_ROS2_IMAGE from GIGE_REGISTRY
+    image: ${CAM_ROS2_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}ros2-bridge}  # rig: RIG_IMAGE_REGISTRY; standalone: cam-up sets CAM_ROS2_IMAGE from CAM_REGISTRY
     build:
       context: ../..
       dockerfile: plugins/ros2-bridge/Dockerfile
     init: true
-    network_mode: ${GIGE_NETWORK:-host}     # host = join the host ROS2 graph
+    network_mode: ${CAM_NETWORK:-host}     # host = join the host ROS2 graph
     ipc: host                               # share /dev/shm with the core (JP6 shm transport; harmless for unixfd)
     volumes:
-      - gige_sock:/tmp/gige
+      - cam_sock:/tmp/cam
     environment:
-      # Transport selection (must match the core): unixfd on JP7, shm+header on JP6. gige-up exports the
-      # host platform; the launch file derives the component + socket from it (GIGE_TRANSPORT overrides).
-      - GIGE_PLATFORM=${GIGE_PLATFORM:-jp6}
-      - GIGE_TRANSPORT=${GIGE_TRANSPORT:-}
+      # Transport selection (must match the core): unixfd on JP7, shm+header on JP6. cam-up exports the
+      # host platform; the launch file derives the component + socket from it (CAM_TRANSPORT overrides).
+      - CAM_PLATFORM=${CAM_PLATFORM:-jp6}
+      - CAM_TRANSPORT=${CAM_TRANSPORT:-}
       # Per-sensor identity (sensor_env derives these from the config): ROS namespace, topic, frame_id.
-      - GIGE_INSTANCE=${GIGE_INSTANCE:-camera}
-      - GIGE_ROS_TOPIC=${GIGE_ROS_TOPIC:-image_raw}
-      - GIGE_FRAME_ID=${GIGE_FRAME_ID:-camera}
+      - CAM_INSTANCE=${CAM_INSTANCE:-camera}
+      - CAM_ROS_TOPIC=${CAM_ROS_TOPIC:-image_raw}
+      - CAM_FRAME_ID=${CAM_FRAME_ID:-camera}
       # Bayer color: sensor_env derives these from the camera pixel_format + the plugin's `debayer` param.
-      # GIGE_ROS_ENCODING labels a mosaic stream (e.g. bayer_rggb8); '' = mono. GIGE_DEBAYER=true turns on
+      # CAM_ROS_ENCODING labels a mosaic stream (e.g. bayer_rggb8); '' = mono. CAM_DEBAYER=true turns on
       # debayering -- JP7 in the GStreamer pipeline (bayer2rgb), JP6 via a composed image_proc::DebayerNode.
-      - GIGE_ROS_ENCODING=${GIGE_ROS_ENCODING:-}
-      - GIGE_DEBAYER=${GIGE_DEBAYER:-false}
-      # Join the vehicle-wide ROS 2 graph. `rig` exports these before calling gige-up so every stack
+      - CAM_ROS_ENCODING=${CAM_ROS_ENCODING:-}
+      - CAM_DEBAYER=${CAM_DEBAYER:-false}
+      # Join the vehicle-wide ROS 2 graph. `rig` exports these before calling cam-up so every stack
       # shares one graph; the defaults are also correct standalone. The graph runs on rmw_zenoh_cpp,
-      # which discovers via a shared host `rmw_zenohd` router (rig runs it; standalone: `gige-up
+      # which discovers via a shared host `rmw_zenohd` router (rig runs it; standalone: `cam-up
       # --zenohd` or tools/zenohd.sh). On host networking the node reaches it at the default
       # tcp/localhost:7447 -- no extra config. FastDDS stays selectable via RMW_IMPLEMENTATION.
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
       - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}
       # Optional: point the zenoh session at a non-localhost router (rig sets this for a remote hub).
       - ZENOH_SESSION_CONFIG_URI=${ZENOH_SESSION_CONFIG_URI:-}
-    # Compose the container per platform (env-driven). The launch file picks GigeUnixfdBridge (JP7) or
-    # GigeHeaderBridge (JP6), namespaces it /<instance>, and on JP6+debayer also loads image_proc.
-    command: ["ros2", "launch", "gige_ros2_bridge", "bridge.launch.py"]
+    # Compose the container per platform (env-driven). The launch file picks CamUnixfdBridge (JP7) or
+    # CamHeaderBridge (JP6), namespaces it /<instance>, and on JP6+debayer also loads image_proc.
+    command: ["ros2", "launch", "cam_ros2_bridge", "bridge.launch.py"]
     depends_on:
       - core-driver
     restart: unless-stopped
 
 volumes:
-  gige_sock:
+  cam_sock:
     external: true
-    name: ${GIGE_SOCK_VOLUME:-gige_sock}
+    name: ${CAM_SOCK_VOLUME:-cam_sock}

@@ -28,10 +28,10 @@ preview:
 transport:
   plugin_endpoint:            # exercise the header endpoint when testing with the fake camera
     enabled: true
-    socket_path: /tmp/gige/frames
+    socket_path: /tmp/cam/frames
     max_rate_hz: 0
   raw_endpoint:
     enabled: false
-    socket_path: /tmp/gige/raw
+    socket_path: /tmp/cam/raw
 
 plugins: []                   # none spawned in the fake smoke test

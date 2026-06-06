@@ -1,8 +1,8 @@
 # Descriptor for the "rig" vehicle-level orchestrator: how to invoke this service's per-sensor
 # launcher. Descriptive metadata ONLY -- this repo does not depend on rig, and rig depends on
-# this repo (one-way). rig invokes:  <launcher> <config> <mapped-verb>   e.g.  gige-up <config> up -d
-service: gige-vision
-launcher: gige-up
+# this repo (one-way). rig invokes:  <launcher> <config> <mapped-verb>   e.g.  cam-up <config> up -d
+service: camera-service
+launcher: cam-up
 verbs:
   up: "up -d"
   down: "down"
@@ -11,34 +11,34 @@ verbs:
   config: "config"
 ros_distro: lyrical
 
-platform:                                # JP6 vs JP7 is a HOST fact; gige-up auto-detects it per host
+platform:                                # JP6 vs JP7 is a HOST fact; cam-up auto-detects it per host
   auto_detect: /etc/nv_tegra_release     #   R36 -> jp6 (l4t + nvidia runtime); R38+ -> jp7 (runc + CDI)
-  override_env: GIGE_PLATFORM            #   rig may set this per host to {jp6|jp7} to pin instead of detect
+  override_env: CAM_PLATFORM            #   rig may set this per host to {jp6|jp7} to pin instead of detect
 
-images:                                  # pull-based deploy: gige-up points images at a registry (docs/deploy-without-rig.md)
-  registry_env: GIGE_REGISTRY            #   set -> <registry>/<name>:<platform> for every image; then `pull` + `up`
-  rig_registry_env: RIG_IMAGE_REGISTRY   #   rig's fleet registry; gige-up honors it (applies the platform tag)
-  tag_env: GIGE_IMAGE_TAG                #   default tag = detected platform (jp6/jp7); set to pin a release
-  per_image_env: [GIGE_CORE_IMAGE, GIGE_ROS2_IMAGE, GIGE_ROS1_IMAGE, GIGE_WEBRTC_IMAGE]   # override a single image
+images:                                  # pull-based deploy: cam-up points images at a registry (docs/deploy-without-rig.md)
+  registry_env: CAM_REGISTRY            #   set -> <registry>/<name>:<platform> for every image; then `pull` + `up`
+  rig_registry_env: RIG_IMAGE_REGISTRY   #   rig's fleet registry; cam-up honors it (applies the platform tag)
+  tag_env: CAM_IMAGE_TAG                #   default tag = detected platform (jp6/jp7); set to pin a release
+  per_image_env: [CAM_CORE_IMAGE, CAM_ROS2_IMAGE, CAM_ROS1_IMAGE, CAM_WEBRTC_IMAGE]   # override a single image
 
 build:                                   # rig's BUILD phase: how to (re)build + push this stack's images to the
                                          # fleet registry. See docs/fleet-build-contract.md for the rig loop.
   command: tools/build-images.sh         #   builds + pushes; reads $RIG_IMAGE_REGISTRY (or arg $1); tag = arg $2
   arch: arm64                            #   build NATIVELY on an arm64 host (Aravis + colcon compiles; no qemu)
   platforms: [jp7, jp6]                  #   platform tags this stack publishes -- rig builds the ones the fleet uses
-  images: [gige-core, ros2-bridge, ros1-bridge, webrtc-bridge]   # produced as <registry>/<image>:<platform>
+  images: [cam-core, ros2-bridge, ros1-bridge, webrtc-bridge]   # produced as <registry>/<image>:<platform>
                                          #   (ros1-bridge is Noetic / jp6-class; built into the jp6 set)
 
 launch_surface:                          # the files rig copies to the vehicle (NOT the source/build context)
-  - gige-up
+  - cam-up
   - tools/sensor_env.py
   - docker-compose.yml
   - docker-compose.dev.yml
   - docker-compose.external-config.yml
-  - docker-compose.jp7.yml                # the JP7 (runc + CDI NVENC) overlay; gige-up applies it per host
+  - docker-compose.jp7.yml                # the JP7 (runc + CDI NVENC) overlay; cam-up applies it per host
   - plugins/ros2-bridge/compose.yml
   - plugins/ros1-bridge/compose.yml
   - plugins/webrtc-bridge/compose.yml
 
 external_volumes:                        # rig removes these only on FINAL teardown (`rig down --purge`),
-  - "gige_{name}_sock"                   #   never on a restart; {name} is the instance name
+  - "cam_{name}_sock"                   #   never on a restart; {name} is the instance name

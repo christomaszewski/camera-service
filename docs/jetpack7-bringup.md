@@ -25,14 +25,14 @@ Host prep for GigE (once, per the main README): NIC `mtu 9000`, `net.core.rmem_m
 grandmaster (`ptp4l`/`phc2sys`) if you'll test PTP.
 
 ## L1 — Fake-camera smoke (no camera, no NVENC, no JP7-base questions)
-The `gige-dev` image is plain Ubuntu + apt GStreamer/Aravis (no NVIDIA), so it runs anywhere on arm64 and
+The `cam-dev` image is plain Ubuntu + apt GStreamer/Aravis (no NVIDIA), so it runs anywhere on arm64 and
 exercises the pipeline logic end-to-end.
 ```bash
-git clone https://github.com/christomaszewski/gige-vision-service && cd gige-vision-service
-docker build -f core-driver/Dockerfile.dev -t gige-dev .
+git clone https://github.com/christomaszewski/camera-service && cd camera-service
+docker build -f core-driver/Dockerfile.dev -t cam-dev .
 ./core-driver/tools/dev_test.sh            # fake camera -> timestamp -> FFV1 -> shm -> probe round-trip
 ```
-Green here = capture/timestamp/record(FFV1)/transport all work on the Orin. (Aravis from apt on `gige-dev`
+Green here = capture/timestamp/record(FFV1)/transport all work on the Orin. (Aravis from apt on `cam-dev`
 may be older than 0.8.32, so chunk/PTP needs the core image in L2 — that's fine, L1 is just a smoke test.)
 
 ## L2 — Real camera + the PTP experiment (software FFV1, still no NVENC dependency)
@@ -40,8 +40,8 @@ Build the **core** image — it builds Aravis 0.8.34 from source (full extended-
 24.04 base; the build does **not** need `nvv4l2` (that's runtime-only):
 ```bash
 # A plain 24.04 base is enough -- NVENC goes through the v4l2/CDI path, not CUDA (confirmed on JP7.2).
-docker build -f core-driver/Dockerfile -t gige-core --build-arg BASE_IMAGE=ubuntu:24.04 .
-docker run --rm gige-core gst-inspect-1.0 aravissrc | head -1    # Aravis built OK
+docker build -f core-driver/Dockerfile -t cam-core --build-arg BASE_IMAGE=ubuntu:24.04 .
+docker run --rm cam-core gst-inspect-1.0 aravissrc | head -1    # Aravis built OK
 ```
 Point a config at your camera with the **software** recorder (decouples this from the NVENC unknown):
 copy `core-driver/config/camera.yaml`, set `camera.fake: false` + `camera.camera_id: <serial>`, and
@@ -49,7 +49,7 @@ copy `core-driver/config/camera.yaml`, set `camera.fake: false` + `camera.camera
 ```bash
 docker run --rm --network host --ipc=host \
   -v "$PWD/core-driver/config:/app/config:ro" -v "$PWD/recordings:/data/recordings" \
-  gige-core supervisor.py -c config/<my-cam>.yaml -v
+  cam-core supervisor.py -c config/<my-cam>.yaml -v
 ```
 This is the **highest-value on-hardware test** and the [PTP timestamp experiment](ptp-timestamp-experiment.md):
 - confirm `chunk mode enabled` + `Active timestamp source = ptp_chunk`, `GevIEEE1588Status=Slave`;
@@ -63,9 +63,9 @@ JP7 replaced JP6's CSV-mount model with **CDI**. One-time host setup, then the e
 `/dev/v4l2-nvenc`, and even `nvunixfd` are all injected, into the standard plugin dir):
 ```bash
 sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml      # once (re-run after a JetPack update)
-# NB: the gige-core ENTRYPOINT is python3 (it's a supervisor runner), so non-python tools need
-# --entrypoint to bypass it -- else `gige-core gst-inspect-1.0 ...` runs `python3 gst-inspect-1.0`.
-docker run --rm --device nvidia.com/gpu=all --entrypoint gst-inspect-1.0 gige-core nvv4l2h265enc | head -3   # "V4L2 H.265 Encoder"
+# NB: the cam-core ENTRYPOINT is python3 (it's a supervisor runner), so non-python tools need
+# --entrypoint to bypass it -- else `cam-core gst-inspect-1.0 ...` runs `python3 gst-inspect-1.0`.
+docker run --rm --device nvidia.com/gpu=all --entrypoint gst-inspect-1.0 cam-core nvv4l2h265enc | head -3   # "V4L2 H.265 Encoder"
 ```
 Then run the HW lossless recorder — set `recording.encoder: auto` (8-bit → `hw-hevc-lossless`, NV24/NVMM)
 and run the core with the CDI device (`--device nvidia.com/gpu=all`, **not** `--runtime nvidia` — the
@@ -73,7 +73,7 @@ nvidia runtime no longer injects multimedia on JP7):
 ```bash
 docker run --rm --device nvidia.com/gpu=all --network host --ipc=host \
   -v "$PWD/core-driver/config:/app/config:ro" -v "$PWD/recordings:/data/recordings" \
-  gige-core supervisor.py -c config/<my-cam>.yaml -v
+  cam-core supervisor.py -c config/<my-cam>.yaml -v
 ```
 Prove bit-exact (the part that matters — a "lossless" codec over a range-scaled Y plane is *not*
 lossless): `./core-driver/tools/nvenc_lossless_test.sh` pushes known random GRAY8 frames through the
@@ -86,14 +86,14 @@ change is needed. (Harmless `(Argus) … nvargus-daemon failed` lines during plu
 camera plugin — ignore them.)
 
 ## L4 — Full per-sensor stack
-On a JP7 host `gige-up` **auto-detects** JetPack 7 (`/etc/nv_tegra_release` shows R39) and applies the
-runc + CDI overlay (`docker-compose.jp7.yml`) plus the 24.04 build base — so plain `gige-up <config> up -d`
-already does the right thing. `--jp7` only *forces* it, and `GIGE_PLATFORM=jp7` pins it (how rig selects
-per host). Build *through* gige-up so the base is set for you, then bring it up:
+On a JP7 host `cam-up` **auto-detects** JetPack 7 (`/etc/nv_tegra_release` shows R39) and applies the
+runc + CDI overlay (`docker-compose.jp7.yml`) plus the 24.04 build base — so plain `cam-up <config> up -d`
+already does the right thing. `--jp7` only *forces* it, and `CAM_PLATFORM=jp7` pins it (how rig selects
+per host). Build *through* cam-up so the base is set for you, then bring it up:
 ```bash
-./gige-up config/sensors/<my-cam>.yaml build core-driver   # JP7 host -> auto GIGE_CORE_BASE=ubuntu:24.04
-./gige-up config/sensors/<my-cam>.yaml up -d
-./gige-up config/sensors/<my-cam>.yaml ps                  # health column should read 'healthy'
+./cam-up config/sensors/<my-cam>.yaml build core-driver   # JP7 host -> auto CAM_CORE_BASE=ubuntu:24.04
+./cam-up config/sensors/<my-cam>.yaml up -d
+./cam-up config/sensors/<my-cam>.yaml ps                  # health column should read 'healthy'
 ```
 The plugins (ros2-bridge on Lyrical, webrtc-bridge) already run on Ubuntu 24.04, so they're unaffected by
 the host JetPack and now match the core's userspace.
@@ -110,7 +110,7 @@ Both are follow-ups to evaluate after the core pipeline is validated on JP7; ask
 ## Notes (resolved on a JP7.2 Orin AGX, driver R595.78)
 - **Base image:** a plain `ubuntu:24.04` works — the NVENC path is v4l2/CDI, not CUDA. Use a CUDA base
   (`nvcr.io/nvidia/cuda:13.x-devel-ubuntu24.04`) only if you add custom CUDA processing. `BASE_IMAGE` /
-  `GIGE_CORE_BASE` is a one-flag swap.
+  `CAM_CORE_BASE` is a one-flag swap.
 - **GPU/multimedia injection:** **CDI**, not the JP6 CSV mounts (the old `l4t.csv` is gone). `nvidia-ctk
   cdi generate` once, then run with `--device nvidia.com/gpu=all` (Docker's native CDI; default `runc`
   runtime). The generated spec carries the full multimedia stack incl. `nvunixfd`.

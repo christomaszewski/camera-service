@@ -2,22 +2,22 @@
 # Bring up exactly ONE shared roscore (the ROS 1 master) per host -- the vehicle-wide ROS 1 graph hub for
 # the ros1-bridge, analogous to the shared rmw_zenohd router for ros2. ROS 1 nodes reach it at
 # ROS_MASTER_URI=http://localhost:11311 over host networking. Idempotent: re-running is a no-op if it's up.
-# rig runs this once per host in production; standalone, run it (or `gige-up --roscore`) before sensors.
+# rig runs this once per host in production; standalone, run it (or `cam-up --roscore`) before sensors.
 #
 #   tools/roscore.sh up      # start it if not already running
 #   tools/roscore.sh down    # stop + remove it
 #   tools/roscore.sh status  # is it up?
 #
 #   env knobs:
-#     GIGE_ROS1_IMAGE    image that carries roscore (default: ros1-bridge; set to your registry tag)
-#     GIGE_ROSCORE_NAME  container name (default: gige-roscore) -- the fixed name keeps it singular
-#     GIGE_ROS1_NETWORK  docker network (default: host -- nodes reach localhost:11311)
-#     GIGE_ROSCORE_PORT  master port (default: 11311; only published when NETWORK != host)
+#     CAM_ROS1_IMAGE    image that carries roscore (default: ros1-bridge; set to your registry tag)
+#     CAM_ROSCORE_NAME  container name (default: cam-roscore) -- the fixed name keeps it singular
+#     CAM_ROS1_NETWORK  docker network (default: host -- nodes reach localhost:11311)
+#     CAM_ROSCORE_PORT  master port (default: 11311; only published when NETWORK != host)
 set -euo pipefail
-NAME="${GIGE_ROSCORE_NAME:-gige-roscore}"
-IMAGE="${GIGE_ROS1_IMAGE:-ros1-bridge}"
-NET="${GIGE_ROS1_NETWORK:-host}"
-PORT="${GIGE_ROSCORE_PORT:-11311}"
+NAME="${CAM_ROSCORE_NAME:-cam-roscore}"
+IMAGE="${CAM_ROS1_IMAGE:-ros1-bridge}"
+NET="${CAM_ROS1_NETWORK:-host}"
+PORT="${CAM_ROSCORE_PORT:-11311}"
 CMD="${1:-up}"
 
 running() { [ -n "$(docker ps -q -f "name=^${NAME}$" 2>/dev/null)" ]; }

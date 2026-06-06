@@ -9,11 +9,11 @@ we drop chroma on decode and only compare the Y plane -- so a mismatch means a
 range/colorimetry scale (small systematic delta) or genuine corruption (large delta).
 
 This pushes known, near-incompressible random GRAY8 frames through the EXACT recorder
-encode fragment (see gige_driver/recorder.py: build_recorder_description, hw-hevc-lossless),
+encode fragment (see cam_driver/recorder.py: build_recorder_description, hw-hevc-lossless),
 decodes them back to GRAY8, and compares byte-for-byte against the bytes we fed in.
 
 Runs inside the core image WITH the NVENC CDI device (see docs/jetpack7-bringup.md):
-    docker run --rm --device nvidia.com/gpu=all gige-core tools/nvenc_lossless_test.py
+    docker run --rm --device nvidia.com/gpu=all cam-core tools/nvenc_lossless_test.py
 (or via tools/nvenc_lossless_test.sh). Everything stays in the container's /tmp -- no
 bind mounts, no root-owned artefacts on the host. PASS => the HW path is mathematically
 lossless for 8-bit mono; FAIL with small systematic deltas => a full-range cap to add in

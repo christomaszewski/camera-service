@@ -1,4 +1,4 @@
-// GigeBridgeBase: the shared machinery behind the two transport-specific bridge components.
+// CamBridgeBase: the shared machinery behind the two transport-specific bridge components.
 //
 // Both components are proper rclcpp composable nodes (RCLCPP_COMPONENTS_REGISTER_NODE) so they can
 // be loaded into a `component_container_mt` and, on JP6, share a process with image_proc::DebayerNode
@@ -21,7 +21,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 
-namespace gige_ros2_bridge {
+namespace cam_ros2_bridge {
 
 // One frame, normalized across transports. `data` points into the still-mapped GstBuffer (valid only
 // for the duration of the extract()/publish() call); publish() copies it into the ROS message.
@@ -42,14 +42,14 @@ int bytes_per_pixel(const std::string& encoding);
 // Env var value or a default (treats an empty value as unset).
 const char* env_or(const char* key, const char* def);
 
-class GigeBridgeBase : public rclcpp::Node {
+class CamBridgeBase : public rclcpp::Node {
  public:
-  ~GigeBridgeBase() override;
+  ~CamBridgeBase() override;
 
  protected:
   // Subclasses pass their node name + the per-transport default socket path; `options` MUST be the
   // NodeOptions the component was loaded with (carries use_intra_process_comms etc.).
-  GigeBridgeBase(const std::string& node_name, const rclcpp::NodeOptions& options,
+  CamBridgeBase(const std::string& node_name, const rclcpp::NodeOptions& options,
                  const std::string& default_socket_path);
 
   // Bring the GStreamer pipeline up. Call from the SUBCLASS constructor (after its own params are
@@ -66,7 +66,7 @@ class GigeBridgeBase : public rclcpp::Node {
   std::string socket_path_;
   std::string topic_;
   std::string frame_id_;
-  std::string encoding_;   // GIGE_ROS_ENCODING hint: bayer_* for a CFA camera, "" for mono
+  std::string encoding_;   // CAM_ROS_ENCODING hint: bayer_* for a CFA camera, "" for mono
   bool debayer_ = false;
 
  private:
@@ -78,4 +78,4 @@ class GigeBridgeBase : public rclcpp::Node {
   image_transport::Publisher pub_;
 };
 
-}  // namespace gige_ros2_bridge
+}  // namespace cam_ros2_bridge

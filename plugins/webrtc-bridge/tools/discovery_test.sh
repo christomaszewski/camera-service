@@ -11,20 +11,20 @@
 # NOT exercised here (that's webrtc_test.sh); the pipeline only needs to reach PLAYING to advertise.
 #
 # Images (override via env): CORE_IMG (gst>=1.24 for unixfd), WEBRTC_IMG, ROUTER_IMG (carries rmw_zenohd).
-#   ./discovery_test.sh        # CORE_IMG=gige-core:bench WEBRTC_IMG=webrtc-bridge:jp7 ROUTER_IMG=ros2-bridge:jp7
+#   ./discovery_test.sh        # CORE_IMG=cam-core:bench WEBRTC_IMG=webrtc-bridge:jp7 ROUTER_IMG=ros2-bridge:jp7
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 REPO="$(pwd)"
 
-CORE_IMG="${CORE_IMG:-gige-core:bench}"
+CORE_IMG="${CORE_IMG:-cam-core:bench}"
 BRIDGE_IMG="${WEBRTC_IMG:-webrtc-bridge:jp7}"
 ROUTER_IMG="${ROUTER_IMG:-ros2-bridge:jp7}"
-VOL=gige_disco_sock
+VOL=cam_disco_sock
 VEH=testvehicle
 SENSOR=cam_fake
 KEY="fleet/$VEH/media/$SENSOR"
 
-R=gige_disco_router; C=gige_disco_core; B=gige_disco_bridge; P=gige_disco_probe
+R=cam_disco_router; C=cam_disco_core; B=cam_disco_bridge; P=cam_disco_probe
 cleanup() { docker rm -f "$R" "$C" "$B" "$P" >/dev/null 2>&1 || true; docker volume rm "$VOL" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 cleanup
@@ -41,13 +41,13 @@ sleep 4
 
 echo "== start core (fake BayerRG8 -> unixfd) =="
 docker run -d --rm --name "$C" --network host --entrypoint bash \
-  -v "$VOL:/tmp/gige" -v "$REPO/core-driver:/app" "$CORE_IMG" \
-  -c "cd /app && mkdir -p /tmp/gige && exec python3 main.py -c config/webrtc-fake-bayer.yaml" >/dev/null
+  -v "$VOL:/tmp/cam" -v "$REPO/core-driver:/app" "$CORE_IMG" \
+  -c "cd /app && mkdir -p /tmp/cam && exec python3 main.py -c config/webrtc-fake-bayer.yaml" >/dev/null
 
 echo "== start webrtc-bridge (advertises to tcp/localhost:7447) =="
 docker run -d --rm --name "$B" --network host \
-  -v "$VOL:/tmp/gige" -v "$REPO/plugins/webrtc-bridge:/app" \
-  -e GIGE_PLATFORM=jp7 -e GIGE_BAYER=rggb -e GIGE_INSTANCE="$SENSOR" -e VEHICLE_ID="$VEH" \
+  -v "$VOL:/tmp/cam" -v "$REPO/plugins/webrtc-bridge:/app" \
+  -e CAM_PLATFORM=jp7 -e CAM_BAYER=rggb -e CAM_INSTANCE="$SENSOR" -e VEHICLE_ID="$VEH" \
   "$BRIDGE_IMG" bash run.sh >/dev/null
 
 echo "== start probe (liveliness subscriber on fleet/*/media/*) =="

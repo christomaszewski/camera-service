@@ -1,6 +1,6 @@
-# A second camera on the same machine — same files, different config. gige-up runs it as its own
-# compose project (gige_cam_b) with its own shm volume + signalling port, so it coexists with cam_a.
-service: gige-vision
+# A second camera on the same machine — same files, different config. cam-up runs it as its own
+# compose project (cam_cam_b) with its own shm volume + signalling port, so it coexists with cam_a.
+service: camera-service
 name: cam_b
 
 camera:
@@ -26,10 +26,10 @@ recording:
 transport:
   plugin_endpoint:
     enabled: true
-    socket_path: /tmp/gige/frames
+    socket_path: /tmp/cam/frames
   raw_endpoint:
     enabled: true
-    socket_path: /tmp/gige/raw
+    socket_path: /tmp/cam/raw
 
 # cam_b runs a different plugin than cam_a (webrtc instead of ros2) to show per-sensor selection.
 # Distinct signalling port (8444) because host networking means ports are shared across sensors.

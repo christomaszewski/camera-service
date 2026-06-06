@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 # Bring up exactly ONE shared zenoh router (`rmw_zenohd`) per host -- the vehicle-wide ROS 2 discovery
-# hub for rmw_zenoh_cpp. The gige stacks (and any other ROS 2 nodes on the host) connect to it at the
+# hub for rmw_zenoh_cpp. The cam stacks (and any other ROS 2 nodes on the host) connect to it at the
 # default tcp/localhost:7447 over host networking. It is a HOST fact, not a per-sensor one: run it once.
 #
 #   tools/zenohd.sh up      # start it if not already running (idempotent -- safe to re-run)
 #   tools/zenohd.sh down    # stop + remove it
 #   tools/zenohd.sh status  # is it up?
 #
-# In a `rig` deploy, rig owns this (one per host) and gige-up assumes it's present. Standalone, run this
-# once (or `gige-up --zenohd <cfg> ...`, which calls it for you) before bringing sensors up.
+# In a `rig` deploy, rig owns this (one per host) and cam-up assumes it's present. Standalone, run this
+# once (or `cam-up --zenohd <cfg> ...`, which calls it for you) before bringing sensors up.
 #
 #   env knobs:
-#     GIGE_ROS2_IMAGE   image that carries rmw_zenohd (default: ros2-bridge; set to your registry tag)
-#     GIGE_ZENOHD_NAME  container name (default: gige-zenohd) -- the fixed name is what makes it singular
-#     GIGE_ZENOH_NETWORK  docker network (default: host -- the production model; nodes reach localhost:7447)
-#     GIGE_ZENOH_PORT   router port (default: 7447; only published when NETWORK != host)
+#     CAM_ROS2_IMAGE   image that carries rmw_zenohd (default: ros2-bridge; set to your registry tag)
+#     CAM_ZENOHD_NAME  container name (default: cam-zenohd) -- the fixed name is what makes it singular
+#     CAM_ZENOH_NETWORK  docker network (default: host -- the production model; nodes reach localhost:7447)
+#     CAM_ZENOH_PORT   router port (default: 7447; only published when NETWORK != host)
 set -euo pipefail
-NAME="${GIGE_ZENOHD_NAME:-gige-zenohd}"
-IMAGE="${GIGE_ROS2_IMAGE:-ros2-bridge}"
-NET="${GIGE_ZENOH_NETWORK:-host}"
-PORT="${GIGE_ZENOH_PORT:-7447}"
+NAME="${CAM_ZENOHD_NAME:-cam-zenohd}"
+IMAGE="${CAM_ROS2_IMAGE:-ros2-bridge}"
+NET="${CAM_ZENOH_NETWORK:-host}"
+PORT="${CAM_ZENOH_PORT:-7447}"
 CMD="${1:-up}"
 
 running() { [ -n "$(docker ps -q -f "name=^${NAME}$" 2>/dev/null)" ]; }

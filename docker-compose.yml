@@ -1,13 +1,13 @@
-# Per-sensor stack — ONE config drives ONE sensor. Don't run this directly; run `./gige-up
+# Per-sensor stack — ONE config drives ONE sensor. Don't run this directly; run `./cam-up
 # <sensor-config>`, which reads the config (the single source of truth), turns its enabled
 # `isolation: container` plugins into COMPOSE_PROFILES, and parameterizes the stack below.
 #
 # Each heavy plugin lives in its own plugins/<x>/compose.yml and is pulled in via `include:`;
 # the active set is chosen by profiles, so adding a plugin to a sensor = flipping it on in the
 # config, not editing this file. Multiple cameras = the same files run as multiple projects
-# (gige-up sets COMPOSE_PROJECT_NAME / the socket volume / ports per sensor).
+# (cam-up sets COMPOSE_PROJECT_NAME / the socket volume / ports per sensor).
 #
-# The shm transport is a stable EXTERNAL named volume (${GIGE_SOCK_VOLUME}) + ipc:host, so other
+# The shm transport is a stable EXTERNAL named volume (${CAM_SOCK_VOLUME}) + ipc:host, so other
 # sensor or autonomy stacks attach to a sensor's frames by mounting that volume + --ipc=host —
 # it is not scoped to this compose project.
 #
@@ -19,33 +19,33 @@ include:
 
 services:
   core-driver:
-    # gige-up auto-detects the host (JP6/JP7) and sets GIGE_CORE_BASE to match; GIGE_CORE_IMAGE lets
-    # pull-based deploys point at a per-platform registry tag (e.g. registry/gige-core:jp7). When rig
-    # injects RIG_IMAGE_REGISTRY the bare tag is pulled from that fleet registry; GIGE_CORE_IMAGE still wins.
-    image: ${GIGE_CORE_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}gige-core}
+    # cam-up auto-detects the host (JP6/JP7) and sets CAM_CORE_BASE to match; CAM_CORE_IMAGE lets
+    # pull-based deploys point at a per-platform registry tag (e.g. registry/cam-core:jp7). When rig
+    # injects RIG_IMAGE_REGISTRY the bare tag is pulled from that fleet registry; CAM_CORE_IMAGE still wins.
+    image: ${CAM_CORE_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}cam-core}
     build:
       context: .
       dockerfile: core-driver/Dockerfile
       args:
         # JP6 default = the slim l4t-base (NOT l4t-jetpack -- we use no CUDA SDK, so the full ~14 GB
-        # JetPack base is pure waste). On a JP7 host gige-up sets this to ubuntu:24.04. NVENC is
+        # JetPack base is pure waste). On a JP7 host cam-up sets this to ubuntu:24.04. NVENC is
         # injected at runtime (CSV on JP6, CDI on JP7), so no CUDA base is ever needed.
-        BASE_IMAGE: ${GIGE_CORE_BASE:-nvcr.io/nvidia/l4t-base:r36.2.0}
+        BASE_IMAGE: ${CAM_CORE_BASE:-nvcr.io/nvidia/l4t-base:r36.2.0}
     init: true                          # tini reaps orphans; the supervisor manages its children
-    network_mode: ${GIGE_NETWORK:-host} # GigE Vision broadcast discovery needs host networking
+    network_mode: ${CAM_NETWORK:-host} # GigE Vision broadcast discovery needs host networking
     ipc: host                           # publish /dev/shm so consumers can read the transport
     runtime: nvidia
-    command: ["supervisor.py"]          # reads GIGE_CONFIG; spawns core + in-image (process) plugins
+    command: ["supervisor.py"]          # reads CAM_CONFIG; spawns core + in-image (process) plugins
     volumes:
       - ./core-driver/config:/app/config:ro
       - ./recordings:/data/recordings
-      - gige_sock:/tmp/gige
+      - cam_sock:/tmp/cam
     environment:
-      - GIGE_CONFIG=${GIGE_CONFIG:-config/sensors/camera.yaml}
+      - CAM_CONFIG=${CAM_CONFIG:-config/sensors/camera.yaml}
     healthcheck:
       # `rig status` (docker compose ps) then reports real health, not "n/a": the core reached
       # PLAYING and its shm transport socket exists (a stack that feeds consumers has one enabled).
-      test: ["CMD-SHELL", "test -S /tmp/gige/frames || test -S /tmp/gige/raw"]
+      test: ["CMD-SHELL", "test -S /tmp/cam/frames || test -S /tmp/cam/raw"]
       interval: 15s
       timeout: 3s
       retries: 3
@@ -53,6 +53,6 @@ services:
     restart: unless-stopped
 
 volumes:
-  gige_sock:
-    external: true                      # created by gige-up so it has a stable cross-stack name
-    name: ${GIGE_SOCK_VOLUME:-gige_sock}
+  cam_sock:
+    external: true                      # created by cam-up so it has a stable cross-stack name
+    name: ${CAM_SOCK_VOLUME:-cam_sock}

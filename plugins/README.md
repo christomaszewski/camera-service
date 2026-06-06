@@ -17,7 +17,7 @@ A plugin consumes:
 2. **Caps** — the negotiated raw video format (e.g. `GRAY8`, width/height, framerate).
 3. **Time** — shm transmits only bytes (PTS + `GstMeta` are dropped at the process boundary),
    so the per-frame **PTP capture time + frame_id travel in the 36-byte header** prepended to
-   each frame (caps `application/x-gige-frame`). The consumer parses the header and stamps its
+   each frame (caps `application/x-cam-frame`). The consumer parses the header and stamps its
    messages from it — e.g. ros2-bridge sets `sensor_msgs/Image.header.stamp` from the header's
    `timestamp_ns`. (An optional header-free `video/x-raw` endpoint exists for generic tools.)
 
@@ -31,7 +31,7 @@ A plugin consumes:
 
 Each plugin is either a lightweight in-image process (`isolation: process`, spawned by the
 supervisor) or a heavy sibling container (`isolation: container`, e.g. the two above). The
-per-sensor config selects which run, and `gige-up` brings up the stack — see the top-level README.
+per-sensor config selects which run, and `cam-up` brings up the stack — see the top-level README.
 
 ## Writing a plugin
 

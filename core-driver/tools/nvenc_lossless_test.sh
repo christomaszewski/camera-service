@@ -4,7 +4,7 @@
 # byte-for-byte, i.e. truly lossless (not just a "lossless" codec over a range-scaled plane).
 #
 # Prereq on the host (once):  sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
-# Build the core on a 24.04 base: docker build -f core-driver/Dockerfile -t gige-core \
+# Build the core on a 24.04 base: docker build -f core-driver/Dockerfile -t cam-core \
 #     --build-arg BASE_IMAGE=ubuntu:24.04 .
 # Run:  ./core-driver/tools/nvenc_lossless_test.sh [--frames N]
 #
@@ -13,4 +13,4 @@
 # the argument (tools/nvenc_lossless_test.py resolves under the image WORKDIR /app).
 set -u
 exec docker run --rm --device nvidia.com/gpu=all --ipc=host \
-  gige-core tools/nvenc_lossless_test.py "$@"
+  cam-core tools/nvenc_lossless_test.py "$@"

@@ -11,7 +11,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from gige_driver.timestamps import TimestampExtractor, TimestampSource  # noqa: E402
+from cam_driver.timestamps import TimestampExtractor, TimestampSource  # noqa: E402
 
 
 class FakeBuffer:

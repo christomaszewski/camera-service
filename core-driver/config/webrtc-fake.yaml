@@ -20,4 +20,4 @@ transport:
     enabled: false
   raw_endpoint:
     enabled: true
-    socket_path: /tmp/gige/raw     # webrtc-bridge reads video/x-raw GRAY8 512x512@25 from here
+    socket_path: /tmp/cam/raw     # webrtc-bridge reads video/x-raw GRAY8 512x512@25 from here

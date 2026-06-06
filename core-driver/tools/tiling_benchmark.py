@@ -10,8 +10,8 @@ P/B-frame sizes (so you can see whether tiling makes inter prediction start payi
 The x265 / ffv1 legs run anywhere; the NVENC leg (hw-hevc-lossless) needs the Jetson -- run this on the
 Orin to get the number that represents your actual recorder.
 
-Usage (in the gige-core image):
-  docker run --rm -v <dir>:/in -v /tmp/bench:/work --entrypoint python3 gige-core:jp7 \
+Usage (in the cam-core image):
+  docker run --rm -v <dir>:/in -v /tmp/bench:/work --entrypoint python3 cam-core:jp7 \
       tools/tiling_benchmark.py /in/<rec>-00000.mkv --frames 120 --encoders x265,ffv1 --work /work
 Geometry/pattern come from the sidecar <rec>.json; fps from <rec>.csv (override with --fps/--width/...).
 """
@@ -29,8 +29,8 @@ gi.require_version("GstVideo", "1.0")
 from gi.repository import Gst, GstVideo, GLib  # noqa: E402
 import numpy as np  # noqa: E402
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # so gige_driver imports
-from gige_driver import bayer_tile, recorder  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # so cam_driver imports
+from cam_driver import bayer_tile, recorder  # noqa: E402
 
 ENCODERS = {  # cli name -> (recorder encoder, the gst element that must exist)
     "x265": ("x265-lossless", "x265enc"),

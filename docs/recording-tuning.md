@@ -11,7 +11,7 @@ defeats a lossless codec's spatial predictor and (for video) its motion compensa
 changes the CFA phase, so the previous frame is a poor predictor. Tiling deinterleaves the mosaic into
 its four sub-planes and packs them as the four quadrants of one same-size frame, so each quadrant is a
 smooth same-colour image. The recorded file is then tiled (the sidecar's `cfa_tile_mode` flags it;
-playback must un-tile with `gige_driver.bayer_tile.untile_cfa` before demosaicing).
+playback must un-tile with `cam_driver.bayer_tile.untile_cfa` before demosaicing).
 
 | mode | what | use when |
 |---|---|---|
@@ -52,7 +52,7 @@ are meaningfully **smaller** than keyframes. Whether NVENC's *lossless* mode doe
 firmware-dependent — **measure it before tuning**:
 
 ```bash
-docker run --rm -v /data/recordings:/rec --entrypoint python3 gige-core:jp7 \
+docker run --rm -v /data/recordings:/rec --entrypoint python3 cam-core:jp7 \
     tools/probe_temporal.py /rec/<prefix>-00000.mkv
 ```
 - *all keyframes* → intra-only: the window knob is moot, tiling helps only spatially, and HW buys
@@ -71,7 +71,7 @@ tiling unlocks temporal.
 ```bash
 # run on the ORIN -- it has nvenc (your real encoder) via CDI, and is fast enough at full sensor res:
 docker run --rm --device nvidia.com/gpu=all -v /data/recordings:/in -v /tmp/bench:/work \
-    --entrypoint python3 <gige-core image> \
+    --entrypoint python3 <cam-core image> \
     tools/tiling_benchmark.py /in/<prefix>-00000.mkv --frames 120 --encoders nvenc,ffv1 --work /work
 # sweep nvenc presets / match your recording's GOP:
 #   ... --encoders nvenc --modes mosaic,plain --preset ultrafast,medium,slow --gop-seconds 10
@@ -80,7 +80,7 @@ Geometry/pattern come from the sidecar `.json`; fps from the `.csv`. It reports 
 mosaic, **`enc-fps`** (encode throughput — must be ≥ camera fps to record real-time), and **`P/B vs I`**
 (temporal). The CPU legs (x265/ffv1) run anywhere, but x265 at 5 MP is impractically slow off-Jetson —
 the **nvenc** leg is the one that represents your recorder, so run the benchmark on the box. The image
-needs numpy (the published `gige-core` may predate it: `gige-core:bench` = base `+ apt install python3-numpy`).
+needs numpy (the published `cam-core` may predate it: `cam-core:bench` = base `+ apt install python3-numpy`).
 
 ## Recommended path
 1. `probe_temporal` an existing recording → know if temporal is real on your encoder.

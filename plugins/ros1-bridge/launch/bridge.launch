@@ -1,17 +1,17 @@
 <launch>
-  <!-- ROS 1 mirror of bridge.launch.py. Env-driven (gige-up/sensor_env export these), namespaced per
+  <!-- ROS 1 mirror of bridge.launch.py. Env-driven (cam-up/sensor_env export these), namespaced per
        sensor. Reads the shm + 36-byte header transport; for color, optionally runs a ROS 1
        image_proc/debayer nodelet (the analog of composing image_proc::DebayerNode on the ros2 JP6 path). -->
-  <arg name="instance"    default="$(optenv GIGE_INSTANCE camera)"/>
-  <arg name="topic"       default="$(optenv GIGE_ROS_TOPIC image_raw)"/>
-  <arg name="frame_id"    default="$(optenv GIGE_FRAME_ID camera)"/>
-  <arg name="socket_path" default="$(optenv GIGE_TRANSPORT_SOCKET /tmp/gige/frames)"/>
-  <arg name="encoding"    default="$(optenv GIGE_ROS_ENCODING)"/>   <!-- NO ''-default: roslaunch takes it literally -->
+  <arg name="instance"    default="$(optenv CAM_INSTANCE camera)"/>
+  <arg name="topic"       default="$(optenv CAM_ROS_TOPIC image_raw)"/>
+  <arg name="frame_id"    default="$(optenv CAM_FRAME_ID camera)"/>
+  <arg name="socket_path" default="$(optenv CAM_TRANSPORT_SOCKET /tmp/cam/frames)"/>
+  <arg name="encoding"    default="$(optenv CAM_ROS_ENCODING)"/>   <!-- NO ''-default: roslaunch takes it literally -->
 
-  <arg name="debayer"     default="$(optenv GIGE_DEBAYER false)"/>
+  <arg name="debayer"     default="$(optenv CAM_DEBAYER false)"/>
 
   <group ns="$(arg instance)">
-    <node name="gige_ros1_bridge" pkg="gige_ros1_bridge" type="gige_ros1_bridge" output="screen">
+    <node name="cam_ros1_bridge" pkg="cam_ros1_bridge" type="cam_ros1_bridge" output="screen">
       <param name="socket_path" value="$(arg socket_path)"/>
       <param name="topic"       value="$(arg topic)"/>
       <param name="frame_id"    value="$(arg frame_id)"/>

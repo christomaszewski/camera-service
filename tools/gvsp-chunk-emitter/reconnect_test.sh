@@ -3,12 +3,12 @@
 # camera, KILL the emitter mid-stream (a simulated link drop), then RESTART it, and check the
 # core: (a) detects the disconnect + backs off, (b) reconnects + resumes, (c) never dies,
 # (d) finalizes a non-corrupt lossless recording.
-#   Prereq:  docker build -f tools/gvsp-chunk-emitter/Dockerfile -t gige-chunks .
+#   Prereq:  docker build -f tools/gvsp-chunk-emitter/Dockerfile -t cam-chunks .
 #   Run:     ./tools/gvsp-chunk-emitter/reconnect_test.sh
 set -u
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 
-docker run --rm -v "$REPO/core-driver:/app" gige-chunks bash -c '
+docker run --rm -v "$REPO/core-driver:/app" cam-chunks bash -c '
   set -u
   mkdir -p /data/recordings
   emit() { arv-fake-gv-camera-0.8 -i 127.0.0.1 -s GV01 >>/tmp/emit.log 2>&1 & echo $!; }

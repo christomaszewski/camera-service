@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Turn one sensor config (YAML) into the env that `gige-up` hands `docker compose`.
+"""Turn one sensor config (YAML) into the env that `cam-up` hands `docker compose`.
 
 The sensor config is the single source of truth. This *selects and parameterizes* — it does not
 generate a compose file. It emits `KEY=value` lines:
 
-  COMPOSE_PROJECT_NAME   gige_<name>            (isolates one sensor's containers/networks)
+  COMPOSE_PROJECT_NAME   cam_<name>            (isolates one sensor's containers/networks)
   COMPOSE_PROFILES       <enabled container plugins, comma-separated>
-  GIGE_INSTANCE          <name>                 (ROS namespace, labels)
-  GIGE_SOCK_VOLUME       gige_<name>_sock       (stable shm volume name; other stacks attach to it)
+  CAM_INSTANCE          <name>                 (ROS namespace, labels)
+  CAM_SOCK_VOLUME       cam_<name>_sock       (stable shm volume name; other stacks attach to it)
   + per-plugin env       (ros2 topic/frame_id/encoding/debayer, webrtc geometry/port)
 
 Only plugins with `isolation: container` become compose profiles; `isolation: process` plugins are
@@ -159,35 +159,35 @@ def main() -> int:
     by_name = {p["name"]: (p.get("params") or {}) for p in plugins}
 
     env = {
-        "COMPOSE_PROJECT_NAME": f"gige_{name}",
+        "COMPOSE_PROJECT_NAME": f"cam_{name}",
         "COMPOSE_PROFILES": ",".join(p["name"] for p in plugins),
-        "GIGE_INSTANCE": name,
-        "GIGE_SOCK_VOLUME": f"gige_{name}_sock",
+        "CAM_INSTANCE": name,
+        "CAM_SOCK_VOLUME": f"cam_{name}_sock",
     }
 
     ros = by_name.get("ros2-bridge") or by_name.get("ros1-bridge")   # same topic/frame_id/encoding/debayer params
     if ros is not None:
-        env["GIGE_ROS_TOPIC"] = str(ros.get("topic", "image_raw"))
-        env["GIGE_FRAME_ID"] = str(ros.get("frame_id", name))
+        env["CAM_ROS_TOPIC"] = str(ros.get("topic", "image_raw"))
+        env["CAM_FRAME_ID"] = str(ros.get("frame_id", name))
         # A: label a Bayer stream so image_proc can debayer it ('' = mono, derived from the header).
-        env["GIGE_ROS_ENCODING"] = ros_bayer_encoding(str(cam.get("pixel_format") or ""))
+        env["CAM_ROS_ENCODING"] = ros_bayer_encoding(str(cam.get("pixel_format") or ""))
         # B: optional in-bridge demosaic to rgb8.
-        env["GIGE_DEBAYER"] = "true" if ros.get("debayer", False) else "false"
+        env["CAM_DEBAYER"] = "true" if ros.get("debayer", False) else "false"
 
     web = by_name.get("webrtc-bridge")
     if web is not None:
-        env["GIGE_WIDTH"] = str(web.get("width", 512))
-        env["GIGE_HEIGHT"] = str(web.get("height", 512))
-        env["GIGE_FORMAT"] = str(web.get("format", "GRAY8"))
-        env["GIGE_FPS"] = str(web.get("fps", 25))
-        env["GIGE_SIGNALLING_PORT"] = str(web.get("port", 8443))
+        env["CAM_WIDTH"] = str(web.get("width", 512))
+        env["CAM_HEIGHT"] = str(web.get("height", 512))
+        env["CAM_FORMAT"] = str(web.get("format", "GRAY8"))
+        env["CAM_FPS"] = str(web.get("fps", 25))
+        env["CAM_SIGNALLING_PORT"] = str(web.get("port", 8443))
         # Discovery (docs/DISCOVERY.md): human-facing role label for the advertised descriptor; default
         # = the sensor name. (vehicle_id/producer_id/signalling default in the bridge from env/hostname.)
-        env["GIGE_STREAM_ROLE"] = str(web.get("role", name))
+        env["CAM_STREAM_ROLE"] = str(web.get("role", name))
         # Bayer pattern from the camera pixel_format -> webrtc debayers the CFA preview to color
         # (bayer2rgb). '' = mono/raw passthrough. JP7/unixfd caps already carry it; JP6/raw-shm
         # run.sh applies it as video/x-bayer caps.
-        env["GIGE_BAYER"] = bayer_pattern(str(cam.get("pixel_format") or ""))
+        env["CAM_BAYER"] = bayer_pattern(str(cam.get("pixel_format") or ""))
 
     for k, v in env.items():
         print(f"{k}={v}")
