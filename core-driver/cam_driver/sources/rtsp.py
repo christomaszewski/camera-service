@@ -5,10 +5,11 @@ exactly like USB-MJPEG, just a different head: `rtspsrc ! <rtp depay> ! <parser>
 recording stream-copies the delivered bitstream (faithful to what arrived); the decode branch
 feeds raw to consumers. All the tee correlation / stamping / dual delivery is the shared base.
 
-First cut: configured geometry (must match the stream) + arrival timestamps. Follow-ups (shared
-with USB): dynamic caps negotiation from the stream, and RTP/RTCP -> NTP wall-clock provenance
-(rtspsrc ntp-sync / rtpjitterbuffer add-reference-timestamp-meta). HW decode (nvv4l2decoder) is
-a hardware refinement.
+Self-configuring: a gst-discoverer pre-flight probe (open()) reads the live stream's codec +
+resolution + framerate, so the config needn't track the camera (it can switch codec/res out from
+under us -- e.g. H.265 720p -> H.264 4K). Config values are only a fallback. RTCP -> NTP wall-clock
+provenance (add-reference-timestamp-meta, gst>=1.24) + HW decode (nvv4l2decoder via select_decoder)
+round it out.
 """
 from __future__ import annotations
 
@@ -16,7 +17,8 @@ import logging
 
 import gi
 gi.require_version("Gst", "1.0")
-from gi.repository import Gst
+gi.require_version("GstPbutils", "1.0")
+from gi.repository import Gst, GstPbutils
 
 from ..formats import encoded_info, select_decoder
 from ..timestamps import TimestampSource
@@ -32,27 +34,79 @@ _RTP_DEPAY = {"H264": "rtph264depay", "H265": "rtph265depay",
 # (seconds since 1900-01-01); subtract this to get the Unix epoch (1970-01-01) our other stamps use.
 _NTP_EPOCH_OFFSET_NS = 2208988800 * 1_000_000_000
 
+# gst-discoverer video caps -> our codec string.
+_CAPS_CODEC = {"video/x-h264": "h264", "video/x-h265": "h265",
+               "image/jpeg": "mjpeg", "video/x-jpeg": "mjpeg"}
+
+
+def _probe_rtsp(url, timeout_s=10):
+    """gst-discoverer the LIVE RTSP stream -> (codec, width, height, fps), or None on failure. The
+    stream is the source of truth for codec/geometry, so the config needn't be kept in sync (the camera
+    can switch codec/resolution). The Discoverer's default transport tries UDP then falls back to TCP."""
+    try:
+        info = GstPbutils.Discoverer.new(int(timeout_s) * Gst.SECOND).discover_uri(url)
+    except Exception as e:   # GLib.Error on timeout / connect failure
+        log.warning("rtsp probe of %s failed: %s", url, e)
+        return None
+    vs = info.get_video_streams()
+    if not vs:
+        log.warning("rtsp probe of %s: no video stream", url)
+        return None
+    v = vs[0]
+    caps = v.get_caps()
+    name = caps.get_structure(0).get_name() if caps and caps.get_size() else ""
+    codec = _CAPS_CODEC.get(name)
+    if codec is None:
+        log.warning("rtsp probe: unsupported video codec %r", name)
+        return None
+    w, h = int(v.get_width()), int(v.get_height())
+    if w <= 0 or h <= 0:                       # some streams don't expose geometry to discovery
+        log.warning("rtsp probe: no resolution in discovered caps; using configured geometry")
+        return None
+    fn, fd = v.get_framerate_num(), v.get_framerate_denom()
+    return codec, w, h, (fn / fd if fd else 0.0)
+
 
 class RtspSource(GstPipelineSource):
     def __init__(self, cfg):   # cfg = config.RtspConfig
         super().__init__()
         self.cfg = cfg
-        self._enc = encoded_info(cfg.codec)              # (caps, parser, decoder); RTSP is always encoded
-        self._depay = _RTP_DEPAY.get((cfg.codec or "").upper())
+        # codec/geometry are RESOLVED in open(): a live probe (default) wins over these config
+        # fallbacks, and _enc/_depay are computed there once the codec is known.
+        self._codec = (cfg.codec or "").lower()
+        self._width = int(cfg.width)
+        self._height = int(cfg.height)
+        self._fps = float(cfg.frame_rate)
+        self._enc = None
+        self._depay = None
         self._ntp_enabled = False                        # set in _configure_pipeline (gst>=1.24)
         self._ntp_anchor = None                          # (buf_pts, ntp_ns): last frame that had the meta
-        if self._enc is None or self._depay is None:
-            raise ValueError(f"unsupported rtsp codec {cfg.codec!r} (known: h264, h265, mjpeg)")
 
     def open(self) -> None:
         super().open()
-        log.info("rtsp source: %s codec=%s -> stream-copy record + decode for consumers",
-                 self.cfg.url, self.cfg.codec)
+        # Self-configure from the LIVE stream (gst-discoverer): codec/resolution/framerate. Config is
+        # only a fallback (probe disabled, or camera unreachable -- in which case the stream fails anyway).
+        # This is what lets the camera change codec/res without a config edit.
+        if getattr(self.cfg, "probe", True):
+            probed = _probe_rtsp(self.cfg.url)
+            if probed:
+                self._codec, self._width, self._height, self._fps = probed
+                log.info("rtsp probe: %s -> codec=%s %dx%d @%.0ffps (from the live stream)",
+                         self.cfg.url, self._codec, self._width, self._height, self._fps)
+            else:
+                log.warning("rtsp probe failed; falling back to configured codec=%s %dx%d",
+                            self._codec, self._width, self._height)
+        self._enc = encoded_info(self._codec)
+        self._depay = _RTP_DEPAY.get(self._codec.upper())
+        if self._enc is None or self._depay is None:
+            raise ValueError(f"unsupported rtsp codec {self._codec!r} (known: h264, h265, mjpeg)")
+        log.info("rtsp source: %s codec=%s %dx%d -> stream-copy record + decode for consumers",
+                 self.cfg.url, self._codec, self._width, self._height)
 
     def _pipeline_desc(self) -> str:
         caps, parser, sw_decoder = self._enc
         decoder, conv = select_decoder(sw_decoder, self._hw_decode_available())
-        w, h = int(self.cfg.width), int(self.cfg.height)
+        w, h = self._width, self._height
         log.info("rtsp decode branch: %s ! %s (%s)", decoder, conv,
                  "HW NVDEC" if decoder == "nvv4l2decoder" else "software")
         # Parse in the DECODE branch only (after the tee), not pre-tee: the decoder needs a parser
@@ -115,7 +169,7 @@ class RtspSource(GstPipelineSource):
         return TimestampSource.RTP_NTP.value if self._ntp_enabled else TimestampSource.SYSTEM.value
 
     def geometry(self):
-        return (0, 0, int(self.cfg.width), int(self.cfg.height))
+        return (0, 0, self._width, self._height)
 
     def pixel_format(self) -> str:
         return "I420"

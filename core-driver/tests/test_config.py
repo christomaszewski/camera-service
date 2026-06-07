@@ -104,12 +104,15 @@ def test_usb_config_parsed():
 def test_rtsp_config_defaults():
     r = parse_config({}).rtsp
     assert (r.codec, r.latency_ms) == ("h264", 200) and r.url.startswith("rtsp://")
+    assert r.probe is True        # self-configure from the live stream by default
 
 
 def test_rtsp_config_parsed():
-    c = parse_config({"source": {"type": "rtsp"}, "rtsp": {"url": "rtsp://x/y", "codec": "mjpeg"}})
+    c = parse_config({"source": {"type": "rtsp"},
+                      "rtsp": {"url": "rtsp://x/y", "codec": "mjpeg", "probe": False}})
     assert c.source.type == "rtsp"
     assert (c.rtsp.url, c.rtsp.codec) == ("rtsp://x/y", "mjpeg")
+    assert c.rtsp.probe is False
 
 
 def _main():
