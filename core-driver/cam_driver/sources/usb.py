@@ -74,7 +74,10 @@ class UsbSource(GstPipelineSource):
                 tee_caps = f"{caps},width={w},height={h},framerate={fps}/1"
             return (
                 f"{head} ! {tee_caps} ! tee name=st "
-                f"st. ! queue ! {parser} ! {decoder} ! {conv} ! "
+                # decode branch is BEST-EFFORT (consumers/preview): leaky so a slow/stalled decoder
+                # drops encoded AUs HERE instead of back-pressuring the non-leaky tee and starving
+                # the must-not-drop recording (encsink) branch below.
+                f"st. ! queue leaky=downstream max-size-buffers=8 ! {parser} ! {decoder} ! {conv} ! "
                 f"video/x-raw,format=I420,width={w},height={h} ! {raw_sink} "
                 # encoded branch must-not-drop: it's the faithful recording
                 f"st. ! queue ! appsink name=encsink emit-signals=true max-buffers=8 drop=false sync=false"

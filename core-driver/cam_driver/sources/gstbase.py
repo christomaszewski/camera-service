@@ -35,6 +35,19 @@ class GstPipelineSource(Source):
         self._on_encoded: Optional[OnFrame] = None
         self._frame_id = 0
         self._stamps: "OrderedDict[int, FrameStamp]" = OrderedDict()  # pts -> stamp (bounded)
+        # Reconnect/liveness: a source feeding its OWN pipeline (rtsp/usb) has no Aravis-style
+        # control-lost signal, so we detect a dead/stalled link by DATA STARVATION -- no frame for
+        # _reconnect_timeout_s after start. This catches the nasty RTSP case where the camera accepts
+        # DESCRIBE/SETUP/PLAY (all 200) but then streams no media (RTP-over-TCP stall / session
+        # exhaustion) and the pipeline sits at 0 frames forever. Subclasses opt in (RtspSource sets
+        # these from config); the pipeline watchdog then drives is_disconnected()->reopen()->start().
+        self._reconnect = False
+        self._reconnect_timeout_s = 5.0    # mid-stream stall: max gap between frames before reopen
+        self._first_frame_grace_s = 12.0   # longer window for the FIRST frame after start (a healthy 4K
+        #                                    stream needs a few s to connect + deliver its first AU)
+        self._last_data_ns = 0       # arrival of the most recent frame (set in _new_stamp); 0 = none yet
+        self._start_ns = 0           # when the current capture attempt began (start())
+        self._started = False
 
     # ---- subclass hook -----------------------------------------------------
     def _pipeline_desc(self) -> str:
@@ -76,14 +89,53 @@ class GstPipelineSource(Source):
     def start(self, on_frame: OnFrame, on_encoded: OnEncoded = None) -> None:
         self._on_frame = on_frame
         self._on_encoded = on_encoded
+        self._start_ns = time.time_ns()   # liveness baseline: the first frame must arrive within timeout
+        self._last_data_ns = 0
+        self._started = True
         self._rawsink.connect("new-sample", self._on_raw)
         if self._encsink is not None:
             self._encsink.connect("new-sample", self._on_enc)
         self._pipeline.set_state(Gst.State.PLAYING)
 
     def stop(self) -> None:
+        self._started = False           # suspend the liveness watchdog while torn down (e.g. mid-reopen)
         if self._pipeline is not None:
             self._pipeline.set_state(Gst.State.NULL)
+
+    # ---- reconnect (data-starvation watchdog; opt-in via subclass) ----------
+    @property
+    def reconnect_enabled(self) -> bool:
+        return self._reconnect
+
+    def is_disconnected(self) -> bool:
+        """Disconnected == data starvation. A LONGER startup grace (_first_frame_grace_s) runs from
+        start() until the first frame -- a healthy 4K stream can take a few seconds to connect + deliver
+        its first AU, so we must not false-trip -- yet a camera that ACKs PLAY but never streams media is
+        still caught once the grace elapses. After the first frame, the SHORTER inter-frame timeout
+        (_reconnect_timeout_s) detects a mid-stream stall. Always False unless a subclass opted in."""
+        if not self._reconnect or not self._started:
+            return False
+        now = time.time_ns()
+        if self._last_data_ns == 0:                                   # no frame yet: startup grace window
+            stalled = (now - self._start_ns) > int(self._first_frame_grace_s * 1e9)
+            if stalled:
+                log.warning("liveness: no frame %.1fs after start (grace %.1fs) -> reopening stream",
+                            (now - self._start_ns) / 1e9, self._first_frame_grace_s)
+            return stalled
+        stalled = (now - self._last_data_ns) > int(self._reconnect_timeout_s * 1e9)
+        if stalled:
+            log.warning("liveness: stream stalled %.1fs (timeout %.1fs, %d frame(s) so far) -> reopening",
+                        (now - self._last_data_ns) / 1e9, self._reconnect_timeout_s, self._frame_id)
+        return stalled
+
+    def reopen(self) -> None:
+        """Rebuild the mini-pipeline from scratch (NULL -> re-parse -> reattach the stamp probe). For
+        RTSP this re-runs DESCRIBE/SETUP/PLAY on a FRESH session -- the reliable way to clear a camera's
+        stalled stream. Reuses the codec/geometry resolved at open() (NO second discoverer probe, which
+        would add another contended connection on an already-struggling camera). The caller re-arms via
+        start(). Raises (caught by the pipeline's backoff loop) only if re-parse fails."""
+        self.stop()
+        self.configure()
 
     def _pts_to_realtime(self, pts):
         """Map a buffer running-time PTS to CLOCK_REALTIME ns via the live pipeline-clock offset (the
@@ -110,6 +162,7 @@ class GstPipelineSource(Source):
     # ---- stamping / correlation --------------------------------------------
     def _new_stamp(self, buf) -> FrameStamp:
         now = time.time_ns()                          # host arrival (CLOCK_REALTIME)
+        self._last_data_ns = now                      # liveness: a frame arrived (drives is_disconnected)
         capture_ns, prov = self._extract_capture(buf)
         if capture_ns is not None:
             ts, src, cam = int(capture_ns), prov, int(capture_ns)

@@ -5,9 +5,9 @@ exactly like USB-MJPEG, just a different head: `rtspsrc ! <rtp depay> ! <parser>
 recording stream-copies the delivered bitstream (faithful to what arrived); the decode branch
 feeds raw to consumers. All the tee correlation / stamping / dual delivery is the shared base.
 
-Self-configuring: a gst-discoverer pre-flight probe (open()) reads the live stream's codec +
-resolution + framerate, so the config needn't track the camera (it can switch codec/res out from
-under us -- e.g. H.265 720p -> H.264 4K). Config values are only a fallback. RTCP -> NTP wall-clock
+Self-configuring: a lightweight `rtspsrc ! parsebin` pre-flight probe (open(), depay+parse only --
+no decode) reads the live stream's codec + resolution + framerate, so the config needn't track the
+camera (it can switch codec/res out from under us -- e.g. H.265 720p -> H.264 4K). Config is fallback. RTCP -> NTP wall-clock
 provenance (add-reference-timestamp-meta, gst>=1.24) + HW decode (nvv4l2decoder via select_decoder)
 round it out.
 """
@@ -17,8 +17,7 @@ import logging
 
 import gi
 gi.require_version("Gst", "1.0")
-gi.require_version("GstPbutils", "1.0")
-from gi.repository import Gst, GstPbutils
+from gi.repository import GLib, Gst
 
 from ..formats import encoded_info, select_decoder
 from ..timestamps import TimestampSource
@@ -34,43 +33,82 @@ _RTP_DEPAY = {"H264": "rtph264depay", "H265": "rtph265depay",
 # (seconds since 1900-01-01); subtract this to get the Unix epoch (1970-01-01) our other stamps use.
 _NTP_EPOCH_OFFSET_NS = 2208988800 * 1_000_000_000
 
-# gst-discoverer video caps -> our codec string.
+# parsed elementary-stream caps name -> our codec string.
 _CAPS_CODEC = {"video/x-h264": "h264", "video/x-h265": "h265",
                "image/jpeg": "mjpeg", "video/x-jpeg": "mjpeg"}
 
 
-def _probe_rtsp(url, timeout_s=10):
-    """gst-discoverer the LIVE RTSP stream -> (codec, width, height, fps), or None on failure. The
-    stream is the source of truth for codec/geometry, so the config needn't be kept in sync (the camera
-    can switch codec/resolution). The Discoverer's default transport tries UDP then falls back to TCP."""
+def _probe_rtsp(url, protocols="", timeout_s=8):
+    """Lightweight live-stream probe -> (codec, width, height, fps), or None on failure.
+
+    `rtspsrc ! parsebin`: parsebin auto-plugs the RTP depayloader + bitstream parser but NO decoder,
+    so we read codec + geometry off the PARSED elementary-stream caps without decoding a single frame.
+    This is far lighter than gst-discoverer (which auto-plugs a full decoder -- on Jetson that spins up
+    NVDEC and waits to decode a keyframe, 2-11s + a second heavy session that contends with the main
+    connection). parsebin usually negotiates caps straight from the SDP's sprop parameter sets (no media
+    wait at all); worst case it waits for the first in-band SPS. Uses the SAME transport as the real
+    connection so a UDP-blocked (Docker NAT) path probes over TCP too."""
+    proto = f" protocols={protocols}" if protocols else ""
     try:
-        info = GstPbutils.Discoverer.new(int(timeout_s) * Gst.SECOND).discover_uri(url)
-    except Exception as e:   # GLib.Error on timeout / connect failure
-        log.warning("rtsp probe of %s failed: %s", url, e)
+        pipeline = Gst.parse_launch(f"rtspsrc name=src location={url} latency=0{proto} ! parsebin name=pb")
+    except Exception as e:   # GLib.Error: bad uri / missing element
+        log.warning("rtsp probe of %s failed to build: %s", url, e)
         return None
-    vs = info.get_video_streams()
-    if not vs:
-        log.warning("rtsp probe of %s: no video stream", url)
-        return None
-    v = vs[0]
-    caps = v.get_caps()
-    name = caps.get_structure(0).get_name() if caps and caps.get_size() else ""
-    codec = _CAPS_CODEC.get(name)
-    if codec is None:
-        log.warning("rtsp probe: unsupported video codec %r", name)
-        return None
-    w, h = int(v.get_width()), int(v.get_height())
-    if w <= 0 or h <= 0:                       # some streams don't expose geometry to discovery
-        log.warning("rtsp probe: no resolution in discovered caps; using configured geometry")
-        return None
-    fn, fd = v.get_framerate_num(), v.get_framerate_denom()
-    return codec, w, h, (fn / fd if fd else 0.0)
+    result = {}
+    loop = GLib.MainLoop()
+
+    def read_caps(caps) -> bool:
+        if not caps or not caps.get_size():
+            return False
+        s = caps.get_structure(0)
+        codec = _CAPS_CODEC.get(s.get_name())
+        okw, w = s.get_int("width")
+        okh, h = s.get_int("height")
+        if not codec or not (okw and okh and w > 0 and h > 0):
+            return False
+        okf, fn, fd = s.get_fraction("framerate")
+        result.update(codec=codec, w=int(w), h=int(h), fps=(fn / fd if (okf and fd) else 0.0))
+        loop.quit()
+        return True
+
+    def on_pad(_pb, pad):
+        if read_caps(pad.get_current_caps()):    # often already negotiated from the SDP sprop sets
+            return
+        # not yet: pull data into a fakesink so the parser negotiates, and catch the CAPS event
+        sink = Gst.ElementFactory.make("fakesink")
+        sink.set_property("sync", False)
+        pipeline.add(sink)
+        sink.sync_state_with_parent()
+        pad.link(sink.get_static_pad("sink"))
+
+        def on_event(_p, info):
+            ev = info.get_event()
+            if ev.type == Gst.EventType.CAPS and read_caps(ev.parse_caps()):
+                return Gst.PadProbeReturn.REMOVE
+            return Gst.PadProbeReturn.OK
+        pad.add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, on_event)
+
+    pipeline.get_by_name("pb").connect("pad-added", on_pad)
+    bus = pipeline.get_bus()
+    bus.add_signal_watch()
+    bus.connect("message::error", lambda *_: loop.quit())
+    GLib.timeout_add_seconds(int(timeout_s), loop.quit)
+    pipeline.set_state(Gst.State.PLAYING)
+    loop.run()
+    pipeline.set_state(Gst.State.NULL)
+    if "codec" in result:
+        return result["codec"], result["w"], result["h"], result["fps"]
+    log.warning("rtsp probe of %s: no parsable video stream within %ss", url, timeout_s)
+    return None
 
 
 class RtspSource(GstPipelineSource):
     def __init__(self, cfg):   # cfg = config.RtspConfig
         super().__init__()
         self.cfg = cfg
+        # Liveness watchdog (base GstPipelineSource): reopen the stream if it stalls / never delivers.
+        self._reconnect = bool(getattr(cfg, "reconnect", True))
+        self._reconnect_timeout_s = float(getattr(cfg, "reconnect_timeout_s", 5.0))
         # codec/geometry are RESOLVED in open(): a live probe (default) wins over these config
         # fallbacks, and _enc/_depay are computed there once the codec is known.
         self._codec = (cfg.codec or "").lower()
@@ -88,10 +126,12 @@ class RtspSource(GstPipelineSource):
         # only a fallback (probe disabled, or camera unreachable -- in which case the stream fails anyway).
         # This is what lets the camera change codec/res without a config edit.
         if getattr(self.cfg, "probe", True):
-            probed = _probe_rtsp(self.cfg.url)
+            probed = _probe_rtsp(self.cfg.url, getattr(self.cfg, "protocols", ""))
             if probed:
-                self._codec, self._width, self._height, self._fps = probed
-                log.info("rtsp probe: %s -> codec=%s %dx%d @%.0ffps (from the live stream)",
+                codec, w, h, fps = probed
+                self._codec, self._width, self._height = codec, w, h
+                self._fps = fps or float(self.cfg.frame_rate)   # parser may not expose fps (informational)
+                log.info("rtsp probe: %s -> codec=%s %dx%d @%.0ffps (parsed from the live stream, no decode)",
                          self.cfg.url, self._codec, self._width, self._height, self._fps)
             else:
                 log.warning("rtsp probe failed; falling back to configured codec=%s %dx%d",
@@ -102,6 +142,12 @@ class RtspSource(GstPipelineSource):
             raise ValueError(f"unsupported rtsp codec {self._codec!r} (known: h264, h265, mjpeg)")
         log.info("rtsp source: %s codec=%s %dx%d -> stream-copy record + decode for consumers",
                  self.cfg.url, self._codec, self._width, self._height)
+
+    def reopen(self) -> None:
+        # The rebuilt pipeline restarts the PTS timeline, so drop the NTP extrapolation anchor (it's
+        # keyed on the old PTS). The first frame after reconnect re-anchors from its RTCP->NTP meta.
+        self._ntp_anchor = None
+        super().reopen()
 
     def _pipeline_desc(self) -> str:
         caps, parser, sw_decoder = self._enc
@@ -119,7 +165,10 @@ class RtspSource(GstPipelineSource):
         return (
             f"rtspsrc name=src location={self.cfg.url} latency={int(self.cfg.latency_ms)}{proto} ! "
             f"{self._depay} ! tee name=st "
-            f"st. ! queue ! {parser} ! {decoder} ! {conv} ! "
+            # decode branch is BEST-EFFORT (consumers/preview): leaky so a slow/stalled decoder
+            # (e.g. nvv4l2decoder waiting for a keyframe at 4K) drops encoded AUs HERE instead of
+            # back-pressuring the non-leaky tee and starving the must-not-drop recording (encsink) below.
+            f"st. ! queue leaky=downstream max-size-buffers=8 ! {parser} ! {decoder} ! {conv} ! "
             f"video/x-raw,format=I420,width={w},height={h} ! "
             f"appsink name=rawsink emit-signals=true max-buffers=4 drop=true sync=false "
             # encoded branch must-not-drop: it's the faithful recording
