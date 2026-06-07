@@ -1,0 +1,34 @@
+# Same real RTSP camera as rtsp-real.yaml but with the live probe DISABLED -- codec/resolution are
+# pinned here instead. Used to isolate whether the gst-discoverer probe (a second, heavy HW-decode
+# session) is what intermittently starves the main connection's startup on a real 4K H.265 camera.
+source:
+  type: rtsp
+
+rtsp:
+  url: rtsp://192.168.6.100:8554/main.264
+  protocols: tcp
+  latency_ms: 200
+  probe: false                  # <-- pin codec/geometry; no separate discoverer connection
+  codec: h265
+  width: 3840
+  height: 2160
+
+recording:
+  enabled: true
+  encoder: auto
+  output_dir: /data/recordings
+  name_prefix: rtsprec
+  segment_seconds: 30
+
+preview:
+  enabled: false
+
+transport:
+  plugin_endpoint:
+    enabled: true
+    socket_path: /tmp/cam/frames
+  raw_endpoint:
+    enabled: false
+    socket_path: /tmp/cam/raw
+
+plugins: []

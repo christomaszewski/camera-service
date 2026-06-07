@@ -267,16 +267,36 @@ class CapturePipeline:
                 self._base_ts = stamp.timestamp_ns
                 self._write_header()
 
-    def _on_frame(self, stamp: FrameStamp, frame_bytes: bytes) -> None:
-        """Source callback (runs on the source's feeder thread): a resolved timestamp +
-        clean image bytes. Set PTS/offset, push to the main appsrc (tee -> record/raw/
-        preview), and -- rate-limited -- to the plugin transport endpoint. Source-agnostic."""
-        if self._stopping:
-            return   # draining for EOS; stop feeding the pipeline
+    def _account(self, stamp: FrameStamp, pts: int) -> None:
+        """Per-RECORDED-frame accounting: frame-id drop detection + the sidecar timestamp row
+        (+ a first-frames provenance eyeball). Driven by whichever callback feeds the recording:
+        _on_frame for raw / re-encode sources, _on_encoded for a stream-copy source. Deliberately
+        NOT the best-effort decode branch of a stream-copy source -- a leaky decode drop there is
+        expected (not a lost recorded frame) and must not desync the sidecar or trip drop warnings."""
         gap = self.drops.observe_frame(stamp.frame_id)
         if gap:
             log.warning("frame-id gap: %d frame(s) lost before fid=%s (source/link drop; %d missing total)",
                         gap, stamp.frame_id, self.drops.frames_missing)
+        self.sidecar.add(stamp, pts)
+        if self._n_pushed < 5:  # quick eyeball; full per-frame data is in the CSV
+            d_cc = (stamp.chunk_ns - stamp.camera_ns) if stamp.chunk_ns is not None else None
+            d_sc = (stamp.system_ns - stamp.chunk_ns) if stamp.chunk_ns is not None else None
+            log.info("ts[fid=%s] src=%s chunk=%s camera=%s system=%s  chunk-camera=%s system-chunk=%s",
+                     stamp.frame_id, stamp.source.value, stamp.chunk_ns, stamp.camera_ns,
+                     stamp.system_ns, d_cc, d_sc)
+        self._n_pushed += 1
+
+    def _on_frame(self, stamp: FrameStamp, frame_bytes: bytes) -> None:
+        """Source callback (runs on the source's feeder thread): a resolved timestamp +
+        clean image bytes. Set PTS/offset, push to the main appsrc (tee -> record/raw/
+        preview), and -- rate-limited -- to the plugin transport endpoint. Source-agnostic.
+
+        For a stream-copy (encoded) source this is the BEST-EFFORT decode branch: it feeds live
+        consumers only (the recording rides the encoded branch -> _on_encoded). So the per-recorded-
+        frame accounting (_account) runs here ONLY when this path feeds the recording (raw / re-encode);
+        for stream-copy it lives in _on_encoded, so leaky decode drops never desync the sidecar."""
+        if self._stopping:
+            return   # draining for EOS; stop feeding the pipeline
         self._ensure_base(stamp)
         pts = stamp.timestamp_ns - self._base_ts
         if self._last_pts is not None and pts <= self._last_pts:
@@ -337,14 +357,8 @@ class CapturePipeline:
                 tbuf.offset = stamp.frame_id
                 self.transport_src.emit("push-buffer", tbuf)
 
-        self.sidecar.add(stamp, pts)
-        if self._n_pushed < 5:  # quick eyeball; full per-frame data is in the CSV
-            d_cc = (stamp.chunk_ns - stamp.camera_ns) if stamp.chunk_ns is not None else None
-            d_sc = (stamp.system_ns - stamp.chunk_ns) if stamp.chunk_ns is not None else None
-            log.info("ts[fid=%s] src=%s chunk=%s camera=%s system=%s  chunk-camera=%s system-chunk=%s",
-                     stamp.frame_id, stamp.source.value, stamp.chunk_ns, stamp.camera_ns,
-                     stamp.system_ns, d_cc, d_sc)
-        self._n_pushed += 1
+        if not self._stream_copy:
+            self._account(stamp, pts)   # raw / re-encode: THIS path is the recording feed
 
     def _on_encoded(self, stamp: FrameStamp, enc_bytes: bytes, caps_str: str = None) -> None:
         """Encoded-source callback (parallel to on_frame, SAME per-frame stamp): push the delivered
@@ -368,6 +382,10 @@ class CapturePipeline:
         ebuf.dts = Gst.CLOCK_TIME_NONE
         ebuf.offset = stamp.frame_id
         self.enc_src.emit("push-buffer", ebuf)
+        # stream-copy: the encoded branch IS the recording -> account the recorded frame here (drop
+        # detection + sidecar timestamp), NOT on the best-effort decode branch (_on_frame). This keeps
+        # the sidecar 1:1 with the .mkv and the RTCP->NTP provenance complete even under decode-branch load.
+        self._account(stamp, pts)
 
     def _write_header(self) -> None:
         _x, _y, width, height = self.source.geometry()

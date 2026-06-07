@@ -86,6 +86,11 @@ class RtspConfig:
     frame_rate: float = 30.0          # informational; the stream sets the real rate
     protocols: str = ""               # rtspsrc transport: "" = default (udp w/ tcp fallback),
     #                                   "tcp" forces RTP-over-TCP (firewalls / Docker NAT / lossy nets)
+    reconnect: bool = True            # auto-recover a stalled stream. Cameras sometimes ACK PLAY (200) then
+    #                                   stream NO media (RTP-over-TCP stall / session exhaustion); without this
+    #                                   the pipeline sits at 0 frames forever. A data-starvation watchdog then
+    #                                   reopens the stream (fresh DESCRIBE/SETUP/PLAY), which clears it.
+    reconnect_timeout_s: float = 5.0  # no frame for this long (from start, or since the last frame) => reopen
 
 
 @dataclass

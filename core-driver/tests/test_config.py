@@ -105,14 +105,17 @@ def test_rtsp_config_defaults():
     r = parse_config({}).rtsp
     assert (r.codec, r.latency_ms) == ("h264", 200) and r.url.startswith("rtsp://")
     assert r.probe is True        # self-configure from the live stream by default
+    assert r.reconnect is True and r.reconnect_timeout_s == 5.0   # stalled-stream recovery on by default
 
 
 def test_rtsp_config_parsed():
     c = parse_config({"source": {"type": "rtsp"},
-                      "rtsp": {"url": "rtsp://x/y", "codec": "mjpeg", "probe": False}})
+                      "rtsp": {"url": "rtsp://x/y", "codec": "mjpeg", "probe": False,
+                               "reconnect": False, "reconnect_timeout_s": 8.5}})
     assert c.source.type == "rtsp"
     assert (c.rtsp.url, c.rtsp.codec) == ("rtsp://x/y", "mjpeg")
     assert c.rtsp.probe is False
+    assert c.rtsp.reconnect is False and c.rtsp.reconnect_timeout_s == 8.5
 
 
 def _main():
