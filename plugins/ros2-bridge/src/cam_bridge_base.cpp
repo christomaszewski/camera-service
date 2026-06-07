@@ -17,6 +17,53 @@ int bytes_per_pixel(const std::string& enc) {
   return 1;
 }
 
+namespace {
+inline uint8_t clamp8(int v) { return v < 0 ? 0 : (v > 255 ? 255 : static_cast<uint8_t>(v)); }
+// full-range BT.601 YUV -> RGB, fixed-point (/256): R=Y+1.402(V-128), G=Y-0.344(U-128)-0.714(V-128),
+// B=Y+1.772(U-128). MJPEG/JPEG decode is full-range; H.264/H.265 (limited-range BT.709) is slightly off.
+inline void yuv2rgb(int y, int u, int v, uint8_t* dst) {
+  const int d = u - 128, e = v - 128;
+  dst[0] = clamp8(y + ((359 * e) >> 8));
+  dst[1] = clamp8(y - ((88 * d + 183 * e) >> 8));
+  dst[2] = clamp8(y + ((454 * d) >> 8));
+}
+}  // namespace
+
+bool yuv_to_rgb8(Yuv fmt, const uint8_t* src, size_t src_size, int w, int h, std::vector<uint8_t>& out) {
+  if (w <= 0 || h <= 0 || fmt == Yuv::NONE) return false;
+  const size_t wh = static_cast<size_t>(w) * h, cw = w / 2, ch = h / 2;
+  const size_t need = (fmt == Yuv::YUY2) ? wh * 2 : (fmt == Yuv::NV12 ? wh + wh / 2 : wh + 2 * cw * ch);
+  if (src_size < need) return false;
+  out.resize(wh * 3);
+  uint8_t* dst = out.data();
+  if (fmt == Yuv::YUY2) {                       // packed [Y0 U Y1 V] per 2 px, row stride w*2
+    for (int y = 0; y < h; ++y) {
+      const uint8_t* row = src + static_cast<size_t>(y) * w * 2;
+      for (int x = 0; x < w; ++x) {
+        const int pair = (x >> 1) * 4;
+        yuv2rgb(row[x * 2], row[pair + 1], row[pair + 3], dst + 3 * (static_cast<size_t>(y) * w + x));
+      }
+    }
+    return true;
+  }
+  const uint8_t* yp = src;                      // Y plane
+  const uint8_t* cp = src + wh;                 // I420: U plane | NV12: interleaved UV
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      int u, v;
+      if (fmt == Yuv::NV12) {
+        const size_t i = static_cast<size_t>(y / 2) * w + (x / 2) * 2;   // UV row stride = w
+        u = cp[i]; v = cp[i + 1];
+      } else {                                  // I420: U plane then V plane
+        const size_t i = static_cast<size_t>(y / 2) * cw + (x / 2);
+        u = cp[i]; v = cp[cw * ch + i];
+      }
+      yuv2rgb(yp[static_cast<size_t>(y) * w + x], u, v, dst + 3 * (static_cast<size_t>(y) * w + x));
+    }
+  }
+  return true;
+}
+
 const char* env_or(const char* key, const char* def) {
   const char* v = std::getenv(key);
   return (v && *v) ? v : def;
