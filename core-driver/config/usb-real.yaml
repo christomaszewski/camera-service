@@ -11,6 +11,8 @@ usb:
   width: 1280
   height: 720
   frame_rate: 30.0
+  sof_timestamps: true          # use the v4l2 driver per-frame ts (this cam stamps at dequeue ~= arrival;
+  #                               a start-of-exposure cam would gain -- the delta shows in the sidecar)
 
 recording:
   enabled: true
