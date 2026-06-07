@@ -15,10 +15,12 @@
 namespace cam_ros2_bridge {
 namespace {
 
-// Map negotiated GStreamer caps -> (sensor_msgs encoding, big-endian, width, height). Returns false on
-// an unrecognized format. Covers what the core emits (mono GRAY8/16, Bayer rggb/grbg/gbrg/bggr) plus RGB
-// for the in-pipeline-debayered path.
-bool caps_to_meta(GstCaps* caps, std::string& enc, bool& big_endian, int& w, int& h) {
+// Map negotiated GStreamer caps -> (sensor_msgs encoding, big-endian, width, height, yuv-convert).
+// Returns false on an unrecognized format. Covers mono GRAY8/16, Bayer rggb/grbg/gbrg/bggr, RGB/BGR,
+// and the planar/semi-planar YUV the decode branch delivers for color (I420/NV12/YUY2 -> convert to rgb8;
+// `yuv` set non-NONE). The core pushes tight (width-stride) buffers, so the converter reads map.data as-is.
+bool caps_to_meta(GstCaps* caps, std::string& enc, bool& big_endian, int& w, int& h, Yuv& yuv) {
+  yuv = Yuv::NONE;
   if (!caps || gst_caps_get_size(caps) == 0) return false;
   GstStructure* s = gst_caps_get_structure(caps, 0);
   const char* name = gst_structure_get_name(s);
@@ -42,6 +44,9 @@ bool caps_to_meta(GstCaps* caps, std::string& enc, bool& big_endian, int& w, int
     if (f == "GRAY16_BE") { enc = "mono16"; big_endian = true; return true; }
     if (f == "RGB") { enc = "rgb8"; return true; }
     if (f == "BGR") { enc = "bgr8"; return true; }
+    if (f == "I420") { enc = "rgb8"; yuv = Yuv::I420; return true; }
+    if (f == "NV12") { enc = "rgb8"; yuv = Yuv::NV12; return true; }
+    if (f == "YUY2") { enc = "rgb8"; yuv = Yuv::YUY2; return true; }
     return false;
   }
   return false;
@@ -73,12 +78,23 @@ class CamUnixfdBridge : public CamBridgeBase {
     std::string enc;
     bool be = false;
     int w = 0, h = 0;
-    if (!caps_to_meta(gst_sample_get_caps(sample), enc, be, w, h)) {
+    Yuv yuv = Yuv::NONE;
+    if (!caps_to_meta(gst_sample_get_caps(sample), enc, be, w, h, yuv)) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "unrecognized caps on unixfd sample");
       return false;
     }
-    out.data = map.data;       // unixfd carries the bare plane (no header) -> offset 0
-    out.size = map.size;
+    if (yuv != Yuv::NONE) {                          // color: convert the YUV plane to rgb8
+      if (!yuv_to_rgb8(yuv, map.data, map.size, w, h, convert_buf_)) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                             "short color frame (%s, %dx%d, %zu bytes)", enc.c_str(), w, h, map.size);
+        return false;
+      }
+      out.data = convert_buf_.data();
+      out.size = convert_buf_.size();
+    } else {
+      out.data = map.data;     // unixfd carries the bare plane (no header) -> offset 0
+      out.size = map.size;
+    }
     out.width = w;
     out.height = h;
     out.encoding = enc;

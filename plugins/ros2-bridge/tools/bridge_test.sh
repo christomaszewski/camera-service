@@ -26,9 +26,9 @@ docker run -d --name cam_test_zenohd --entrypoint bash "$IMG" \
   -c 'source "/opt/ros/${ROS_DISTRO}/setup.bash"; exec ros2 run rmw_zenoh_cpp rmw_zenohd' >/dev/null
 sleep 3
 
-echo "== producer (cam-dev: shm+header, GStreamer 1.20) =="
+echo "== producer (cam-dev: shm+header, GStreamer 1.20) -- config=${CAM_TEST_CONFIG:-fake-camera.yaml} =="
 docker run -d --rm --name cam_producer --ipc=host -v cam_sock:/tmp/cam -v "$REPO/core-driver:/app" \
-  cam-dev bash -c "mkdir -p /data/recordings /tmp/cam && python3 main.py -c config/fake-camera.yaml" >/dev/null
+  cam-dev bash -c "mkdir -p /data/recordings /tmp/cam && python3 main.py -c config/${CAM_TEST_CONFIG:-fake-camera.yaml}" >/dev/null
 for _ in $(seq 1 30); do docker run --rm -v cam_sock:/tmp/cam --entrypoint bash "$IMG" -c '[ -S /tmp/cam/frames ]' && break; sleep 0.5; done
 
 echo "== bridge (CamHeaderBridge component via launch, rmw_zenoh) =="
@@ -43,10 +43,11 @@ echo "== verify: typed subscriber on /camera/image_raw (count + encoding + captu
 # rmw_zenoh a typed subscriber receives normally (unlike the daemon-backed `ros2 topic echo/hz`).
 VERIFY="$(mktemp /tmp/cam_verify.XXXX.py)"
 cat > "$VERIFY" <<'PY'
-import rclpy, time, threading
+import os, rclpy, time, threading
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
+exp = os.environ.get("EXPECT_ENC", "mono8")
 rclpy.init(); n = Node("verify"); s = {"n": 0, "enc": "", "sec": 0, "w": 0, "h": 0}
 def cb(m):
     s["n"] += 1; s["enc"] = m.encoding; s["sec"] = m.header.stamp.sec; s["w"] = m.width; s["h"] = m.height
@@ -55,11 +56,11 @@ threading.Thread(target=rclpy.spin, args=(n,), daemon=True).start()
 time.sleep(6)
 print("image_raw: {n} msgs in 6s (~150 @25fps), encoding={enc!r}, {w}x{h}, header.stamp.sec={sec}".format(**s))
 assert s["n"] > 60, "too few messages -- bridge not delivering"
-assert s["enc"] == "mono8", "unexpected encoding {enc!r}".format(**s)
+assert s["enc"] == exp, "expected encoding {!r}, got {!r}".format(exp, s["enc"])
 print("PASS")
 PY
 docker cp "$VERIFY" cam_bridge:/tmp/verify.py >/dev/null; rm -f "$VERIFY"
-docker exec cam_bridge bash -c '
+docker exec -e EXPECT_ENC="${CAM_TEST_ENCODING:-mono8}" cam_bridge bash -c '
 source "/opt/ros/${ROS_DISTRO}/setup.bash"; source /ws/install/setup.bash
 export ROS_DOMAIN_ID=0 RMW_IMPLEMENTATION=rmw_zenoh_cpp
 timeout 12 python3 /tmp/verify.py 2>&1 | grep -E "image_raw:|PASS|Error|assert"'

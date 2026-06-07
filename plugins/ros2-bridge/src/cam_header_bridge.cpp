@@ -30,8 +30,8 @@ struct FrameHeader {
   uint64_t frame_id;
   uint16_t width;
   uint16_t height;
-  uint32_t pixfmt;       // 1=GRAY8, 2=GRAY16_LE, 3=GRAY16_BE
-  uint8_t  ts_source;    // 0=ptp_chunk, 1=camera, 2=system
+  uint32_t pixfmt;       // 1=GRAY8 2=GRAY16_LE 3=GRAY16_BE 4=I420 5=NV12 6=YUY2 7=RGB 8=BGR
+  uint8_t  ts_source;    // 0=ptp_chunk 1=camera 2=system 3=sof 4=rtp_ntp
   uint8_t  flags;
   uint16_t reserved;
 };
@@ -39,16 +39,22 @@ struct FrameHeader {
 static_assert(sizeof(FrameHeader) == 36, "FrameHeader must match transport.py (36 bytes)");
 
 struct PixInfo {
-  const char* encoding;
+  const char* encoding;   // sensor_msgs encoding published (rgb8 for the converted YUV formats)
   int bytes_per_px;
   bool big_endian;
+  Yuv yuv;                // != NONE -> convert the source plane to rgb8 (no YUV sensor_msgs encoding)
 };
 
 bool pixfmt_info(uint32_t code, PixInfo& out) {
-  switch (code) {
-    case 1: out = {"mono8", 1, false}; return true;
-    case 2: out = {"mono16", 2, false}; return true;
-    case 3: out = {"mono16", 2, true};  return true;
+  switch (code) {   // mirrors cam_driver/transport.py _CODE_TO_GST
+    case 1: out = {"mono8", 1, false, Yuv::NONE}; return true;
+    case 2: out = {"mono16", 2, false, Yuv::NONE}; return true;
+    case 3: out = {"mono16", 2, true,  Yuv::NONE}; return true;
+    case 4: out = {"rgb8", 3, false, Yuv::I420}; return true;   // I420 -> rgb8 (decoded color/RTSP)
+    case 5: out = {"rgb8", 3, false, Yuv::NV12}; return true;   // NV12 -> rgb8
+    case 6: out = {"rgb8", 3, false, Yuv::YUY2}; return true;   // YUY2 -> rgb8
+    case 7: out = {"rgb8", 3, false, Yuv::NONE}; return true;   // RGB -> rgb8 (direct)
+    case 8: out = {"bgr8", 3, false, Yuv::NONE}; return true;   // BGR -> bgr8 (direct)
     default: return false;
   }
 }
@@ -85,13 +91,27 @@ class CamHeaderBridge : public CamBridgeBase {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "unknown pixfmt %u", hdr.pixfmt);
       return false;
     }
-    out.data = map.data + hdr.header_len;          // header_len = forward-compatible pixel offset
-    out.size = map.size - hdr.header_len;
+    const uint8_t* src = map.data + hdr.header_len;   // header_len = forward-compatible pixel offset
+    const size_t src_size = map.size - hdr.header_len;
     out.width = hdr.width;
     out.height = hdr.height;
-    // A bayer camera is labeled by the CAM_ROS_ENCODING hint (the header only knows GRAY8); mono falls
-    // back to the header's pixfmt. image_proc (composed by the launch) does any debayering.
-    out.encoding = (!encoding_.empty() && pix.bytes_per_px == 1) ? encoding_ : pix.encoding;
+    if (pix.yuv != Yuv::NONE) {                        // color: convert the YUV plane to rgb8
+      if (!yuv_to_rgb8(pix.yuv, src, src_size, hdr.width, hdr.height, convert_buf_)) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                             "short color frame (pixfmt %u, %dx%d, %zu bytes)",
+                             hdr.pixfmt, hdr.width, hdr.height, src_size);
+        return false;
+      }
+      out.data = convert_buf_.data();
+      out.size = convert_buf_.size();
+      out.encoding = "rgb8";
+    } else {
+      out.data = src;
+      out.size = src_size;
+      // A bayer camera is labeled by the CAM_ROS_ENCODING hint (the header only knows GRAY8); mono/color
+      // fall back to the header's pixfmt. image_proc (composed by the launch) does any debayering.
+      out.encoding = (!encoding_.empty() && pix.bytes_per_px == 1) ? encoding_ : pix.encoding;
+    }
     out.big_endian = pix.big_endian;
     out.stamp_ns = static_cast<int64_t>(hdr.timestamp_ns);
     out.frame_id = hdr.frame_id;

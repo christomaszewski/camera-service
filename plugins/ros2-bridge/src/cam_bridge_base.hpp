@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
@@ -38,6 +39,15 @@ struct FrameMeta {
 
 // sensor_msgs encoding -> bytes per pixel (for the row stride). Bayer is a single 8-bit plane.
 int bytes_per_pixel(const std::string& encoding);
+
+// YUV layouts the bridge converts to rgb8 -- sensor_msgs has no encoding for planar/semi-planar YUV,
+// and the decode branch delivers I420 for every color (encoded/RTSP) source. NONE = a directly-mappable
+// format (mono/rgb/bgr), handled without conversion.
+enum class Yuv { NONE, I420, NV12, YUY2 };
+
+// Convert a YUV plane (full-range BT.601, as decoded MJPEG/JPEG produces) into a packed rgb8 buffer in
+// `out` (resized to w*h*3). Returns false if `src_size` is too small for w*h in `fmt`.
+bool yuv_to_rgb8(Yuv fmt, const uint8_t* src, size_t src_size, int w, int h, std::vector<uint8_t>& out);
 
 // Env var value or a default (treats an empty value as unset).
 const char* env_or(const char* key, const char* def);
@@ -68,6 +78,7 @@ class CamBridgeBase : public rclcpp::Node {
   std::string frame_id_;
   std::string encoding_;   // CAM_ROS_ENCODING hint: bayer_* for a CFA camera, "" for mono
   bool debayer_ = false;
+  std::vector<uint8_t> convert_buf_;   // scratch for YUV->rgb8 (reused per frame; single stream thread)
 
  private:
   static GstFlowReturn on_new_sample_static(GstAppSink* sink, gpointer self);
