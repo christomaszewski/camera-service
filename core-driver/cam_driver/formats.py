@@ -46,17 +46,30 @@ def encoded_info(fmt):
     return _ENCODED.get((fmt or "").upper())
 
 
+# Per-codec Jetson HW decoder, used only where it's a clear win. H.264/H.265 -> nvv4l2decoder (NVMM
+# out, nvvidconv-converted): software H.26x decode is heavy, so HW pays off.
+# MJPEG is deliberately NOT here: measured on a JP7 Orin, HW nvjpegdec (nvjpegdec ! NVMM ! nvvidconv)
+# is SLOWER than CPU jpegdec at 720p -- the NVMM round-trip costs more than the decode saves -- and the
+# real consumer ceiling is the per-frame Python copy/transport, not the decode. So MJPEG stays on
+# software jpegdec (and the stream-copy recording is faithful regardless of the consumer decode path).
+_HW_DECODER = {
+    "avdec_h264": ("nvv4l2decoder", "nvvidconv"),
+    "avdec_h265": ("nvv4l2decoder", "nvvidconv"),
+}
+
+
 def select_decoder(sw_decoder, hw_available=False):
     """(decoder, converter) for the encoded->raw consumer branch. On a Jetson with the L4T plugins
-    present, nvv4l2decoder (HW NVDEC; auto-detects the codec from caps) + nvvidconv (NVMM->system
-    memory) is used; otherwise the per-codec software decoder + CPU videoconvert.
+    present, the per-codec HW decoder (nvv4l2decoder for H.26x, nvjpegdec for MJPEG) + nvvidconv
+    (NVMM->system); otherwise the software decoder + CPU videoconvert. `decoder` may be a multi-element
+    fragment (the nvjpegdec NVMM hint) -- callers splice it as `... ! {parser} ! {decoder} ! {conv} ! ...`.
 
-    HW selection is AUTOMATIC (caller passes hw_available = nvv4l2decoder factory present), so a
-    JP6->JP7 host upgrade activates NVDEC with no code change -- only a deploy that exposes the GPU.
-    The recording is stream-copy and never decodes, so this only affects the live-consumer path. The
-    NVMM caps negotiation is L4T-version-dependent -> validate the HW branch on real JP7 hardware."""
-    if hw_available:
-        return "nvv4l2decoder", "nvvidconv"
+    HW selection is AUTOMATIC (caller passes hw_available = the L4T HW decoder present), so a JP6->JP7
+    host upgrade activates NVDEC with no code change -- only a deploy that exposes the GPU (CDI
+    --device nvidia.com/gpu=all on JP7). Recording is stream-copy and never decodes, so this affects
+    only the live-consumer path."""
+    if hw_available and sw_decoder in _HW_DECODER:
+        return _HW_DECODER[sw_decoder]
     return sw_decoder, "videoconvert"
 
 
