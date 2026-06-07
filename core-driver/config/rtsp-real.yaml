@@ -1,24 +1,21 @@
-# REAL RTSP camera (not the fake server): an H.265 1280x720@30 device on the LAN. Exercises the
-# RtspSource against actual hardware -- real H.265 GOP structure through stream-copy + real RTCP->NTP
-# wall-clock provenance (on gst>=1.24). protocols=tcp forces RTP-over-TCP (needed through Docker
-# Desktop's NAT, where inbound UDP RTP doesn't reach the container; also handy on firewalled nets).
+# REAL RTSP camera (not the fake server) -- e.g. the SIYI ZR30 on the LAN. The RtspSource PROBES the
+# live stream at startup (gst-discoverer) for codec + resolution + framerate, so you DON'T pin them
+# here: the camera can switch codec/res (this one has run H.265 720p and H.264 4K) and it just works.
+# protocols=tcp forces RTP-over-TCP (needed through Docker Desktop's NAT; also handy on firewalled nets).
 source:
   type: rtsp
 
 rtsp:
   url: rtsp://192.168.6.100:8554/main.264
-  codec: h265                   # the URL says .264 but the stream is actually HEVC (probed)
   protocols: tcp
   latency_ms: 200
-  width: 1280
-  height: 720
-  frame_rate: 30.0
+  # codec/width/height are auto-probed (probe: true by default). To override, set them + probe: false.
 
 recording:
   enabled: true
-  encoder: auto                 # encoded -> stream-copy (the delivered H.265 bitstream, no re-encode)
+  encoder: auto                 # encoded -> stream-copy (the delivered bitstream, no re-encode)
   output_dir: /data/recordings
-  name_prefix: rtsphevc
+  name_prefix: rtsprec
   segment_seconds: 30
 
 preview:
