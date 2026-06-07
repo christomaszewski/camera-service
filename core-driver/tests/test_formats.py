@@ -71,9 +71,20 @@ def test_select_decoder_software_default():
 
 
 def test_select_decoder_hw_when_available():
-    # HW present -> NVDEC (one element, codec-agnostic) + nvvidconv, regardless of the sw decoder
+    # HW decode only where it's a clear win: H.264/H.265 -> nvv4l2decoder
+    assert select_decoder("avdec_h264", hw_available=True) == ("nvv4l2decoder", "nvvidconv")
     assert select_decoder("avdec_h265", hw_available=True) == ("nvv4l2decoder", "nvvidconv")
-    assert select_decoder("jpegdec", hw_available=True) == ("nvv4l2decoder", "nvvidconv")
+
+
+def test_select_decoder_mjpeg_stays_software():
+    # MJPEG stays on sw jpegdec even with HW present: HW nvjpegdec's NVMM round-trip is slower at
+    # webcam res, and the consumer ceiling is the Python copy/transport, not the decode.
+    assert select_decoder("jpegdec", hw_available=True) == ("jpegdec", "videoconvert")
+
+
+def test_select_decoder_unknown_codec_stays_software():
+    # a codec with no HW mapping falls back to software even when HW is available
+    assert select_decoder("avdec_vp8", hw_available=True) == ("avdec_vp8", "videoconvert")
 
 
 def _main():

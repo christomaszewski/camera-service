@@ -116,10 +116,20 @@ class GstPipelineSource(Source):
         return Gst.PadProbeReturn.OK
 
     def _stamp_for(self, buf) -> FrameStamp:
-        """Look up the pre-tee stamp by buffer PTS (both branches share it); fall back if evicted."""
+        """Look up the pre-tee stamp by buffer PTS (both branches share it). On a MISS, reuse the
+        most-recent pre-tee stamp -- do NOT mint a new one. A decode-branch parser/decoder can shift
+        PTS (e.g. jpegparse re-times MJPEG), so the decoded buffer won't match the pre-tee key; minting
+        a fresh stamp there would advance the shared frame-id counter the pre-tee probe owns, double-
+        counting frames and inflating the drop stats (it looked like a 2x camera over-rate). The decode
+        branch is best-effort consumer pixels; the encoded/recording branch is queue-only (PTS intact),
+        so it always hits and the recording keeps exact per-frame ids."""
         pts = int(buf.pts) if buf.pts != Gst.CLOCK_TIME_NONE else None
         st = self._stamps.get(pts) if pts is not None else None
-        return st if st is not None else self._new_stamp(buf)
+        if st is not None:
+            return st
+        if self._stamps:
+            return next(reversed(self._stamps.values()))   # most-recent pre-tee stamp; no counter bump
+        return self._new_stamp(buf)                          # nothing stamped yet (very first frame)
 
     def _on_raw(self, sink) -> Gst.FlowReturn:
         sample = sink.emit("pull-sample")

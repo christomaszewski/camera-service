@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 
-from ..formats import encoded_info
+from ..formats import encoded_info, select_decoder
 from .gstbase import GstPipelineSource
 
 log = logging.getLogger(__name__)
@@ -47,7 +47,10 @@ class UsbSource(GstPipelineSource):
         w, h = int(self.cfg.width), int(self.cfg.height)
         raw_sink = "appsink name=rawsink emit-signals=true max-buffers=4 drop=true sync=false"
         if self._enc:
-            caps, parser, decoder = self._enc
+            caps, parser, sw_decoder = self._enc
+            decoder, conv = select_decoder(sw_decoder, self._hw_decode_available())
+            log.info("usb decode branch: %s ! %s (%s)", decoder, conv,
+                     "HW NVDEC" if conv == "nvvidconv" else "software")
             if self.cfg.fake:
                 enc = _FAKE_ENCODER.get(self.cfg.pixel_format.upper(), "jpegenc")
                 head = (f"videotestsrc is-live=true do-timestamp=true ! "
@@ -60,7 +63,7 @@ class UsbSource(GstPipelineSource):
                 tee_caps = f"{caps},width={w},height={h},framerate={fps}/1"
             return (
                 f"{head} ! {tee_caps} ! tee name=st "
-                f"st. ! queue ! {parser} ! {decoder} ! videoconvert ! "
+                f"st. ! queue ! {parser} ! {decoder} ! {conv} ! "
                 f"video/x-raw,format=I420,width={w},height={h} ! {raw_sink} "
                 # encoded branch must-not-drop: it's the faithful recording
                 f"st. ! queue ! appsink name=encsink emit-signals=true max-buffers=8 drop=false sync=false"
