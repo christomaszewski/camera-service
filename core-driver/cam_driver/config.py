@@ -58,13 +58,17 @@ class CameraConfig:
 @dataclass
 class UsbConfig:
     # USB / v4l2 source (used when source.type == usb). Step 3 handles raw GRAY8; color/decode
-    # + caps negotiation, the SOF/arrival timestamp policy, and device/hotplug come in step 4.
+    # + caps negotiation and device/hotplug come in step 4.
     device: str = "/dev/video0"       # prefer a stable /dev/v4l/by-id/... path on real hardware
     fake: bool = False                # videotestsrc instead of v4l2src (CI/dev; no device needed)
     pixel_format: str = "GRAY8"       # delivered raw format fed to the shared pipeline
     width: int = 640
     height: int = 480
     frame_rate: float = 30.0
+    sof_timestamps: bool = False      # use the v4l2 DRIVER per-frame timestamp (do-timestamp=false ->
+    #   'sof' provenance) instead of host arrival. OPT-IN: the gain is camera-dependent -- a cam that
+    #   timestamps at start-of-exposure wins; many cheap UVC cams timestamp at dequeue (== arrival, no
+    #   gain) or report zeros (we sanity-check and fall back to arrival). Ignored for fake sources.
 
 
 @dataclass

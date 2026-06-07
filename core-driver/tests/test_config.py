@@ -88,14 +88,17 @@ def test_make_source_unknown_raises():
 def test_usb_config_defaults():
     u = parse_config({}).usb
     assert (u.device, u.fake, u.pixel_format) == ("/dev/video0", False, "GRAY8")
+    assert u.sof_timestamps is False        # SOF (v4l2 driver ts) is opt-in; default = arrival
 
 
 def test_usb_config_parsed():
     c = parse_config({"source": {"type": "usb"},
-                      "usb": {"fake": True, "width": 640, "height": 480, "device": "/dev/video2"}})
+                      "usb": {"fake": True, "width": 640, "height": 480, "device": "/dev/video2",
+                              "sof_timestamps": True}})
     assert c.source.type == "usb"
     assert c.usb.fake is True and (c.usb.width, c.usb.height) == (640, 480)
     assert c.usb.device == "/dev/video2"
+    assert c.usb.sof_timestamps is True
 
 
 def test_rtsp_config_defaults():

@@ -85,6 +85,20 @@ class GstPipelineSource(Source):
         if self._pipeline is not None:
             self._pipeline.set_state(Gst.State.NULL)
 
+    def _pts_to_realtime(self, pts):
+        """Map a buffer running-time PTS to CLOCK_REALTIME ns via the live pipeline-clock offset (the
+        pipeline clock is monotonic, == CLOCK_REALTIME minus a near-constant offset). None if the clock
+        isn't ready. Used by USB SOF: with do-timestamp=false, buf.pts is the v4l2 driver's per-frame
+        capture time, and this lifts it into the wall-clock epoch the rest of the stamps use."""
+        if self._pipeline is None:
+            return None
+        clock = self._pipeline.get_clock()
+        base = self._pipeline.get_base_time()
+        if clock is None or base == Gst.CLOCK_TIME_NONE:
+            return None
+        run_now = clock.get_time() - base
+        return time.time_ns() - (run_now - int(pts))
+
     # ---- capture-timestamp extraction (subclass hook) ----------------------
     def _extract_capture(self, buf):
         """Return (capture_ns, provenance) read off the buffer, or (None, SYSTEM) to use arrival.
