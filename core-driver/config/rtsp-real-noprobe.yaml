@@ -5,7 +5,7 @@ source:
   type: rtsp
 
 rtsp:
-  url: rtsp://192.168.6.100:8554/main.264
+  url: rtsp://10.160.1.80:8554/main.264
   protocols: tcp
   latency_ms: 200
   probe: false                  # <-- pin codec/geometry; no separate discoverer connection
