@@ -16,6 +16,7 @@ hardware/follow-up items.
 from __future__ import annotations
 
 import logging
+import os
 import time
 
 import gi
@@ -44,6 +45,10 @@ class UsbSource(GstPipelineSource):
         # SOF = the v4l2 DRIVER per-frame timestamp (do-timestamp=false). Opt-in + real-device only
         # (the fake videotestsrc has no driver clock); per-frame we still fall back to arrival on a bad ts.
         self._sof = bool(getattr(cfg, "sof_timestamps", False)) and not cfg.fake
+        # Hotplug/stall recovery via the base GstPipelineSource watchdog (real devices only -- the fake
+        # videotestsrc never stalls). On data starvation the pipeline reopens the v4l2 device.
+        self._reconnect = bool(getattr(cfg, "reconnect", True)) and not cfg.fake
+        self._reconnect_timeout_s = float(getattr(cfg, "reconnect_timeout_s", 5.0))
 
     def open(self) -> None:
         super().open()
@@ -51,6 +56,18 @@ class UsbSource(GstPipelineSource):
         mode = " [encoded -> stream-copy record + decode for consumers]" if self._enc else " [raw]"
         log.info("usb source: %s format=%s%s ts=%s", kind, self.cfg.pixel_format, mode,
                  "sof (v4l2 driver)" if self._sof else "arrival")
+        if self._reconnect and not self.cfg.device.startswith("/dev/v4l/by-id/"):
+            log.warning("usb hotplug on but device=%s is not a /dev/v4l/by-id/ path; a replug can "
+                        "renumber /dev/videoN -- prefer a by-id path so reconnect finds the SAME camera",
+                        self.cfg.device)
+
+    def reopen(self) -> None:
+        # Hotplug: if the v4l2 node is gone (unplugged), RAISE so the pipeline's backoff loop retries
+        # cheaply until it reappears -- a /dev/v4l/by-id/ path comes back at the SAME path on replug --
+        # instead of rebuilding a pipeline around a missing device (which would just error at PLAYING).
+        if not self.cfg.fake and not os.path.exists(self.cfg.device):
+            raise FileNotFoundError(f"v4l2 device {self.cfg.device} not present (unplugged?)")
+        super().reopen()
 
     def _pipeline_desc(self) -> str:
         fps = int(round(self.cfg.frame_rate or 30.0))
