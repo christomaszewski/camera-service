@@ -13,7 +13,7 @@ mkcfg() {  # $1 = protocols (udp|tcp)
 source:
   type: rtsp
 rtsp:
-  url: rtsp://192.168.6.100:8554/main.264
+  url: rtsp://10.160.1.80:8554/main.264
   protocols: $1
   probe: false
   reconnect: false
