@@ -69,6 +69,10 @@ class UsbConfig:
     #   'sof' provenance) instead of host arrival. OPT-IN: the gain is camera-dependent -- a cam that
     #   timestamps at start-of-exposure wins; many cheap UVC cams timestamp at dequeue (== arrival, no
     #   gain) or report zeros (we sanity-check and fall back to arrival). Ignored for fake sources.
+    reconnect: bool = True            # hotplug/stall recovery: a data-starvation watchdog reopens the v4l2
+    #   device when frames stop (unplug, stall, or absent at startup). Use a STABLE /dev/v4l/by-id/... device
+    #   path so a replug -- which can renumber /dev/videoN -- reconnects to the SAME camera. Ignored for fake.
+    reconnect_timeout_s: float = 5.0  # no frame for this long => treat as unplugged/stalled -> reopen
 
 
 @dataclass
