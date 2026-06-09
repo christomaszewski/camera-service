@@ -27,6 +27,13 @@ OnFrame = Callable[[FrameStamp, bytes], None]
 OnEncoded = Callable[[FrameStamp, bytes, Optional[str]], None]
 
 
+class SourceConfigChanged(RuntimeError):
+    """Raised by reopen() when the source's delivered format (codec/geometry) no longer matches
+    what the pipelines were built for. A reopen can't fix this in-process -- the main pipeline's
+    appsrc caps are fixed at build() -- so the pipeline treats it as fatal: finalize the recording
+    cleanly and exit non-zero; the supervisor/compose restart rebuilds for the new format."""
+
+
 class Source(ABC):
     # ---- introspection (valid after open() + configure()) ------------------
     @abstractmethod

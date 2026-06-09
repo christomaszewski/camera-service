@@ -7,8 +7,14 @@ Encoder selection (``auto``, see formats.select_encoder):
   * color (YUV/RGB)  -> FFV1 -- avoids the NV24 (4:4:4) conversion, which would resample a
                     4:2:0 source and break bit-exactness. (NVENC color-lossless fed the
                     native subsampling is a hardware refinement.)
-  * >8-bit input     -> FFV1 (lossless, high-bit-depth; INTRA-only) by default, or
-                    x265 --lossless (temporal, CPU) if requested.
+  * >8-bit input     -> FFV1 (lossless, high-bit-depth; INTRA-only). x265-lossless is 8-bit-only:
+                    >8-bit rides in a GRAY16 container that x265's <=12-bit input formats can't
+                    carry, so a >8-bit request falls back to FFV1 instead of silently dropping bits.
+
+Encoders degrade by AVAILABILITY too: the launch-fragment elements are probed at build time
+(Gst.ElementFactory.find, mirroring the unixfdsink / HW-decoder capability checks) and a missing
+encoder -- NVENC off-Jetson or in a container without the L4T stack, x265/libav not installed --
+falls back to FFV1 with a warning instead of killing the service inside Gst.parse_launch.
 
 Validated on a JetPack 7.2 Orin AGX (L4T r39.x, driver R595.78): the
 NV24/NVMM -> nvv4l2h265enc enable-lossless=1 path is BIT-EXACT for 8-bit mono --
@@ -22,6 +28,8 @@ from __future__ import annotations
 
 import logging
 
+import gi
+gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
 from .formats import select_encoder
@@ -40,6 +48,34 @@ def _preset_level(value):
     if s.isdigit() and 0 <= int(s) <= 4:
         return int(s)
     return None
+
+
+# Encoder -> the launch-fragment elements that must exist on this host. The NVENC path needs the
+# L4T stack (nvvidconv + nvv4l2h265enc: Jetson-only, and absent in a container that doesn't expose
+# it); x265enc / avenc_ffv1 ride in optional codec packages. Probed at build time so a missing
+# element degrades to a software fallback with a warning -- not a GLib.Error out of
+# Gst.parse_launch that takes the whole service down.
+_ENCODER_ELEMENTS = {
+    "hw-hevc-lossless": ("nvvidconv", "nvv4l2h265enc"),
+    "x265-lossless": ("x265enc",),
+    "ffv1": ("avenc_ffv1",),
+}
+
+
+def _resolve_available(enc: str) -> str:
+    """Degrade `enc` to an encoder whose GStreamer elements exist: hw-hevc-lossless /
+    x265-lossless -> ffv1 (lossless everywhere, CPU). No avenc_ffv1 either -> RuntimeError:
+    nothing lossless is left to record with, and one legible error beats a parse_launch crash."""
+    missing = [e for e in _ENCODER_ELEMENTS.get(enc, ()) if Gst.ElementFactory.find(e) is None]
+    if not missing:
+        return enc
+    if enc == "ffv1":
+        raise RuntimeError(
+            "recorder: no usable lossless encoder: ffv1 needs avenc_ffv1 "
+            f"(gstreamer1.0-libav); missing element(s): {', '.join(missing)}")
+    log.warning("recorder: %s unavailable on this host (missing GStreamer element(s): %s); "
+                "falling back to ffv1", enc, ", ".join(missing))
+    return _resolve_available("ffv1")
 
 
 def _splitmux(location_base: str, seconds: int, muxer: str = "matroskamux",
@@ -80,6 +116,15 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
             sc_sink = _splitmux(location_base, cfg.segment_seconds, keyframe_requests=False)
             return f"queue max-size-buffers=12 name=rec_q ! {encoded_parser} ! " + sc_sink
 
+    if enc == "x265-lossless" and bits_per_pixel > 8:
+        # >8-bit rides in a GRAY16 container and x265's input formats top out at 12-bit: there is
+        # no depth-preserving format to pin, so videoconvert would silently shift real sensor bits
+        # away and the "lossless" encode isn't. FFV1 keeps the 16-bit container bit-exact.
+        log.warning("recorder: x265-lossless cannot preserve >8-bit (GRAY16) input; "
+                    "falling back to ffv1")
+        enc = "ffv1"
+    enc = _resolve_available(enc)
+
     gop = _gop_frames(cfg, fps)
     bframes = max(0, int(getattr(cfg, "bframes", 0)))
     preset = _preset_level(getattr(cfg, "nvenc_preset", "")) if enc == "hw-hevc-lossless" else None
@@ -112,13 +157,17 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
         )
 
     if enc == "x265-lossless":
-        # CPU lossless + temporal; keeps high bit depth. Throughput-limited at 4K.
+        # CPU lossless + temporal; 8-bit only (>8-bit fell back to ffv1 above). Throughput-limited
+        # at 4K. Mono/Bayer: pin I420 so the (mosaic) plane rides bit-exact in Y with neutral
+        # chroma -- unpinned, videoconvert is free to negotiate a format that munges the data.
+        # Color keeps the unpinned negotiation (use ffv1 for guaranteed-bit-exact color).
         opts = "lossless=1"
         if gop:
             opts += f":keyint={gop}:min-keyint={gop}"
         opts += f":bframes={bframes}"
+        pin = "" if is_color else "video/x-raw,format=I420 ! "
         return (
-            f"queue max-size-buffers=12 name=rec_q ! {vconv} ! "
+            f"queue max-size-buffers=12 name=rec_q ! {vconv} ! {pin}"
             f'x265enc option-string="{opts}" speed-preset=ultrafast ! h265parse ! ' + sink
         )
 

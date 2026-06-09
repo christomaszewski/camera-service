@@ -24,7 +24,7 @@ Layout (little-endian, fixed 36 bytes for v1 -- struct "<4sHHQQHHIBBH"):
     frame_id     u64  camera frame id (GVSP block id or chunk frame id)
     width        u16
     height       u16
-    pixfmt       u32  code (PIXFMT map) -> GStreamer raw format
+    pixfmt       u32  code (_CODE_TO_GST map below) -> GStreamer raw format
     ts_source    u8   0=ptp_chunk 1=camera 2=system 3=sof(usb) 4=rtp_ntp(rtsp)  (provenance)
     flags        u8   reserved bitfield
     reserved     u16
@@ -41,12 +41,15 @@ _FORMAT = "<4sHHQQHHIBBH"
 HEADER_SIZE = struct.calcsize(_FORMAT)  # 36
 _U64 = 0xFFFFFFFFFFFFFFFF
 
-# pixfmt codes <-> GStreamer raw video formats (keep in sync with the C++ bridges).
-# Codes 1-3 (mono) are what the C++ ros bridges map today; 4+ (color) are carried by the
-# header so the core never crashes on a color source -- color-CONSUMER support in the C++
-# bridges is a later slice (unixfd already carries color via native caps).
+# pixfmt codes <-> GStreamer raw video formats. This table must cover EVERY raw format
+# formats.py can hand a source (_GST_RAW), or FrameHeader.pack raises per-frame on the shm
+# endpoint. Codes are additive and never reorder (the C++ bridges hard-code them); mirror
+# any change in BOTH bridges' pixfmt_info (plugins/ros2-bridge/src/cam_header_bridge.cpp,
+# plugins/ros1-bridge/src/cam_ros1_bridge.cpp). unixfd carries color via native caps instead.
 _CODE_TO_GST = {1: "GRAY8", 2: "GRAY16_LE", 3: "GRAY16_BE",
-                4: "I420", 5: "NV12", 6: "YUY2", 7: "RGB", 8: "BGR"}
+                4: "I420", 5: "NV12", 6: "YUY2", 7: "RGB", 8: "BGR",
+                9: "NV24", 10: "YV12", 11: "UYVY",
+                12: "RGBA", 13: "BGRA", 14: "RGBx", 15: "BGRx"}
 _GST_TO_CODE = {v: k for k, v in _CODE_TO_GST.items()}
 
 # ts_source codes mirror cam_driver.timestamps.TimestampSource values. Additive: 0-2 unchanged;

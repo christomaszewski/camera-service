@@ -16,6 +16,8 @@ core pipeline; the `plugins` list is for the per-sensor supervisor / cam-up (spa
 from __future__ import annotations
 
 import functools
+import os
+import time
 import typing
 from dataclasses import dataclass, field, fields
 from typing import Optional
@@ -279,12 +281,16 @@ def parse_config(raw: dict) -> AppConfig:
     for p in (raw.get("plugins") or []):
         if not isinstance(p, dict) or "name" not in p:
             continue
-        reserved = ("name", "enabled", "command", "restart", "isolation")
+        reserved = ("name", "enabled", "command", "restart", "isolation", "params")
+        # Params live in a nested `params:` map (the documented shape, what every sensor config and
+        # tools/sensor_env.py use); bare top-level extras are still collected as a fallback.
+        nested = p.get("params") if isinstance(p.get("params"), dict) else {}
+        flat = {k: v for k, v in p.items() if k not in reserved}
         plugins.append(PluginConfig(
             name=p["name"], enabled=bool(p.get("enabled", True)),
             command=p.get("command"), restart=bool(p.get("restart", True)),
             isolation=str(p.get("isolation", "process")),
-            params={k: v for k, v in p.items() if k not in reserved}))
+            params={**flat, **nested}))
 
     return AppConfig(
         camera=camera,
@@ -312,6 +318,28 @@ def resolve_recording_dir(output_dir: str, rig_data_dir: str = "", instance: str
     base = f"{rdd}/recordings" if rdd else "/data/recordings"
     inst = (instance or "").strip()
     return f"{base}/{inst}" if inst else base
+
+
+def unique_run_prefix(output_dir: str, name_prefix: str, _now=None) -> str:
+    """Return a per-RUN recording prefix `<name_prefix>-<UTC stamp>` that collides with nothing
+    already in `output_dir`.
+
+    The recorder writes `<prefix>-%05d.mkv` (splitmuxsink restarts numbering at 00000) and the
+    sidecar truncates `<prefix>.csv`/`.json` on open -- so a fixed prefix means every service
+    restart (e.g. compose `restart: unless-stopped` after a crash) OVERWRITES the previous run's
+    data. Stamping the prefix per run turns restarts into new runs side by side. A restart loop
+    faster than the 1 s stamp resolution gets a `.N` suffix instead of a collision."""
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime(_now))
+    base = f"{name_prefix}-{stamp}"
+    try:
+        existing = os.listdir(output_dir)
+    except OSError:
+        return base                                        # dir not there yet -> nothing to collide with
+    candidate, n = base, 1
+    while any(e.startswith(candidate) for e in existing):
+        n += 1
+        candidate = f"{base}.{n}"
+    return candidate
 
 
 def load_config(path: str) -> AppConfig:

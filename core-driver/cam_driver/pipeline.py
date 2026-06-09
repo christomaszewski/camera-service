@@ -46,9 +46,17 @@ from . import transport
 from .dropstats import DropStats
 from .formats import bytes_per_frame, parse_pixel_format, select_encoder
 from .sidecar import SidecarHeader, SidecarWriter
+from .sources.base import SourceConfigChanged
 from .timestamps import FrameStamp
 
 log = logging.getLogger(__name__)
+
+# appsrc queue bounds, in FRAMES (x frame size -> max-bytes). appsrc with block=false does NOT
+# enforce its own bound -- past max-bytes it keeps queueing and push-buffer still returns OK -- so
+# the feeder checks the fill level before each push (_queue_full) and drops WITH accounting,
+# instead of growing RAM at sensor bandwidth until the OOM killer takes the recording with it.
+_REC_QUEUE_FRAMES = 32   # recording feeds (camsrc/recsrc/encsrc): ride out brief stalls before dropping
+_PUB_QUEUE_FRAMES = 8    # best-effort publish feeds (transport/unixfd): drop early, stay lean
 
 
 class CapturePipeline:
@@ -64,6 +72,7 @@ class CapturePipeline:
         self.loop: Optional[GLib.MainLoop] = None
         self._base_ts: Optional[int] = None
         self._last_pub_ts: Optional[int] = None
+        self._pub_err_last: float = 0.0             # monotonic s of the last logged publish error
         self._last_pts: Optional[int] = None        # for the monotonic-PTS guard
         self._frame_interval_ns = 1_000_000         # set in build() from frame_rate
         self._reconnecting = False
@@ -77,6 +86,7 @@ class CapturePipeline:
         self._height = 0
         self._image_size = 0
         self._stopping = False
+        self._fatal = False                # pipeline ERROR / fatal source change -> non-zero exit
         self._have_unixfd = False          # JP7 (GStreamer 1.24): unixfd transport available
         self._unixfd_path = None
         self._fd_alloc = None              # GstAllocators.FdAllocator -> memfd buffers for unixfd
@@ -120,7 +130,8 @@ class CapturePipeline:
         frame_bytes = self._image_size
 
         main = [
-            f'appsrc name=camsrc is-live=true do-timestamp=false format=time caps="{caps}"',
+            f'appsrc name=camsrc is-live=true do-timestamp=false format=time '
+            f'max-bytes={_REC_QUEUE_FRAMES * frame_bytes} caps="{caps}"',
             "queue max-size-buffers=8 name=src_q",
             "tee name=t",
         ]
@@ -178,7 +189,8 @@ class CapturePipeline:
         # AND temporal compression. numpy is imported lazily (only when tiling is actually enabled).
         if self._tile_rec:
             chains.append(
-                f'appsrc name=recsrc is-live=true do-timestamp=false format=time caps="{caps}" '
+                f'appsrc name=recsrc is-live=true do-timestamp=false format=time '
+                f'max-bytes={_REC_QUEUE_FRAMES * frame_bytes} caps="{caps}" '
                 f'! {rec_desc}')
             log.info("recorder: CFA-tiling 8-bit Bayer (%s) mode=%s before encode", self._bayer, self._tile_mode)
 
@@ -186,8 +198,11 @@ class CapturePipeline:
         # bitstream (set by the feeder's on_encoded) straight into <parser> ! splitmuxsink -- no decode,
         # no re-encode, so the .mkv is byte-exact to what the host received.
         if self._stream_copy:
+            # max-bytes uses the RAW frame size: encoded frames are (much) smaller, so the bound
+            # is roomy in frames while still hard-capping memory.
             chains.append(
                 f'appsrc name=encsrc is-live=true do-timestamp=false format=time '
+                f'max-bytes={_REC_QUEUE_FRAMES * frame_bytes} '
                 f'caps="{self.source.encoded_caps}" ! {rec_desc}')
 
         # Plugin transport endpoint: prefer unixfd (native caps + GstBuffer metadata) where the element
@@ -220,7 +235,8 @@ class CapturePipeline:
             else:
                 ucaps = caps   # mono: video/x-raw GRAY8/16
             chains.append(
-                f'appsrc name=unixfd_src is-live=true do-timestamp=false format=time caps="{ucaps}" '
+                f'appsrc name=unixfd_src is-live=true do-timestamp=false format=time '
+                f'max-bytes={_PUB_QUEUE_FRAMES * frame_bytes} caps="{ucaps}" '
                 f'! queue max-size-buffers=8 ! unixfdsink socket-path={self._unixfd_path} sync=false')
             log.info("plugin transport endpoint (unixfd) -> %s  caps=%s", self._unixfd_path,
                      ucaps.split(",", 1)[0] + (f",{self._bayer}" if (self._bayer and self._bits <= 8) else ""))
@@ -229,6 +245,7 @@ class CapturePipeline:
             shm = self._shm_size(pe, frame_bytes + transport.HEADER_SIZE)
             chains.append(
                 f'appsrc name=transport_src is-live=true do-timestamp=false format=time '
+                f'max-bytes={_PUB_QUEUE_FRAMES * (frame_bytes + transport.HEADER_SIZE)} '
                 f'caps="{transport.CAPS}" ! queue max-size-buffers=8 ! '
                 f"shmsink socket-path={pe.socket_path} shm-size={shm} "
                 f"wait-for-connection=false sync=false")
@@ -258,6 +275,35 @@ class CapturePipeline:
             return True
         return False
 
+    def _note_push_drop(self, publish: bool) -> int:
+        if publish:
+            self.drops.note_publish_drop()
+            return self.drops.publish_drops
+        self.drops.note_enqueue_failure()
+        return self.drops.enqueue_failures
+
+    def _queue_full(self, src, nbytes: int, what: str, publish: bool = False) -> bool:
+        """True (recording the drop) if `src`'s internal queue can't take nbytes more. appsrc with
+        block=false ignores its own max-bytes for queueing purposes (push still returns OK), so this
+        check IS the bound: a full queue means downstream stalled -- drop this frame, count it, and
+        keep the service alive instead of growing RAM until the OOM killer ends the recording."""
+        max_bytes = src.get_property("max-bytes")
+        if max_bytes and src.get_property("current-level-bytes") + nbytes > max_bytes:
+            n = self._note_push_drop(publish)
+            if n % 100 == 1:
+                log.warning("%s queue full (downstream stalled); dropped %d frame(s) so far", what, n)
+            return True
+        return False
+
+    def _push_checked(self, src, buf, what: str, publish: bool = False) -> bool:
+        """push-buffer + FlowReturn check (flushing/EOS race), with the same drop accounting."""
+        ret = src.emit("push-buffer", buf)
+        if ret != Gst.FlowReturn.OK:
+            self._note_push_drop(publish)
+            log.warning("%s push-buffer -> %s (frame received but not enqueued)", what, ret)
+            return False
+        return True
+
     def _ensure_base(self, stamp: FrameStamp) -> None:
         """Set the PTS base + write the sidecar header once, on the first frame from EITHER the raw
         (on_frame) or encoded (on_encoded) callback. They share the per-frame stamp, so the base is
@@ -267,17 +313,20 @@ class CapturePipeline:
                 self._base_ts = stamp.timestamp_ns
                 self._write_header()
 
-    def _account(self, stamp: FrameStamp, pts: int) -> None:
+    def _account(self, stamp: FrameStamp, pts: int, recorded: bool = True) -> None:
         """Per-RECORDED-frame accounting: frame-id drop detection + the sidecar timestamp row
         (+ a first-frames provenance eyeball). Driven by whichever callback feeds the recording:
         _on_frame for raw / re-encode sources, _on_encoded for a stream-copy source. Deliberately
         NOT the best-effort decode branch of a stream-copy source -- a leaky decode drop there is
-        expected (not a lost recorded frame) and must not desync the sidecar or trip drop warnings."""
+        expected (not a lost recorded frame) and must not desync the sidecar or trip drop warnings.
+        A frame whose recording push was dropped (recorded=False) is still observed for gap
+        accounting but gets NO sidecar row, keeping the CSV 1:1 with the .mkv."""
         gap = self.drops.observe_frame(stamp.frame_id)
         if gap:
             log.warning("frame-id gap: %d frame(s) lost before fid=%s (source/link drop; %d missing total)",
                         gap, stamp.frame_id, self.drops.frames_missing)
-        self.sidecar.add(stamp, pts)
+        if recorded:
+            self.sidecar.add(stamp, pts)
         if self._n_pushed < 5:  # quick eyeball; full per-frame data is in the CSV
             d_cc = (stamp.chunk_ns - stamp.camera_ns) if stamp.chunk_ns is not None else None
             d_sc = (stamp.system_ns - stamp.chunk_ns) if stamp.chunk_ns is not None else None
@@ -310,23 +359,26 @@ class CapturePipeline:
             pts = 0
         self._last_pts = pts
 
-        gbuf = Gst.Buffer.new_wrapped(frame_bytes)
-        gbuf.pts = pts
-        gbuf.dts = Gst.CLOCK_TIME_NONE
-        gbuf.offset = stamp.frame_id
-        ret = self.appsrc.emit("push-buffer", gbuf)
-        if ret != Gst.FlowReturn.OK:
-            self.drops.note_enqueue_failure()
-            log.warning("appsrc push-buffer -> %s (frame received but not enqueued)", ret)
+        rec_ok = not self._queue_full(self.appsrc, len(frame_bytes), "camsrc")
+        if rec_ok:
+            gbuf = Gst.Buffer.new_wrapped(frame_bytes)
+            gbuf.pts = pts
+            gbuf.dts = Gst.CLOCK_TIME_NONE
+            gbuf.offset = stamp.frame_id
+            rec_ok = self._push_checked(self.appsrc, gbuf, "camsrc")
 
         # Recorder gets a CFA-tiled copy (quadrant sub-planes) for better lossless compression; the
-        # tee above keeps feeding the mosaic to transport/preview/raw. Same PTS/frame_id.
+        # tee above keeps feeding the mosaic to transport/preview/raw. Same PTS/frame_id. When
+        # tiling is on, THIS push (not camsrc) is the recording feed.
         if self.rec_src is not None:
-            rbuf = Gst.Buffer.new_wrapped(self._tiler(frame_bytes))
-            rbuf.pts = pts
-            rbuf.dts = Gst.CLOCK_TIME_NONE
-            rbuf.offset = stamp.frame_id
-            self.rec_src.emit("push-buffer", rbuf)
+            tiled = self._tiler(frame_bytes)
+            rec_ok = not self._queue_full(self.rec_src, len(tiled), "recsrc")
+            if rec_ok:
+                rbuf = Gst.Buffer.new_wrapped(tiled)
+                rbuf.pts = pts
+                rbuf.dts = Gst.CLOCK_TIME_NONE
+                rbuf.offset = stamp.frame_id
+                rec_ok = self._push_checked(self.rec_src, rbuf, "recsrc")
 
         # plugin transport endpoint, rate-limited. JP7 (unixfd): native caps + buffer fields, but
         # unixfdsink needs FD-backed memory -> copy the frame into a fresh memfd (~shm cost; the win
@@ -334,31 +386,50 @@ class CapturePipeline:
         # capture time in .offset_end (an absolute-ns PTS would stall downstream flow). PTS stays
         # relative. JP6 (no unixfd): the legacy shm+header endpoint.
         if self._should_publish(stamp.timestamp_ns):
-            if self.unixfd_src is not None:
-                fd = os.memfd_create("cam", 0)
-                os.ftruncate(fd, len(frame_bytes))
-                os.pwrite(fd, frame_bytes, 0)
-                mem = self._GstAllocators.FdAllocator.alloc(
-                    self._fd_alloc, fd, len(frame_bytes),
-                    self._GstAllocators.FdMemoryFlags.NONE)   # FdAllocator owns/closes the fd
-                ubuf = Gst.Buffer.new()
-                ubuf.insert_memory(-1, mem)
-                ubuf.pts = pts
-                ubuf.offset = stamp.frame_id
-                ubuf.offset_end = stamp.timestamp_ns
-                self.unixfd_src.emit("push-buffer", ubuf)
-            elif self.transport_src is not None:
-                hdr = transport.FrameHeader(
-                    timestamp_ns=stamp.timestamp_ns, frame_id=stamp.frame_id,
-                    width=self._width, height=self._height,
-                    pixfmt=self._gst_format, ts_source=stamp.source.value).pack()
-                tbuf = Gst.Buffer.new_wrapped(hdr + frame_bytes)
-                tbuf.pts = pts
-                tbuf.offset = stamp.frame_id
-                self.transport_src.emit("push-buffer", tbuf)
+            try:
+                if self.unixfd_src is not None:
+                    # bound check BEFORE the memfd: no point paying the copy for a frame we then drop
+                    if not self._queue_full(self.unixfd_src, len(frame_bytes), "unixfd transport", publish=True):
+                        fd = os.memfd_create("cam", 0)
+                        try:
+                            os.ftruncate(fd, len(frame_bytes))
+                            os.pwrite(fd, frame_bytes, 0)
+                            mem = self._GstAllocators.FdAllocator.alloc(
+                                self._fd_alloc, fd, len(frame_bytes),
+                                self._GstAllocators.FdMemoryFlags.NONE)   # on success the allocator owns/closes the fd
+                        except Exception:
+                            os.close(fd)   # ownership never transferred; the handler below would otherwise
+                            raise          # silently leak one fd per published frame until EMFILE
+                        ubuf = Gst.Buffer.new()
+                        ubuf.insert_memory(-1, mem)
+                        ubuf.pts = pts
+                        ubuf.offset = stamp.frame_id
+                        ubuf.offset_end = stamp.timestamp_ns
+                        self._push_checked(self.unixfd_src, ubuf, "unixfd transport", publish=True)
+                elif self.transport_src is not None:
+                    hdr = transport.FrameHeader(
+                        timestamp_ns=stamp.timestamp_ns, frame_id=stamp.frame_id,
+                        width=self._width, height=self._height,
+                        pixfmt=self._gst_format, ts_source=stamp.source.value).pack()
+                    payload = hdr + frame_bytes
+                    if not self._queue_full(self.transport_src, len(payload), "shm transport", publish=True):
+                        tbuf = Gst.Buffer.new_wrapped(payload)
+                        tbuf.pts = pts
+                        tbuf.offset = stamp.frame_id
+                        self._push_checked(self.transport_src, tbuf, "shm transport", publish=True)
+            except Exception as e:
+                # The plugin endpoint is best-effort: a per-frame publish failure (e.g. a
+                # TransportError for a pixel format the header can't carry, or a memfd
+                # failure) must never escape past the _account below -- that would kill
+                # drop detection and leave the sidecar empty while the recording continues.
+                self.drops.note_publish_drop()
+                now = time.monotonic()
+                if now - self._pub_err_last >= 5.0:
+                    self._pub_err_last = now
+                    log.warning("plugin transport publish failed (throttled 5s): %s", e)
 
         if not self._stream_copy:
-            self._account(stamp, pts)   # raw / re-encode: THIS path is the recording feed
+            self._account(stamp, pts, recorded=rec_ok)   # raw / re-encode: THIS path is the recording feed
 
     def _on_encoded(self, stamp: FrameStamp, enc_bytes: bytes, caps_str: str = None) -> None:
         """Encoded-source callback (parallel to on_frame, SAME per-frame stamp): push the delivered
@@ -377,15 +448,17 @@ class CapturePipeline:
         pts = stamp.timestamp_ns - self._base_ts
         if pts < 0:
             pts = 0
-        ebuf = Gst.Buffer.new_wrapped(enc_bytes)
-        ebuf.pts = pts
-        ebuf.dts = Gst.CLOCK_TIME_NONE
-        ebuf.offset = stamp.frame_id
-        self.enc_src.emit("push-buffer", ebuf)
+        rec_ok = not self._queue_full(self.enc_src, len(enc_bytes), "encsrc")
+        if rec_ok:
+            ebuf = Gst.Buffer.new_wrapped(enc_bytes)
+            ebuf.pts = pts
+            ebuf.dts = Gst.CLOCK_TIME_NONE
+            ebuf.offset = stamp.frame_id
+            rec_ok = self._push_checked(self.enc_src, ebuf, "encsrc")
         # stream-copy: the encoded branch IS the recording -> account the recorded frame here (drop
         # detection + sidecar timestamp), NOT on the best-effort decode branch (_on_frame). This keeps
         # the sidecar 1:1 with the .mkv and the RTCP->NTP provenance complete even under decode-branch load.
-        self._account(stamp, pts)
+        self._account(stamp, pts, recorded=rec_ok)
 
     def _write_header(self) -> None:
         _x, _y, width, height = self.source.geometry()
@@ -413,7 +486,7 @@ class CapturePipeline:
         self._stop_event.set()   # wake the reconnect backoff, if one is in progress
         log.info("stop requested: stopping acquisition + sending EOS to finalize recording")
         self.source.stop()
-        for src in (self.appsrc, self.transport_src, self.rec_src, self.enc_src):
+        for src in (self.appsrc, self.transport_src, self.unixfd_src, self.rec_src, self.enc_src):
             if src is not None:
                 src.emit("end-of-stream")
         GLib.timeout_add_seconds(5, self._force_quit)
@@ -423,6 +496,15 @@ class CapturePipeline:
         if self.loop and self.loop.is_running():
             self.loop.quit()
         return False
+
+    def _request_stop_idle(self) -> bool:
+        self.request_stop()
+        return False   # one-shot idle callback
+
+    @property
+    def had_error(self) -> bool:
+        """True if the run ended on a pipeline ERROR or a fatal source change (drives the exit code)."""
+        return self._fatal
 
     # ---- run loop ----------------------------------------------------------
     def run(self) -> None:
@@ -447,9 +529,10 @@ class CapturePipeline:
         if self._stopping:
             return False
         s = self.drops.summary()
-        if s["source_gaps"] or s["enqueue_failures"]:
+        if s["source_gaps"] or s["enqueue_failures"] or s["publish_drops"]:
             log.warning("health: frames=%(frames)d source_gaps=%(source_gaps)d "
-                        "frames_missing=%(frames_missing)d enqueue_failures=%(enqueue_failures)d", s)
+                        "frames_missing=%(frames_missing)d enqueue_failures=%(enqueue_failures)d "
+                        "publish_drops=%(publish_drops)d", s)
         else:
             log.info("health: frames=%(frames)d, no drops", s)
         return True
@@ -478,6 +561,16 @@ class CapturePipeline:
             attempt += 1
             try:
                 self.source.reopen()
+            except SourceConfigChanged as e:
+                # The stream came back DIFFERENT (codec/geometry). The appsrc caps are fixed at
+                # build(), so no in-process reopen can carry on: finalize the recording cleanly and
+                # exit non-zero; the supervisor/compose restart re-probes and rebuilds for the new
+                # format.
+                log.error("%s -- finalizing recording and exiting for a clean rebuild", e)
+                self._fatal = True
+                self._reconnecting = False
+                GLib.idle_add(self._request_stop_idle)
+                return
             except Exception as e:   # noqa: BLE001 - never let the reconnect thread die
                 log.warning("reconnect attempt %d failed: %s (retry in %.1fs)", attempt, e, backoff)
                 if self._stop_event.wait(backoff):
@@ -494,6 +587,7 @@ class CapturePipeline:
         if msg.type == Gst.MessageType.ERROR:
             err, dbg = msg.parse_error()
             log.error("GStreamer ERROR: %s | %s", err, dbg)
+            self._fatal = True   # surfaced as a non-zero exit (disk full etc. must not look clean)
             if self.loop:
                 self.loop.quit()
         elif msg.type == Gst.MessageType.EOS:
@@ -509,6 +603,7 @@ class CapturePipeline:
             self.pipeline.set_state(Gst.State.NULL)
         s = self.drops.summary()
         log.info("drop summary: frames=%(frames)d source_gaps=%(source_gaps)d "
-                 "frames_missing=%(frames_missing)d enqueue_failures=%(enqueue_failures)d", s)
+                 "frames_missing=%(frames_missing)d enqueue_failures=%(enqueue_failures)d "
+                 "publish_drops=%(publish_drops)d", s)
         self.sidecar.write_summary(s)
         self.sidecar.stop()

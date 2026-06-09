@@ -49,6 +49,25 @@ def test_color_pixfmt_roundtrip():
         assert out.pixfmt == fmt
 
 
+def test_extended_color_pixfmt_codes_stable():
+    # additive codes 9+ at their exact wire values; 1-8 must NOT shift (C++ bridges hard-code them)
+    for fmt, code in (("NV24", 9), ("YV12", 10), ("UYVY", 11),
+                      ("RGBA", 12), ("BGRA", 13), ("RGBx", 14), ("BGRx", 15)):
+        raw = FrameHeader(timestamp_ns=11, frame_id=5, width=8, height=8, pixfmt=fmt).pack()
+        assert raw[28:32] == bytes([code, 0, 0, 0])   # pixfmt u32 LE (offset 28 in the v1 header)
+        assert unpack_header(raw).pixfmt == fmt
+
+
+def test_every_source_raw_format_is_carriable():
+    # The invariant that broke once: every raw format parse_pixel_format can hand a source
+    # (formats._GST_RAW) must pack on the shm transport, or _on_frame raises per-frame.
+    from cam_driver.formats import _GST_RAW
+    for fmt in sorted(_GST_RAW):
+        out = unpack_header(FrameHeader(timestamp_ns=1, frame_id=1, width=2, height=2,
+                                        pixfmt=fmt).pack())
+        assert out.pixfmt == fmt
+
+
 def test_ts_source_codes_stable():
     # additive provenance rungs; 0-2 must NOT shift (the C++ bridges hard-code them)
     assert TS_SOURCE_CODE == {"ptp_chunk": 0, "camera": 1, "system": 2, "sof": 3, "rtp_ntp": 4}
@@ -80,12 +99,13 @@ def test_truncated():
 
 
 def test_unsupported_pixfmt_rejected():
-    try:
-        # NV21 is a real GStreamer format we deliberately don't carry (no header code)
-        FrameHeader(timestamp_ns=0, frame_id=0, width=1, height=1, pixfmt="NV21").pack()
-        assert False, "expected TransportError"
-    except TransportError:
-        pass
+    # NV21: a real GStreamer format we deliberately don't carry; "BOGUS": not a format at all
+    for fmt in ("NV21", "BOGUS"):
+        try:
+            FrameHeader(timestamp_ns=0, frame_id=0, width=1, height=1, pixfmt=fmt).pack()
+            assert False, f"expected TransportError for {fmt}"
+        except TransportError:
+            pass
 
 
 def test_caps_constant():

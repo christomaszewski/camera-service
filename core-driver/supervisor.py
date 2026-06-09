@@ -104,18 +104,31 @@ class Supervisor:
             return [str(a) for a in plugin.command]
         return None
 
-    def run(self) -> None:
+    def run(self) -> int:
         signal.signal(signal.SIGTERM, self._on_signal)
         signal.signal(signal.SIGINT, self._on_signal)
         self._build_services()
         for s in self.services:
             if self._stopping:
                 break
-            s.spawn()
+            try:
+                s.spawn()
+            except OSError as e:
+                # A missing binary / typo'd `command:` must not kill PID 1 -- the orphaned core
+                # would be SIGKILLed mid-recording with no teardown. Critical (the core) means the
+                # sensor can't run: tear down whatever already spawned and exit non-zero. A plugin
+                # just gets skipped; the sensor runs without it.
+                if s.critical:
+                    log.error("cannot spawn %s: %s; tearing down sensor", s.name, e)
+                    self._teardown()
+                    return 1
+                log.error("cannot spawn plugin %s: %s; running without it", s.name, e)
+                continue
             if s.critical:
                 time.sleep(STARTUP_STAGGER_S)  # core first, then plugins attach to its endpoint
         log.info("supervising %d service(s)", len(self.services))
         self._monitor()
+        return 0
 
     def _on_signal(self, signum, _frame) -> None:
         log.info("signal %s received; stopping sensor", signal.Signals(signum).name)
@@ -152,7 +165,14 @@ class Supervisor:
         time.sleep(RESTART_BACKOFF_S)
         if self._stopping:
             return
-        s.spawn()
+        try:
+            s.spawn()
+        except OSError as e:
+            # Leave the dead proc in place: the monitor re-detects the exit and retries with the
+            # same backoff until RESTART_MAX. Refresh started_at so the "ran fine for a while"
+            # counter reset can't turn a vanished binary into an infinite retry loop.
+            s.started_at = time.monotonic()
+            log.error("plugin %s respawn failed: %s (%d/%d)", s.name, e, s.restarts, RESTART_MAX)
 
     def _teardown(self) -> None:
         self._stopping = True
@@ -183,8 +203,14 @@ def main(argv=None) -> int:
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
-    Supervisor(args.config).run()
-    return 0
+    try:
+        sup = Supervisor(args.config)
+    except (ValueError, OSError) as e:
+        # Mirror main.py: a config typo / unreadable file fails fast + legibly, naming the
+        # offending field, instead of a raw traceback from PID 1.
+        log.error("config error: %s", e)
+        return 2
+    return sup.run()
 
 
 if __name__ == "__main__":

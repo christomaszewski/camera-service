@@ -58,6 +58,17 @@ def test_enqueue_failures_counted():
     assert d.summary()["enqueue_failures"] == 2
 
 
+def test_publish_drops_counted_separately():
+    # best-effort transport drops (stalled consumer) must not pollute the recording-loss counter
+    d = DropStats()
+    d.observe_frame(1)
+    d.note_publish_drop()
+    d.note_publish_drop()
+    d.note_enqueue_failure()
+    s = d.summary()
+    assert (s["publish_drops"], s["enqueue_failures"]) == (2, 1)
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:
