@@ -53,6 +53,12 @@ services:
       - CAM_ROS_TOPIC=${CAM_ROS_TOPIC:-}                  # OPTIONAL linkage if a ros bridge coexists
       - CAM_RECORDING_GLOB=${CAM_RECORDING_GLOB:-}        # OPTIONAL recording linkage
       - VIDEO_CAPS=${VIDEO_CAPS:-}                          # pin a codec (e.g. video/x-h264) -> descriptor hint
+      # Force the Jetson HW encoder: webrtcsink picks the highest-RANKED encoder for the negotiated codec,
+      # which by default is the CPU x264enc. Bump nvv4l2h264enc so NVENC is used (pair with VIDEO_CAPS=
+      # video/x-h264). It's a plain GStreamer env var read at registry load; a no-op if the element is
+      # absent (e.g. Orin Nano has no H.264 NVENC -> falls back to x264enc). Also what makes profile=high
+      # take effect (set on that HW encoder). Comma-list for multiple, e.g. nvv4l2h264enc:MAX,nvv4l2h265enc:MAX.
+      - GST_PLUGIN_FEATURE_RANK=${GST_PLUGIN_FEATURE_RANK:-}
       # H.264 encode (webrtcsink re-encodes from raw): the PROFILE is a config knob; the LEVEL is
       # AUTO-derived from the resolution+fps fed to webrtcsink so the SDP profile-level-id matches the
       # stream (a fixed level = an out-of-level black tile in the browser on high-res streams).
