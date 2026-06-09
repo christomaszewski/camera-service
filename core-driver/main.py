@@ -22,7 +22,7 @@ except (ImportError, ValueError):
     class CameraError(Exception):
         pass
 
-from cam_driver.config import load_config
+from cam_driver.config import load_config, resolve_recording_dir
 from cam_driver.pipeline import CapturePipeline
 from cam_driver.sidecar import SidecarWriter
 from cam_driver.sources import make_source
@@ -41,8 +41,14 @@ def main(argv=None) -> int:
     log = logging.getLogger("cam")
 
     cfg = load_config(args.config)
-    log.info("config: source=%s frame_rate=%s recording=%s encoder=%s",
-             cfg.camera.type, cfg.camera.frame_rate, cfg.recording.enabled, cfg.recording.encoder)
+    # Recording dir from the deploy env: rig sets RIG_DATA_DIR (absolute host data root, bind-mounted at
+    # the same path) to keep recordings OFF the repo; cam-up sets CAM_INSTANCE to namespace per sensor.
+    # A bare run / a pinned output_dir is unaffected (see docker-compose.yml's `recordings` bind).
+    cfg.recording.output_dir = resolve_recording_dir(
+        cfg.recording.output_dir, os.environ.get("RIG_DATA_DIR", ""), os.environ.get("CAM_INSTANCE", ""))
+    log.info("config: source=%s frame_rate=%s recording=%s->%s encoder=%s",
+             cfg.camera.type, cfg.camera.frame_rate, cfg.recording.enabled,
+             cfg.recording.output_dir, cfg.recording.encoder)
 
     # The source owns the frontend: device + timestamp policy + feeder (here: GigE/Aravis,
     # incl. chunk/PTP setup). Everything downstream (pipeline) is source-agnostic.

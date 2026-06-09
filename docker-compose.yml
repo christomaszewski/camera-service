@@ -39,10 +39,16 @@ services:
     command: ["supervisor.py"]          # reads CAM_CONFIG; spawns core + in-image (process) plugins
     volumes:
       - ./core-driver/config:/app/config:ro
-      - ./recordings:/data/recordings
+      # Recordings live OFF the repo when rig sets RIG_DATA_DIR (an absolute host data root, e.g. /data):
+      # source+target both become $RIG_DATA_DIR so the path is identical host<->container AND `rig bake`
+      # leaves it literal (an absolute path isn't relativized into the artifact). Dev (unset): ./recordings
+      # -> /data/recordings. main.py roots the recording dir here + adds a per-sensor <CAM_INSTANCE> subdir.
+      - ${RIG_DATA_DIR:-./recordings}:${RIG_DATA_DIR:-/data/recordings}
       - cam_sock:/tmp/cam
     environment:
       - CAM_CONFIG=${CAM_CONFIG:-config/sensors/camera.yaml}
+      - RIG_DATA_DIR=${RIG_DATA_DIR:-}     # absolute host data root (rig) -> recording dir rooted here, off-repo
+      - CAM_INSTANCE=${CAM_INSTANCE:-}     # sensor name (cam-up) -> main.py namespaces recordings per sensor
     healthcheck:
       # `rig status` (docker compose ps) then reports real health, not "n/a": the core reached
       # PLAYING and its shm transport socket exists (a stack that feeds consumers has one enabled).
