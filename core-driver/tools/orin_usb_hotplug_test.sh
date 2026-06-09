@@ -13,7 +13,7 @@
 # Override BYID/USBDEV for a different camera (find USBDEV via: basename $(readlink -f \
 #   /sys/class/video4linux/video0/device) | cut -d: -f1).
 set -u
-REPO="${REPO:-/home/uxv/ws/gige-vision-service/core-driver}"
+REPO="${REPO:-/home/uxv/ws/camera-service/core-driver}"
 BYID="${BYID:-/dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._NexiGo_HD_Webcam_SN0001-video-index0}"
 USBDEV="${USBDEV:-1-4.1}"
 FMT="${FMT:-MJPEG}"; W="${W:-1280}"; H="${H:-720}"; FPS="${FPS:-30}"
@@ -68,7 +68,7 @@ python3 - "$REC" <<'PY'
 import csv, glob, sys
 f = sorted(glob.glob(sys.argv[1] + "/*.csv"))
 if not f:
-    print("NO CSV (no frames recorded at all)"); raise SystemExit
+    print("NO CSV (no frames recorded at all)"); raise SystemExit(1)
 rows = list(csv.DictReader(open(f[0])))
 print("recorded rows:", len(rows))
 ts = [int(r["timestamp_ns"]) for r in rows]
@@ -76,7 +76,9 @@ if len(ts) > 2:
     gaps = [(ts[i+1]-ts[i])/1e9 for i in range(len(ts)-1)]
     mx = max(gaps); idx = gaps.index(mx)
     print("max inter-frame gap: %.1fs  (rows %d before / %d after the gap)" % (mx, idx+1, len(rows)-idx-1))
-    print("VERDICT:", "RECOVERED" if (mx > 3 and len(rows)-idx-1 > 10) else "NOT RECOVERED")
-else:
-    print("VERDICT: NOT RECOVERED (too few rows)")
+    ok = mx > 3 and len(rows)-idx-1 > 10
+    print("VERDICT:", "RECOVERED" if ok else "NOT RECOVERED")
+    raise SystemExit(0 if ok else 1)
+print("VERDICT: NOT RECOVERED (too few rows)")
+raise SystemExit(1)
 PY

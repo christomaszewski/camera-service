@@ -9,7 +9,7 @@
 #
 # Pass = every run: csv rows > 0 AND mkv bytes > 0, no "frame-id gap" warnings, first frame < ~8s.
 set -uo pipefail
-REPO="${REPO:-/home/uxv/ws/gige-vision-service}"
+REPO="${REPO:-/home/uxv/ws/camera-service}"
 IMG=cam-core:jp7
 CFG="${CFG:-config/rtsp-real.yaml}"
 RUNS="${RUNS:-4}"
@@ -19,6 +19,7 @@ LOGS=/tmp/camval
 mkdir -p "$LOGS"
 
 echo "### image=$IMG cfg=$CFG runs=$RUNS stream=${STREAM}s (timed from 'running')"
+FAILED=0
 for i in $(seq 1 "$RUNS"); do
   rm -rf "$REC"; mkdir -p "$REC"
   LOG="$LOGS/v2_$(basename "$CFG" .yaml)_$i.log"
@@ -49,9 +50,10 @@ for i in $(seq 1 "$RUNS"); do
   if [ -n "$t_run" ] && [ -n "$t_f1" ]; then
     lat=$(( $(date -d "$t_f1" +%s) - $(date -d "$t_run" +%s) ))s
   fi
-  verdict="OK"; { [ "$bytes" -gt 0 ] && [ "$rows" -gt 0 ]; } || verdict="FAIL(starved)"
+  verdict="OK"; { [ "$bytes" -gt 0 ] && [ "$rows" -gt 0 ]; } || { verdict="FAIL(starved)"; FAILED=1; }
   [ "${gaps:-0}" -eq 0 ] || verdict="$verdict +${gaps}gap"
   printf "run %d: %-14s rows=%-4s segs=%s bytes=%-9s firstframe=%s ran=%s\n" \
     "$i" "$verdict" "$rows" "$nseg" "$bytes" "$lat" "$ran"
   shopt -u nullglob
 done
+exit "$FAILED"

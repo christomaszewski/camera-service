@@ -25,10 +25,16 @@ docker run --rm -v "$PWD/core-driver:/app" "$IMG" bash -c '
   CORE=$!; sleep 9
   kill -INT "$CORE"; wait "$CORE" 2>/dev/null || true; kill "$SRV" 2>/dev/null || true
   grep -iE "rtsp decode branch|rtsp: RTCP|rtsp: no add-reference|transport endpoint|recorder: stream-copy" /tmp/core.log | head -5
+  grep -q "recorder: stream-copy" /tmp/core.log || { echo "FAIL: rtsp source did not stream-copy"; exit 1; }
   echo "-- per-frame timestamp provenance (sidecar CSV; works on either transport) --"
   python3 - <<PY
-import csv, collections
-rows=list(csv.DictReader(open("/data/recordings/rtspmjpeg.csv")))
+import csv, collections, glob, sys
+paths = glob.glob("/data/recordings/rtspmjpeg-*.csv")
+if not paths:
+    sys.exit("FAIL: no sidecar CSV written")
+rows=list(csv.DictReader(open(paths[0])))
+if not rows:
+    sys.exit("FAIL: sidecar CSV has no frame rows")
 dist=collections.Counter(r["source"] for r in rows)
 print("   frames=%d  provenance=%s" % (len(rows), dict(dist)))
 ntp=[int(r["timestamp_ns"]) for r in rows if r["source"]=="rtp_ntp"]
@@ -37,11 +43,18 @@ if ntp:
     unix_ok = 1.6e18 < ntp[0] < 2.0e18   # plausible Unix-epoch ns (~2020..2033) => NTP->Unix conv correct
     print("   rtp_ntp: %d frames, inter-frame ms min/max=%.1f/%.1f (=frame interval), unix-epoch-ok=%s"
           % (len(ntp), min(d), max(d), unix_ok))
+    if not unix_ok:
+        sys.exit("FAIL: rtp_ntp timestamps are not plausible Unix-epoch ns (NTP conversion broken)")
     print("   => NTP wall-clock provenance WORKING")
 else:
     print("   => arrival-only (system): expected on gst<1.24 (no add-reference-timestamp-meta)")
 PY
   echo "-- recording is STREAM-COPIED MJPEG (demuxes image/jpeg + decodes; NOT re-encoded) --"
-  gst-launch-1.0 filesrc location=/data/recordings/rtspmjpeg-00000.mkv ! matroskademux ! jpegdec ! fakesink -v 2>&1 \
-    | grep -oE "image/jpeg|Got EOS" | sort -u | head
+  M=$(ls /data/recordings/rtspmjpeg-*-00000.mkv) || { echo "FAIL: no recording segment"; exit 1; }
+  gst-launch-1.0 -v filesrc location="$M" ! matroskademux ! jpegdec ! fakesink >/tmp/decode.log 2>&1 \
+    || { echo "FAIL: mkv decode errored"; tail -5 /tmp/decode.log; exit 1; }
+  grep -q "image/jpeg" /tmp/decode.log || { echo "FAIL: recording is not MJPEG (stream-copy broken)"; exit 1; }
+  grep -qi "got eos" /tmp/decode.log || { echo "FAIL: decode never reached EOS"; exit 1; }
+  echo "stream-copy MJPEG decode OK"
 '
+echo "PASS: rtsp_test"

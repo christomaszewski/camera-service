@@ -115,7 +115,10 @@ def main() -> int:
                     "matroskademux", "!", "avdec_ffv1", "!", "videoconvert", "!",
                     "video/x-raw,format=GRAY8", "!", "filesink", f"location={decoded_out}"], check=True)
 
-    rows = list(csv.DictReader(open(f"{RECDIR}/rt.csv")))
+    csvs = glob.glob(f"{RECDIR}/rt-*.csv")   # prefix is run-stamped (rt-<UTC>.csv)
+    if not csvs:
+        print("FAIL: no sidecar CSV produced"); return 1
+    rows = list(csv.DictReader(open(csvs[0])))
     n_out = os.path.getsize(decoded_out) // IMG
     n = min(n_out, len(rows))
     mkv_sz = os.path.getsize(mkvs[0])

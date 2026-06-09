@@ -7,7 +7,7 @@
 # Run (random-noise frames):   ./tools/gvsp-chunk-emitter/roundtrip_test.sh
 # Run with a real input file:  ./tools/gvsp-chunk-emitter/roundtrip_test.sh path/to/video.mkv
 #   (any gst-decodable video/image; it's decoded + scaled to GRAY8 512x512 and cycled to N)
-set -u
+set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 
 MOUNT=(); ARGS=()
