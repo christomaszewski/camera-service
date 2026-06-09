@@ -4,7 +4,7 @@
 # so they run unchanged from their normal definitions. cam-up --dev also sets CAM_NETWORK=bridge.
 services:
   core-driver:
-    image: ${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}cam-dev
+    image: ${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}cam-dev:${RIG_IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: core-driver/Dockerfile.dev
