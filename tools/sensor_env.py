@@ -8,7 +8,9 @@ generate a compose file. It emits `KEY=value` lines:
   COMPOSE_PROFILES       <enabled container plugins, comma-separated>
   CAM_INSTANCE          <name>                 (ROS namespace, labels)
   CAM_SOCK_VOLUME       cam_<name>_sock       (stable shm volume name; other stacks attach to it)
-  + per-plugin env       (ros2 topic/frame_id/encoding/debayer, webrtc geometry/port)
+  + per-plugin env       (ros2 topic/frame_id/encoding/debayer, webrtc geometry/port), PLUS any
+                         UPPERCASE plugin param passed through VERBATIM as an env var (e.g.
+                         CAM_WEBRTC_MAX_BITRATE) -- so any bridge knob is YAML-settable without editing this.
 
 Only plugins with `isolation: container` become compose profiles; `isolation: process` plugins are
 the supervisor's (in-image) and are ignored here.
@@ -191,6 +193,15 @@ def main() -> int:
         # (bayer2rgb). '' = mono/raw passthrough. JP7/unixfd caps already carry it; JP6/raw-shm
         # run.sh applies it as video/x-bayer caps.
         env["CAM_BAYER"] = bayer_pattern(pixfmt)
+
+    # Generic env passthrough: any UPPERCASE param key on an enabled plugin (e.g. CAM_WEBRTC_MAX_BITRATE,
+    # VIDEO_CAPS, GST_PLUGIN_FEATURE_RANK) is emitted VERBATIM as an env var -- so ANY bridge env knob is
+    # settable straight from the sensor YAML without teaching this file about it. Lowercase param keys keep
+    # the friendly per-plugin mapping above. Runs last, so an explicit UPPERCASE key overrides a friendly default.
+    for params in by_name.values():
+        for k, v in params.items():
+            if k.isupper():
+                env[k] = str(v)
 
     for k, v in env.items():
         print(f"{k}={v}")

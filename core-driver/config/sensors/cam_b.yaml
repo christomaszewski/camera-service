@@ -52,3 +52,6 @@ plugins:
       format: GRAY8
       fps: 25
       port: 8444
+      # Any UPPERCASE param key passes straight through as an env var (no sensor_env edit needed) --
+      # e.g. lift webrtcsink's 8 Mbps default bitrate ceiling for a high-res stream:
+      # CAM_WEBRTC_MAX_BITRATE: 20000000
