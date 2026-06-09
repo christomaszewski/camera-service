@@ -138,10 +138,13 @@ Brings up a `rmw_zenohd` router + core + bridge, and a Zenoh probe
 
 ## Jetson notes
 
-- **HW encoder:** `webrtcsink` discovers encoders; to force NVENC set
-  `GST_PLUGIN_FEATURE_RANK=nvv4l2h264enc:MAX` + `VIDEO_CAPS=video/x-h264`. Some Orin variants (e.g.
-  Orin Nano) have no H.264 HW encoder — it falls back to `x264enc`. Verify with
-  `gst-inspect-1.0 nvv4l2h264enc`.
+- **HW encoder:** `webrtcsink` discovers encoders and picks the highest-RANKED one for the negotiated
+  codec — by default the CPU `x264enc`. To force NVENC set `GST_PLUGIN_FEATURE_RANK=nvv4l2h264enc:MAX`
+  **+** `VIDEO_CAPS=video/x-h264` (both forwarded by compose; settable from the sensor YAML's
+  `webrtc-bridge` params — see `config/sensors/cam_rtsp.yaml`). This is also what makes
+  `CAM_WEBRTC_PROFILE=high` take effect, since it's set on that HW encoder. Some Orin variants (e.g.
+  Orin Nano) have no H.264 HW encoder — the rank is then a no-op and it falls back to `x264enc`
+  (constrained-baseline). Verify with `gst-inspect-1.0 nvv4l2h264enc`.
 - **H.264 level (auto) & profile:** the SDP `profile-level-id` must match the encoded stream or browsers
   receive RTP but decode nothing (a black tile). The bridge derives the **minimum** H.264 level for the
   resolution+fps fed to `webrtcsink` and pins it on the encoder output, so the advertised level tracks the
