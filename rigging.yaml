@@ -18,6 +18,8 @@ platform:                                # JP6 vs JP7 is a HOST fact; cam-up aut
 images:                                  # pull-based deploy: cam-up points images at a registry (docs/deploy-without-rig.md)
   registry_env: CAM_REGISTRY            #   set -> <registry>/<name>:<platform> for every image; then `pull` + `up`
   rig_registry_env: RIG_IMAGE_REGISTRY   #   rig's fleet registry; cam-up honors it (applies the platform tag)
+  rig_tag_env: RIG_IMAGE_TAG             #   rig's fleet image tag (= vehicle.yaml images.tag, e.g. jp7); the
+  #                                          compose image refs default to <registry>/<name>:${RIG_IMAGE_TAG:-latest}
   tag_env: CAM_IMAGE_TAG                #   default tag = detected platform (jp6/jp7); set to pin a release
   per_image_env: [CAM_CORE_IMAGE, CAM_ROS2_IMAGE, CAM_ROS1_IMAGE, CAM_WEBRTC_IMAGE]   # override a single image
 
@@ -42,3 +44,8 @@ launch_surface:                          # the files rig copies to the vehicle (
 
 external_volumes:                        # rig removes these only on FINAL teardown (`rig down --purge`),
   - "cam_{name}_sock"                   #   never on a restart; {name} is the instance name
+
+host_ports:                              # host-facing ports `rig doctor` checks for clashes across sensors
+  #   (host networking -> a port is shared vehicle-wide). The enabled=true selector is enabled-aware, so a
+  #   DISABLED webrtc-bridge is not flagged.
+  - "plugins[name=webrtc-bridge,enabled=true].params.port"

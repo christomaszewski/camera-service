@@ -21,8 +21,9 @@ services:
   core-driver:
     # cam-up auto-detects the host (JP6/JP7) and sets CAM_CORE_BASE to match; CAM_CORE_IMAGE lets
     # pull-based deploys point at a per-platform registry tag (e.g. registry/cam-core:jp7). When rig
-    # injects RIG_IMAGE_REGISTRY the bare tag is pulled from that fleet registry; CAM_CORE_IMAGE still wins.
-    image: ${CAM_CORE_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}cam-core}
+    # injects RIG_IMAGE_REGISTRY + RIG_IMAGE_TAG, the fleet registry's <tag> image is pulled
+    # (RIG_IMAGE_TAG = vehicle.yaml images.tag, e.g. jp7); CAM_CORE_IMAGE still wins.
+    image: ${CAM_CORE_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}cam-core:${RIG_IMAGE_TAG:-latest}}
     build:
       context: .
       dockerfile: core-driver/Dockerfile

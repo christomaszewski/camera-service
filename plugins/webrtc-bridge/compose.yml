@@ -5,7 +5,7 @@
 services:
   webrtc-bridge:
     profiles: ["webrtc-bridge"]
-    image: ${CAM_WEBRTC_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}webrtc-bridge}  # rig: RIG_IMAGE_REGISTRY; standalone: cam-up sets CAM_WEBRTC_IMAGE from CAM_REGISTRY
+    image: ${CAM_WEBRTC_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}webrtc-bridge:${RIG_IMAGE_TAG:-latest}}  # rig: RIG_IMAGE_REGISTRY + RIG_IMAGE_TAG; standalone: cam-up sets CAM_WEBRTC_IMAGE from CAM_REGISTRY
     build:
       context: ../..
       dockerfile: plugins/webrtc-bridge/Dockerfile

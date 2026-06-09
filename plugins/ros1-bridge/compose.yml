@@ -7,7 +7,7 @@
 services:
   ros1-bridge:
     profiles: ["ros1-bridge"]
-    image: ${CAM_ROS1_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}ros1-bridge}  # rig: RIG_IMAGE_REGISTRY
+    image: ${CAM_ROS1_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}ros1-bridge:${RIG_IMAGE_TAG:-latest}}  # rig: RIG_IMAGE_REGISTRY + RIG_IMAGE_TAG
     build:
       context: ../..
       dockerfile: plugins/ros1-bridge/Dockerfile
