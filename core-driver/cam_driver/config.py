@@ -262,6 +262,22 @@ def parse_config(raw: dict) -> AppConfig:
     )
 
 
+def resolve_recording_dir(output_dir: str, rig_data_dir: str = "", instance: str = "") -> str:
+    """Resolve the recording dir for a deploy (cam-up/rig set the env; a bare run passes nothing).
+
+    rig exports RIG_DATA_DIR -- an ABSOLUTE host data root, bind-mounted into the core at the same path --
+    so rooting the recording dir there keeps recordings OFF the repo, and a `rig bake` leaves the absolute
+    path literal instead of pulling it into the deployment artifact. cam-up exports CAM_INSTANCE, which
+    namespaces a per-sensor subdir so cameras sharing one data dir don't collide. Only the DEFAULT
+    ('/data/recordings') is transformed; an explicitly-pinned output_dir is returned untouched."""
+    if output_dir != "/data/recordings":
+        return output_dir                                  # explicit pin -> respect it as-is
+    rdd = (rig_data_dir or "").strip().rstrip("/")
+    base = f"{rdd}/recordings" if rdd else "/data/recordings"
+    inst = (instance or "").strip()
+    return f"{base}/{inst}" if inst else base
+
+
 def load_config(path: str) -> AppConfig:
     import yaml  # imported lazily so the module is usable without PyYAML installed
     with open(path) as f:

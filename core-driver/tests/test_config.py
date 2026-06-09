@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from cam_driver.config import parse_config  # noqa: E402
+from cam_driver.config import parse_config, resolve_recording_dir  # noqa: E402
 from cam_driver.sources import make_source  # noqa: E402
 
 
@@ -150,6 +150,16 @@ def test_reconnect_overlay():
     d = parse_config({})
     assert d.gige.reconnect is True and d.gige.reconnect_timeout_s == 5.0
     assert d.usb.reconnect is True and d.rtsp.reconnect_timeout_s == 5.0
+
+
+def test_resolve_recording_dir():
+    R = resolve_recording_dir
+    assert R("/data/recordings", "", "") == "/data/recordings"               # bare run -> default untouched
+    assert R("/data/recordings", "/data", "cam_usb") == "/data/recordings/cam_usb"   # rig: root off RDD + per-sensor
+    assert R("/data/recordings", "/mnt/store/", "cam_a") == "/mnt/store/recordings/cam_a"  # any RDD; trailing / trimmed
+    assert R("/data/recordings", "", "cam_b") == "/data/recordings/cam_b"    # cam-up standalone: instance, no RDD
+    assert R("/data/recordings", "/data", "") == "/data/recordings"          # RDD, no instance -> rooted, not namespaced
+    assert R("/mnt/custom/rec", "/data", "cam_usb") == "/mnt/custom/rec"     # explicit pin -> untouched
 
 
 def _main():
