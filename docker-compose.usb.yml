@@ -1,8 +1,13 @@
-# USB / v4l2 source overlay. cam-up applies this ONLY when the sensor config's `camera.type == usb`
-# (a real, non-fake device) -- a gige/rtsp source needs no device, so the mapping is conditional.
-# sensor_env exports CAM_DEVICE (the config's usb.device); cam-up resolves it to CAM_DEVICE_REAL via
-# `readlink -f`, so a /dev/v4l/by-id/... symlink maps cleanly onto its real /dev/videoN node while the
-# container still sees it at the configured path.
+# USB / v4l2 source overlay. cam-up applies this whenever the sensor config is a REAL (non-fake)
+# `camera.type == usb` source (gige/rtsp need no device, so it's config-conditional) -- but NOT gated on
+# the device existing on THIS host: existence is a RUNTIME check on the vehicle, so a `rig bake` on a
+# camera-less dev box still renders the correct mapping for the target. sensor_env exports CAM_DEVICE
+# (the config's usb.device, typically a stable /dev/v4l/by-id/... path).
+#
+# We SELF-MAP that path to itself (host:container both = CAM_DEVICE) rather than resolving the symlink at
+# bake time (`readlink -f` would be a host probe + wrong on a dev box). At `up` on the vehicle, Docker
+# resolves the host symlink and mknods the SAME path inside the container -- exactly what the core opens.
+# If the node is absent at `up`, Docker errors out: that IS the intended runtime existence check.
 #
 # HOTPLUG CAVEAT: `devices:` creates a ONE-TIME device node from the host device at container start;
 # Docker does NOT track a later unplug/replug (the node goes stale, and a renumbered device isn't
@@ -12,4 +17,4 @@
 services:
   core-driver:
     devices:
-      - "${CAM_DEVICE_REAL:-/dev/video0}:${CAM_DEVICE:-/dev/video0}"
+      - "${CAM_DEVICE:-/dev/video0}:${CAM_DEVICE:-/dev/video0}"
