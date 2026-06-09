@@ -59,6 +59,7 @@ run_scenario() {
   sleep 12
   echo "-- bridge transport line --"
   docker logs "$BRIDGE" 2>&1 | grep -E "webrtc-bridge:" | head -1 || true
+  docker logs "$BRIDGE" 2>&1 | grep -E "h264 encode:" | head -1 || true   # auto profile/level (H.264 scenarios)
 
   echo "== headless webrtcsrc consumer (loopback in the bridge netns; need >= 30 frames / 40s) =="
   set +e
@@ -76,6 +77,26 @@ run_scenario "JP6 raw shm + mono (GRAY8 passthrough)" \
   config/webrtc-fake.yaml \
   -e CAM_PLATFORM=jp6 -e CAM_SHM_SOCKET=/tmp/cam/raw \
   -e CAM_WIDTH=512 -e CAM_HEIGHT=512 -e CAM_FORMAT=GRAY8 -e CAM_FPS=25 \
+  || FAILED=1
+
+# H.264 with an AUTO-derived level (the fix for the fixed-profile-level-id black tile). Pinning
+# VIDEO_CAPS=video/x-h264 forces the H.264 codec so the level/profile path is exercised; the bridge
+# derives the level from the streamed resolution (512x512@25 -> level 3) and pins it on the encoder
+# output so the SDP profile-level-id matches the stream. BOTH profiles must stay green: the default
+# (constrained-baseline, pinned in caps) and `high` (level pinned in caps; profile set on the encoder,
+# x264enc falls back to its native profile).
+run_scenario "H.264 auto-level, constrained-baseline" \
+  config/webrtc-fake.yaml \
+  -e CAM_PLATFORM=jp6 -e CAM_SHM_SOCKET=/tmp/cam/raw \
+  -e CAM_WIDTH=512 -e CAM_HEIGHT=512 -e CAM_FORMAT=GRAY8 -e CAM_FPS=25 \
+  -e VIDEO_CAPS=video/x-h264 -e CAM_WEBRTC_PROFILE=constrained-baseline \
+  || FAILED=1
+
+run_scenario "H.264 auto-level, high (profile opt-in)" \
+  config/webrtc-fake.yaml \
+  -e CAM_PLATFORM=jp6 -e CAM_SHM_SOCKET=/tmp/cam/raw \
+  -e CAM_WIDTH=512 -e CAM_HEIGHT=512 -e CAM_FORMAT=GRAY8 -e CAM_FPS=25 \
+  -e VIDEO_CAPS=video/x-h264 -e CAM_WEBRTC_PROFILE=high \
   || FAILED=1
 
 # unixfd needs a gst >= 1.24 core (the default cam-dev is 22.04/1.20). Skip scenario 2 -- rather than

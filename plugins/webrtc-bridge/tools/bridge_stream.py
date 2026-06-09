@@ -28,6 +28,7 @@ from gi.repository import GLib, Gst
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from zenoh_advertiser import StreamAdvertiser
+from h264_level import h264_level_for, level_covers, LEVELS as H264_LEVELS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bridge_stream")
@@ -40,6 +41,32 @@ def _env(name, default=None):
 
 def _truthy(v):
     return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+_H264_PROFILES = ("constrained-baseline", "high")
+
+
+def webrtc_profile():
+    """H.264 encode profile (config knob CAM_WEBRTC_PROFILE): constrained-baseline (DEFAULT -- universal
+    HW decode, lowest latency) | high (~15-25% smaller at equal quality with B-frames off; decodes on
+    modern Chrome/Safari, dicey on Firefox/old clients). An unknown value warns + falls back to the safe
+    default. (main is omitted: its only win is B-frames, which we disable for live.)"""
+    p = (_env("CAM_WEBRTC_PROFILE", "constrained-baseline") or "").strip().lower()
+    if p not in _H264_PROFILES:
+        log.warning("CAM_WEBRTC_PROFILE=%r not in %s; using constrained-baseline", p, list(_H264_PROFILES))
+        return "constrained-baseline"
+    return p
+
+
+def webrtc_max_level():
+    """Safety CLAMP (CAM_WEBRTC_MAX_LEVEL) on the AUTO-derived H.264 level -- NOT the level itself (a
+    manual level is the exact footgun that caused the fixed-3.1 black tile). Default 5.2 (the H.264 max,
+    effectively no clamp); unknown -> 5.2."""
+    lvl = (_env("CAM_WEBRTC_MAX_LEVEL", "5.2") or "").strip()
+    if lvl not in H264_LEVELS:
+        log.warning("CAM_WEBRTC_MAX_LEVEL=%r is not a valid level; using 5.2", lvl)
+        return "5.2"
+    return lvl
 
 
 # VIDEO_CAPS hint -> descriptor codec (a HINT only; WebRTC negotiates the real codec in SDP).
@@ -140,6 +167,92 @@ def fill_dims_from_caps(d, src):
     return d
 
 
+def _is_h264(codec_name, caps):
+    """H.264? The signal's codec arg form varies by webrtcsink build, so accept either the name arg
+    (contains 'h264') or a caps whose structure is video/x-h264."""
+    if codec_name and "h264" in str(codec_name).lower():
+        return True
+    if caps is not None and caps.get_size() > 0 and caps.get_structure(0).get_name() == "video/x-h264":
+        return True
+    return False
+
+
+def _wh_fps(caps):
+    """(width, height, fps) from a video/x-raw caps, or None. fps defaults to 30 when unset/zero."""
+    if caps is None or caps.get_size() == 0:
+        return None
+    st = caps.get_structure(0)
+    okw, w = st.get_int("width")
+    okh, h = st.get_int("height")
+    if not (okw and okh):
+        return None
+    fps = 30
+    okf, num, den = st.get_fraction("framerate")
+    if okf and den and num:
+        fps = max(1, round(num / den))
+    return (w, h, fps)
+
+
+def _negotiated_caps(el, which):
+    """Current (negotiated) caps of element `el`'s `which` ('src'|'sink') pad. webrtcsink uses REQUEST
+    sink pads, so iterate them rather than get_static_pad('sink')."""
+    if el is None:
+        return None
+    if which == "src":
+        pad = el.get_static_pad("src")
+        return pad.get_current_caps() if pad is not None else None
+    it = el.iterate_sink_pads()
+    while True:
+        res, pad = it.next()
+        if res == Gst.IteratorResult.OK:
+            caps = pad.get_current_caps()
+            if caps is not None and caps.get_size() > 0:
+                return caps
+        elif res == Gst.IteratorResult.RESYNC:
+            it.resync()
+        else:
+            return None
+
+
+def _configure_live_encoder(encoder, profile):
+    """Force B-frames OFF (real-time -- the `high` profile would otherwise permit them) + a low-latency
+    tune, DEFENSIVELY across encoders (x264enc / nvv4l2h264enc / openh264enc): only sets properties that
+    exist, so it's a no-op on a non-H.264 encoder. The PROFILE is set here on the encoder (nvv4l2h264enc
+    `profile` property) -- this is the ONLY way `high` takes effect, since pinning profile=high in the
+    output caps breaks webrtcsink's discovery on the software x264enc (which has no profile property and so
+    keeps its native constrained-baseline)."""
+    fac = encoder.get_factory()
+    name = fac.get_name() if fac is not None else "?"
+    done = []
+
+    def setp(prop, val):
+        if encoder.find_property(prop) is None:
+            return False
+        try:
+            encoder.set_property(prop, val)
+            done.append("%s=%s" % (prop, val))
+            return True
+        except Exception as e:                       # noqa: BLE001
+            log.debug("encoder %s: set %s=%r failed: %s", name, prop, val, e)
+            return False
+
+    for p in ("bframes", "num-B-Frames", "max-bframes", "b-frames"):   # name varies by encoder
+        if setp(p, 0):
+            break
+    setp("b-adapt", False)                            # x264enc: don't auto-insert B-frames
+    if name == "x264enc":
+        try:
+            encoder.set_property("tune", "zerolatency")    # flags enum, set by nick
+            done.append("tune=zerolatency")
+        except Exception as e:                        # noqa: BLE001
+            log.debug("x264enc tune set failed: %s", e)
+    elif name == "nvv4l2h264enc":
+        setp("maxperf-enable", True)
+        setp("insert-sps-pps", True)
+        setp("profile", {"high": 4, "main": 2}.get(profile, 0))   # 0=Baseline covers constrained-baseline
+    log.info("encoder-setup: %s -> %s", name, ", ".join(done) or "(no matching low-latency props)")
+
+
 class Bridge:
     def __init__(self):
         self.loop = GLib.MainLoop()
@@ -147,6 +260,7 @@ class Bridge:
         self.advertiser = None
         self._advertised = False
         self._stopping = False
+        self._h264_caps_str = None      # cached forced H.264 output caps (profile + derived level)
 
     def build(self):
         Gst.init(None)
@@ -165,6 +279,14 @@ class Bridge:
                 log.info("webrtcsink meta name=%s", pid)
             except Exception as e:
                 log.warning("could not set webrtcsink meta: %s", e)
+            # H.264: pin the profile (config) + the derived MINIMUM level on the encoder output, per
+            # consumer, so the payloader's profile-level-id matches the actual stream (no more fixed
+            # 42e01f -> out-of-level black tile). encoder-setup also forces B-frames off for live.
+            try:
+                sink.connect("request-encoded-filter", self._on_request_encoded_filter)
+                sink.connect("encoder-setup", self._on_encoder_setup)
+            except Exception as e:
+                log.warning("could not connect webrtcsink encoder signals: %s", e)
         bus = self.pipeline.get_bus()
         bus.add_signal_watch()
         bus.connect("message", self._on_message)
@@ -207,6 +329,91 @@ class Bridge:
             log.info("descriptor: %s", json.dumps(d))
         except Exception as e:                               # discovery must never take down the video path
             log.warning("advertise step failed (%s); streaming continues", e)
+
+    def _encode_geometry(self):
+        """(w, h, fps, source) actually fed to webrtcsink's encoder. Prefer webrtcsink's negotiated
+        INPUT caps (authoritative -- correct on JP7 unixfd where env geometry is unset, and after any
+        future videoscale on the branch); fall back to the source caps, then CAM_WIDTH/HEIGHT/FPS (valid
+        on the JP6 raw-shm path, where the config IS the geometry)."""
+        for el_name, which in (("cam_webrtcsink", "sink"), ("cam_src", "src")):
+            whf = _wh_fps(_negotiated_caps(self.pipeline.get_by_name(el_name), which))
+            if whf:
+                return whf + (el_name,)
+
+        def _i(n):
+            try:
+                return int(_env(n))
+            except (TypeError, ValueError):
+                return None
+        w, h = _i("CAM_WIDTH"), _i("CAM_HEIGHT")
+        if w and h:
+            return (w, h, _i("CAM_FPS") or 30, "env")
+        return None
+
+    def _h264_output_caps(self):
+        """The forced H.264 output caps string (profile from config + level derived from the encode
+        resolution), computed once and cached. Returns None -- leaving webrtcsink's defaults -- when the
+        geometry can't yet be read (retried on the next call, so a later consumer still gets it)."""
+        if self._h264_caps_str:
+            return self._h264_caps_str
+        geo = self._encode_geometry()
+        if geo is None:
+            log.warning("h264: cannot determine the encode resolution yet; leaving webrtcsink defaults "
+                        "(advertised profile-level-id may not match the stream)")
+            return None
+        w, h, fps, src = geo
+        profile, maxlvl = webrtc_profile(), webrtc_max_level()
+        try:
+            level = h264_level_for(w, h, fps, max_level=maxlvl)
+        except ValueError as e:
+            log.warning("h264 level math failed (%s); leaving webrtcsink defaults", e)
+            return None
+        if not level_covers(level, w, h, fps):
+            log.warning("h264: %dx%d@%d needs a level above the clamp %s -- the stream may not decode; "
+                        "lower the resolution or raise CAM_WEBRTC_MAX_LEVEL", w, h, fps, maxlvl)
+        # The LEVEL is always pinned in the output caps -> the payloader's profile-level-id matches the
+        # stream (the bug fix). The PROFILE is trickier: pinning profile=constrained-baseline (the default
+        # and the software x264enc's native profile) in the caps is verified-safe, but pinning profile=high
+        # makes webrtcsink's discovery negotiation fail on x264enc ("no caps found"). So for `high` we pin
+        # ONLY the level in the caps and set the profile on the ENCODER instead (nvv4l2h264enc profile
+        # property, in encoder-setup) where it's supported; x264enc keeps its native profile. Either way
+        # the advertised profile reflects what the encoder actually produced.
+        if profile == "high":
+            self._h264_caps_str = "video/x-h264,level=(string){}".format(level)
+        else:
+            self._h264_caps_str = "video/x-h264,profile=constrained-baseline,level=(string){}".format(level)
+        log.info("h264 encode: profile=%s(req) level=%s for %dx%d@%d (from %s) -> caps %s",
+                 profile, level, w, h, fps, src, self._h264_caps_str)
+        return self._h264_caps_str
+
+    def _on_request_encoded_filter(self, _sink, consumer_id, codec_name, caps):
+        """webrtcsink: a filter inserted AFTER the encoder, BEFORE the payloader. For H.264 we pin the
+        derived level (+ profile for the default constrained-baseline) here, so the payloader emits a
+        matching profile-level-id. See _h264_output_caps for why `high` pins level only."""
+        log.debug("request-encoded-filter: consumer=%r codec=%r caps=%s",
+                  consumer_id, codec_name, caps.to_string() if caps is not None else None)
+        # Apply during BOTH discovery (consumer_id None) AND per-consumer: discovery builds the SDP from
+        # this chain's output caps, so the pin must be present there for the advertised profile-level-id
+        # to match the stream. Discovery feeds the encoder the REAL negotiated input caps, so the level
+        # we derive from that same resolution matches.
+        if not _is_h264(codec_name, caps):
+            return None
+        caps_str = self._h264_output_caps()
+        if not caps_str:
+            return None
+        cf = Gst.ElementFactory.make("capsfilter", None)
+        cf.set_property("caps", Gst.Caps.from_string(caps_str))
+        log.info("request-encoded-filter[%s]: %s", consumer_id, caps_str)
+        return cf
+
+    def _on_encoder_setup(self, _sink, consumer_id, codec_name, encoder):
+        """webrtcsink: configure the per-consumer encoder -- force B-frames OFF + low-latency for live.
+        Return False so webrtcsink still layers its own bitrate / congestion-control defaults on top."""
+        try:
+            _configure_live_encoder(encoder, webrtc_profile())
+        except Exception as e:                        # noqa: BLE001 -- never break the video path
+            log.warning("encoder-setup failed: %s", e)
+        return False
 
     def _on_signal(self):
         if not self._stopping:
