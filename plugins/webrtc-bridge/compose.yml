@@ -53,6 +53,14 @@ services:
       - CAM_ROS_TOPIC=${CAM_ROS_TOPIC:-}                  # OPTIONAL linkage if a ros bridge coexists
       - CAM_RECORDING_GLOB=${CAM_RECORDING_GLOB:-}        # OPTIONAL recording linkage
       - VIDEO_CAPS=${VIDEO_CAPS:-}                          # pin a codec (e.g. video/x-h264) -> descriptor hint
+      # Adaptive bitrate: webrtcsink runs Google Congestion Control (gcc) and scales the encoder bitrate
+      # to each viewer's link automatically. These OPTIONAL bounds (bit/sec) frame that range; the element
+      # default max is 8 Mbps, which caps quality at high res -> set CAM_WEBRTC_MAX_BITRATE (e.g. 20000000)
+      # for 4K. CAM_WEBRTC_CONGESTION = gcc|homegrown|disabled (default gcc).
+      - CAM_WEBRTC_MIN_BITRATE=${CAM_WEBRTC_MIN_BITRATE:-}
+      - CAM_WEBRTC_MAX_BITRATE=${CAM_WEBRTC_MAX_BITRATE:-}
+      - CAM_WEBRTC_START_BITRATE=${CAM_WEBRTC_START_BITRATE:-}
+      - CAM_WEBRTC_CONGESTION=${CAM_WEBRTC_CONGESTION:-}
     command: ["bash", "run.sh"]
     depends_on:
       - core-driver
