@@ -14,8 +14,8 @@ usb:
   # Stable by-id path so a hotplug/replug reconnects the SAME camera (a bare /dev/videoN renumbers on replug):
   device: /dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._NexiGo_HD_Webcam_SN0001-video-index0
   pixel_format: MJPEG      # NexiGo MJPEG up to 1080p60 -> stream-copy record + decode I420 for consumers
-  width: 1280
-  height: 720
+  width: 1920              # 1080p (the NexiGo does MJPEG 1080p; webrtc auto-level -> H.264 level 4)
+  height: 1080
   sof_timestamps: true     # v4l2 driver per-frame timestamp (closer to capture than host arrival)
 
 recording:
@@ -45,8 +45,8 @@ plugins:
     isolation: container
     params:
       port: 8446           # host-facing signalling port -- unique per camera
-      width: 1280          # JP6-only geometry hint (JP7 unixfd self-describes)
-      height: 720
+      width: 1920          # JP6-only geometry hint (JP7 unixfd self-describes)
+      height: 1080
       format: I420
       fps: 30
       # HW NVENC H.264 for the Chrome operator dashboard: VIDEO_CAPS pins H.264 (universal browser decode),
