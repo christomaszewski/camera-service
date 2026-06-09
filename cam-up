@@ -50,6 +50,12 @@ CONFIG_ABS="$(cd "$(dirname "$CONFIG")" && pwd)/$(basename "$CONFIG")"
 # rig always supplies the config from outside the repo), so the external-config overlay kicks in.
 SENSORS_DIR="$(cd "$REPO/core-driver/config/sensors" 2>/dev/null && pwd || true)"
 
+# The docker compose subcommand (default `up`). `config` -- which `rig bake` runs to RENDER the merged
+# compose for the target -- must be HOST-INDEPENDENT: a pure function of (this config + rig's env) with NO
+# probing/mutating of the bake box (no JetPack detection, no device-existence check, no `docker volume
+# create`). So the captured compose is correct for the TARGET vehicle, not the dev box it was baked on.
+VERB="${1:-up}"
+
 if ! docker compose version >/dev/null 2>&1; then
   echo "cam-up: needs the Docker Compose v2 plugin ('docker compose'); 'include' needs >= 2.20" >&2
   exit 1
@@ -64,8 +70,10 @@ export CAM_NETWORK="${CAM_NETWORK:-host}"
 # `rmw_zenohd` router; see --zenohd / tools/zenohd.sh). FastDDS stays selectable via RMW_IMPLEMENTATION.
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
 
-# shm transport = a stable EXTERNAL volume, so sibling and other-stack containers can attach
-docker volume create "$CAM_SOCK_VOLUME" >/dev/null
+# shm transport = a stable EXTERNAL volume, so sibling and other-stack containers can attach. Skip it for
+# `config`: a pure render must not mutate (or even reach) the daemon -- `docker compose config` doesn't
+# need the volume to exist, and `rig bake` may render on a box with no running daemon.
+[ "$VERB" = config ] || docker volume create "$CAM_SOCK_VOLUME" >/dev/null
 
 # Resolve auto -> the target platform (drives BOTH the image tag cam-core:<platform> AND the runtime
 # overlay docker-compose.<platform>.yml). rig's DECLARED target wins over host detection: RIG_IMAGE_TAG
@@ -76,7 +84,10 @@ docker volume create "$CAM_SOCK_VOLUME" >/dev/null
 if [ "$DEV" = 0 ] && [ "$PLATFORM" = auto ]; then
   if [ -n "${RIG_IMAGE_TAG:-}" ]; then
     PLATFORM="$RIG_IMAGE_TAG"
-  else
+  elif [ "$VERB" != config ]; then
+    # Live `up` on the target host with no rig tag: fall back to the L4T release line. NEVER for `config`
+    # -- a bake renders on a dev box (often not a Jetson), where host-probing picks the wrong platform;
+    # `config` stays a pure function of (config + rig env) and takes the conservative jp6 default below.
     REL=""; [ -r /etc/nv_tegra_release ] && REL="$(sed -n 's/^# R\([0-9][0-9]*\).*/\1/p' /etc/nv_tegra_release)"
     if [ "${REL:-0}" -ge 38 ] 2>/dev/null; then PLATFORM=jp7; else PLATFORM=jp6; fi
   fi
@@ -97,10 +108,13 @@ if [ "$DEV" = 0 ] && [ "$PLATFORM" = jp7 ]; then
   export CAM_CORE_BASE="${CAM_CORE_BASE:-ubuntu:24.04}"
 fi
 # USB source: map the v4l2 device into the core container (gige/rtsp need no device). sensor_env exports
-# CAM_DEVICE for a REAL (non-fake) usb config; apply the overlay only when that device exists on the host.
-# The config path (e.g. /dev/v4l/by-id/...) is resolved to its real node so the symlink maps cleanly.
-if [ -n "${CAM_DEVICE:-}" ] && [ -e "$CAM_DEVICE" ]; then
-  export CAM_DEVICE CAM_DEVICE_REAL="$(readlink -f "$CAM_DEVICE" 2>/dev/null || echo "$CAM_DEVICE")"
+# CAM_DEVICE (the config's usb.device) for a REAL non-fake usb source. ALWAYS render the overlay from the
+# config -- device EXISTENCE is a RUNTIME check on the vehicle (Docker errors at `up` if the node is
+# absent), NOT a bake-time host probe -- so `config` on a camera-less dev box still emits the right mapping.
+# The overlay self-maps the configured path; Docker resolves the host symlink + mknods it at `up` (no
+# host-side `readlink`, which would be a probe and would be wrong on the bake box).
+if [ -n "${CAM_DEVICE:-}" ]; then
+  export CAM_DEVICE
   FILES+=(-f "$REPO/docker-compose.usb.yml")
 fi
 # Registry deploy (no per-vehicle build): CAM_REGISTRY points every image at <registry>/<name>:<tag>,
