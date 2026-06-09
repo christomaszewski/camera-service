@@ -52,7 +52,8 @@ services:
     healthcheck:
       # `rig status` (docker compose ps) then reports real health, not "n/a": the core reached
       # PLAYING and its shm transport socket exists (a stack that feeds consumers has one enabled).
-      test: ["CMD-SHELL", "test -S /tmp/cam/frames || test -S /tmp/cam/raw"]
+      # frames = JP6 shm+header endpoint; unixfd = its JP7 replacement; raw = the optional headless shm.
+      test: ["CMD-SHELL", "test -S /tmp/cam/frames || test -S /tmp/cam/unixfd || test -S /tmp/cam/raw"]
       interval: 15s
       timeout: 3s
       retries: 3
