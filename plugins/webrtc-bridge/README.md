@@ -140,6 +140,11 @@ Brings up a `rmw_zenohd` router + core + bridge, and a Zenoh probe
   `GST_PLUGIN_FEATURE_RANK=nvv4l2h264enc:MAX` + `VIDEO_CAPS=video/x-h264`. Some Orin variants (e.g.
   Orin Nano) have no H.264 HW encoder — it falls back to `x264enc`. Verify with
   `gst-inspect-1.0 nvv4l2h264enc`.
+- **Adaptive bitrate / quality ceiling:** `webrtcsink` runs Google Congestion Control (`gcc`) and scales
+  the encoder bitrate to each viewer's link automatically — nothing to enable. The bounds are optional
+  env knobs (bit/sec): `CAM_WEBRTC_MIN_BITRATE` / `CAM_WEBRTC_MAX_BITRATE` / `CAM_WEBRTC_START_BITRATE`,
+  plus `CAM_WEBRTC_CONGESTION` (`gcc`|`homegrown`|`disabled`). The element default `max-bitrate` is 8 Mbps,
+  which caps quality on a fast link at high res — raise `CAM_WEBRTC_MAX_BITRATE` (e.g. `20000000`) for 4K.
 - **5MP color is CPU-heavy.** `bayer2rgb` + `videoconvert` + (software) encode at 2448×2048 is a load;
   the `leaky=downstream` queue drops to the newest frame under pressure (correct for a live preview).
   Add a `videoscale` before the encoder, or force NVENC (above), for a lighter stream.

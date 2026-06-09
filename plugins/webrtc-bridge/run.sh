@@ -18,7 +18,9 @@
 # Env (all optional): CAM_PLATFORM ({jp6|jp7}), CAM_TRANSPORT ({unixfd|shm} override),
 # CAM_TRANSPORT_SOCKET (unixfd), CAM_SHM_SOCKET (raw shm), CAM_BAYER, CAM_WEBRTC_DEBAYER,
 # CAM_WIDTH/HEIGHT/FORMAT/FPS (JP6 raw shm only), SIGNALLING_PORT, VIDEO_CAPS (e.g. "video/x-h264"
-# to pin the codec), RUN_SIGNALLING (1=start the bundled signalling server, default 1).
+# to pin the codec), RUN_SIGNALLING (1=start the bundled signalling server, default 1),
+# CAM_WEBRTC_{MIN,MAX,START}_BITRATE (bit/sec; bound webrtcsink's adaptive-bitrate range -- the element
+# default max is 8 Mbps, raise it for 4K), CAM_WEBRTC_CONGESTION ({gcc|homegrown|disabled}, default gcc).
 set -eu
 
 PLATFORM="${CAM_PLATFORM:-jp6}"
@@ -31,6 +33,9 @@ W="${CAM_WIDTH:-512}"; H="${CAM_HEIGHT:-512}"; FMT="${CAM_FORMAT:-GRAY8}"; FPS="
 PORT="${SIGNALLING_PORT:-8443}"
 VCAPS="${VIDEO_CAPS:-}"
 BAYER="${CAM_BAYER:-}"
+# Adaptive-bitrate bounds for webrtcsink's congestion control (all bit/sec; unset -> element defaults).
+MINBR="${CAM_WEBRTC_MIN_BITRATE:-}"; MAXBR="${CAM_WEBRTC_MAX_BITRATE:-}"; STARTBR="${CAM_WEBRTC_START_BITRATE:-}"
+CC="${CAM_WEBRTC_CONGESTION:-}"
 
 # Debayer to color for a CFA camera (CAM_BAYER set) unless explicitly disabled. bayer2rgb reads the
 # pattern from the input caps (unixfd carries it; the JP6 capsfilter below sets it).
@@ -68,6 +73,13 @@ fi
 
 SINK="webrtcsink name=cam_webrtcsink signaller::uri=ws://127.0.0.1:${PORT}"
 [ -n "$VCAPS" ] && SINK="$SINK video-caps=${VCAPS}"
+# Adaptive bitrate: webrtcsink runs Google Congestion Control (gcc) by default and scales the encoder
+# bitrate to the link. These OPTIONAL bounds (bit/sec) frame the range it adapts within -- notably the
+# element's default max-bitrate is 8 Mbps, which caps quality on a fast link at high res (raise for 4K).
+[ -n "$MINBR" ]   && SINK="$SINK min-bitrate=${MINBR}"
+[ -n "$MAXBR" ]   && SINK="$SINK max-bitrate=${MAXBR}"
+[ -n "$STARTBR" ] && SINK="$SINK start-bitrate=${STARTBR}"
+[ -n "$CC" ]      && SINK="$SINK congestion-control=${CC}"
 
 # Force I420 after videoconvert: webrtcsink's encoders want a YUV format, not GRAY8/RGBx. The leaky
 # queue drops frames if the encoder/network falls behind (live preview: the newest frame wins).
