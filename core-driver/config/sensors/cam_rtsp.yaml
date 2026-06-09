@@ -49,10 +49,13 @@ plugins:
       fps: 25
       # 4K needs more than webrtcsink's 8 Mbps default ceiling -- raise it (generic UPPERCASE env passthrough):
       CAM_WEBRTC_MAX_BITRATE: 20000000
-      # Force HW NVENC H.264: VIDEO_CAPS pins H.264 (universal browser decode; the dashboard is Chrome) and
-      # GST_PLUGIN_FEATURE_RANK makes webrtcsink pick nvv4l2h264enc over CPU x264enc (frees the CPU at 4K;
-      # a no-op if the board has no H.264 NVENC -> x264enc). The level is auto-derived from the stream so the
-      # SDP profile-level-id matches (4K -> 5.1) and the browser decodes. Flip CAM_WEBRTC_PROFILE: high for
-      # ~15-25% smaller (needs the HW encoder); drop both lines for negotiated VP8/VP9/etc.
+      # HW NVENC H.264 for the Chrome operator dashboard: VIDEO_CAPS pins H.264 (universal browser decode),
+      # GST_PLUGIN_FEATURE_RANK forces nvv4l2h264enc over CPU x264enc (frees the CPU at 4K; a no-op without
+      # H.264 NVENC -> x264enc), and profile=high is ~15-25% smaller at equal quality + same latency
+      # (B-frames off; decodes on modern Chrome; falls back to constrained-baseline without NVENC). The level
+      # is auto-derived from the stream (4K -> 5.1) so the SDP profile-level-id matches and the browser
+      # decodes. Broader-client compat: set CAM_WEBRTC_PROFILE: constrained-baseline; drop VIDEO_CAPS + the
+      # RANK for negotiated VP8/VP9.
       VIDEO_CAPS: video/x-h264
       GST_PLUGIN_FEATURE_RANK: nvv4l2h264enc:MAX
+      CAM_WEBRTC_PROFILE: high
