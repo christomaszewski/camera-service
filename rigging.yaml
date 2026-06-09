@@ -38,6 +38,7 @@ launch_surface:                          # the files rig copies to the vehicle (
   - docker-compose.dev.yml
   - docker-compose.external-config.yml
   - docker-compose.jp7.yml                # the JP7 (runc + CDI NVENC) overlay; cam-up applies it per host
+  - docker-compose.usb.yml                # USB v4l2 device overlay; cam-up applies it for a real usb source
   - plugins/ros2-bridge/compose.yml
   - plugins/ros1-bridge/compose.yml
   - plugins/webrtc-bridge/compose.yml

@@ -168,7 +168,12 @@ def main() -> int:
         "COMPOSE_PROFILES": ",".join(p["name"] for p in plugins),
         "CAM_INSTANCE": name,
         "CAM_SOCK_VOLUME": f"cam_{name}_sock",
+        "CAM_SOURCE_TYPE": stype,
     }
+    # A real (non-fake) USB source needs its v4l2 device mapped into the core container -- cam-up reads
+    # CAM_DEVICE to apply docker-compose.usb.yml (gige/rtsp need no device, so it's absent for them).
+    if stype == "usb" and not src.get("fake", False):
+        env["CAM_DEVICE"] = str(src.get("device", "/dev/video0"))
 
     ros = by_name.get("ros2-bridge") or by_name.get("ros1-bridge")   # same topic/frame_id/encoding/debayer params
     if ros is not None:
