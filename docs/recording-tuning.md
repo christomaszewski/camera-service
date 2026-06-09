@@ -53,7 +53,7 @@ firmware-dependent — **measure it before tuning**:
 
 ```bash
 docker run --rm -v /data/recordings:/rec --entrypoint python3 cam-core:jp7 \
-    tools/probe_temporal.py /rec/<prefix>-00000.mkv
+    tools/probe_temporal.py /rec/<prefix>-<stamp>-00000.mkv
 ```
 - *all keyframes* → intra-only: the window knob is moot, tiling helps only spatially, and HW buys
   throughput not ratio (ffv1 is competitive on intra).
@@ -72,7 +72,7 @@ tiling unlocks temporal.
 # run on the ORIN -- it has nvenc (your real encoder) via CDI, and is fast enough at full sensor res:
 docker run --rm --device nvidia.com/gpu=all -v /data/recordings:/in -v /tmp/bench:/work \
     --entrypoint python3 <cam-core image> \
-    tools/tiling_benchmark.py /in/<prefix>-00000.mkv --frames 120 --encoders nvenc,ffv1 --work /work
+    tools/tiling_benchmark.py /in/<prefix>-<stamp>-00000.mkv --frames 120 --encoders nvenc,ffv1 --work /work
 # sweep nvenc presets / match your recording's GOP:
 #   ... --encoders nvenc --modes mosaic,plain --preset ultrafast,medium,slow --gop-seconds 10
 ```

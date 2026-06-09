@@ -1,13 +1,21 @@
 # Bring-up on a JetPack 7.2 Orin AGX
 
-This repo was built and container-validated targeting **JetPack 6**; **nothing has run on real Jetson
-hardware yet**. JetPack **7.2** (~June 2026, L4T r39.x) brings JetPack 7 to the **Orin AGX/NX** — Ubuntu
-24.04, GStreamer 1.24, CUDA 13 — so this is the first on-hardware bring-up *and* a JP7 port at once.
+This repo was built and container-validated targeting **JetPack 6**, then brought up on a real
+**JP7.2 Orin AGX** (~June 2026, L4T r39.x — Ubuntu 24.04, GStreamer 1.24, CUDA 13). **Status by
+layer:**
 
-The plan below validates in **layers**, software-first, so you make progress immediately and isolate the
-one genuine JP7 unknown — **how the NVIDIA multimedia stack (`nvv4l2*`) reaches a container on JP7** (the
-cloud-native model changed the base image; the runtime injection may have moved from CSV mounts to CDI).
-The high-value hardware tests (real camera, PTP/chunk timestamps) do **not** depend on that unknown.
+- **L0–L1 (host sanity, fake-camera smoke): CONFIRMED** on the Orin.
+- **L2 (real camera, software recorder): partially confirmed** — the **RTSP** (real 4K H.265 camera)
+  and **USB** (real UVC camera, incl. hotplug) sources run on this hardware (`tools/orin_*.sh`);
+  the **GigE PTP/chunk experiment still needs a real GigE camera** (see ROADMAP).
+- **L3 (NVENC HW lossless): CONFIRMED** — bit-exact, details in the L3 section below.
+- **L4 (full per-sensor stack via cam-up): CONFIRMED** — live `cam_rtsp`/`cam_usb` stacks run
+  through the auto-detected runc + CDI overlay.
+
+What the bring-up resolved: the one genuine JP7 unknown was **how the NVIDIA multimedia stack
+(`nvv4l2*`) reaches a container** — answer: **CDI** (the JP6 CSV-mount model is gone; see Notes).
+The layered plan below is kept as the runbook for the next bring-up (a fresh vehicle host, a
+JetPack update, or Thor).
 
 Order: **L0 host sanity → L1 fake-camera smoke → L2 real camera + PTP (software FFV1) → L3 NVENC HW
 recorder → L4 full per-sensor stack.** Stop and report at the first layer that fails.

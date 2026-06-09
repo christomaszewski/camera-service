@@ -9,21 +9,27 @@ Where the project is, what's validated, what's left, and how to resume. Pair wit
 |---|---|---|
 | **P0** | Scaffold + Docker (l4t-jetpack core; ubuntu dev image) | ✅ done |
 | **P1** | Timestamp spine — Aravis appsrc, PTP via `GevIEEE1588`, chunk `Timestamp`/`FrameID`, fallback ladder, sidecar CSV + JSON | ✅ done |
-| **P2** | Pluggable lossless recorder (HW HEVC-lossless / FFV1 / x265), `splitmuxsink` | ✅ done (FFV1 path validated; NVENC needs hardware) |
-| **P3** | Transport (shm header + optional raw endpoint), C++ `rclcpp` ros2-bridge (raw + lazy compressed `Image`), per-sensor supervisor | ✅ done |
-| **P4** | **WebRTC** consumer (`webrtcsink`, lossy low-latency, remote viewing) | ✅ done (headless loopback validated; browser viewing + HW encoder need a Jetson) |
-| **P5** | Hardening (reconnect, disk-full, NVENC session budget, NIC/PTP tuning) + on-Jetson / on-camera validation | ⏳ in progress — **camera reconnect/backoff done**; disk-full + NVENC budget next |
+| **P2** | Pluggable lossless recorder (HW HEVC-lossless / FFV1 / x265), `splitmuxsink` | ✅ done (FFV1 validated in containers; **NVENC validated bit-exact on a JP7.2 Orin AGX** — [jetpack7-bringup.md](jetpack7-bringup.md)) |
+| **P3** | Transport (JP7 `unixfd` / JP6 shm+header, + optional raw endpoint), C++ `rclcpp` ros2-bridge (both consumers; raw + lazy compressed `Image`), per-sensor supervisor | ✅ done |
+| **P4** | **WebRTC** consumer (`webrtcsink`, lossy low-latency, remote viewing) | ✅ done (headless loopback validated in containers **and on an R39 Orin with HW NVENC**; browser viewing still to try; webrtcsink pins H.264 constrained-baseline ≤ gst-plugins-rs 0.15) |
+| **P5** | Hardening (reconnect, disk-full, NVENC session budget, NIC/PTP tuning) + on-Jetson / on-camera validation | ⏳ in progress — **source reconnect/backoff done** (GigE, USB hotplug, RTSP re-probe); **JP7 bring-up done**; disk-full + NVENC budget next |
 
 ## Validated by actually running it (containers, no hardware)
 
 Capture → PTP/chunk timestamping (**real Aravis chunk-parse path**) → **lossless** recording
-(proven bit-exact via the round-trip) → shm transport with header → **C++ ROS2 bridge** (raw +
-compressed `Image`, capture time in `header.stamp`) → **per-sensor supervisor** (spawn / manage /
-clean teardown) → **WebRTC egress** (raw shm → `webrtcsink` → `webrtcsrc`, decoded frames counted).
-Cross-container and cross-GStreamer-version (1.20↔1.24) shm both work.
+(proven bit-exact via the round-trip) → plugin transport (shm+header, and unixfd on gst 1.24) →
+**C++ ROS2 bridge** (raw + compressed `Image`, capture time in `header.stamp`) → **per-sensor
+supervisor** (spawn / manage / clean teardown) → **WebRTC egress** (raw shm → `webrtcsink` →
+`webrtcsrc`, decoded frames counted). The same harness covers the **USB source** (raw, MJPEG
+stream-copy dual-output, color) and the **RTSP source** (stream-copy + RTCP→NTP provenance +
+stall/recovery) against local fakes. Cross-container and cross-GStreamer-version (1.20↔1.24)
+shm both work.
 
-**Test inventory** (each runs without a Jetson or camera):
-- `core-driver/tools/dev_test.sh` — producer: fake camera → timestamp → FFV1 → shm
+**Test inventory** (each runs without a Jetson or camera; all are binding — they exit non-zero on failure):
+- `core-driver/tools/dev_test.sh` — producer: fake camera → timestamp → encoder-fallback probe → FFV1 → shm
+- `core-driver/tools/usb_test.sh` — USB source: raw, MJPEG stream-copy (dual-output), color/FFV1
+- `core-driver/tools/rtsp_test.sh` — RTSP source: local fake server → stream-copy + RTCP→NTP provenance (CSV-checked)
+- `core-driver/tools/rtsp_reconnect_test.sh` — RTSP stall/recovery: kill + restart the server; assert detect → reopen → resume
 - `plugins/ros2-bridge/tools/bridge_test.sh` — full chain → ROS2 raw + compressed `Image`
 - `core-driver/tools/supervisor_test.sh` — supervisor spawn / manage / teardown
 - `tools/gvsp-chunk-emitter/gvsp_test.sh` — real GVSP + chunk-timestamp extraction (patched Aravis)
@@ -37,25 +43,36 @@ Cross-container and cross-GStreamer-version (1.20↔1.24) shm both work.
 - `tools/gvsp-chunk-emitter/reconnect_test.sh` — camera reconnect/backoff: kill the GVSP emitter
   mid-stream + restart it; assert the core detects, backs off, reconnects, resumes, stays alive, and
   finalizes a non-corrupt lossless recording
-- `python3 core-driver/tests/test_*.py` — pure-logic unit tests (transport wire format, config, timestamp ladder)
+- `python3 core-driver/tests/test_*.py` — pure-logic unit tests (transport wire format, config incl. the
+  run-stamped recording prefix, timestamp ladder, drop accounting, pixel formats, recorder selection/fallback)
 
-## Still needs the Orin / a real camera
+## Validated on the Orin (hardware)
 
-- **NVENC HW recorder** — `nvv4l2h265enc enable-lossless`, NV24/NVMM caps, bit-exact round trip
-  (`ffmpeg framemd5`/PSNR=inf). Software FFV1 is validated; HW path is written but unrun. (8-bit only.)
+- **NVENC HW lossless recorder** — bit-exact on a JP7.2 Orin AGX (60/60 frames, worst |Δ| = 0, 1.32× raw)
+  via `tools/nvenc_lossless_test.sh`; see [jetpack7-bringup.md](jetpack7-bringup.md). (8-bit only.)
+- **RTSP source** against a real 4K H.265 camera (`core-driver/tools/orin_rtsp_validate.sh`,
+  `orin_rtsp_transport_ab.sh`; example configs `config/rtsp-real*.yaml`, `config/sensors/cam_rtsp.yaml`).
+- **USB source** with a real UVC camera, including hotplug/hot-swap reconnect
+  (`core-driver/tools/orin_usb_hotplug_test.sh`; `config/usb-real*.yaml`, `config/sensors/cam_usb.yaml`).
+- **WebRTC egress with HW NVENC** (webrtcsink selects `nvv4l2h264enc`; headless consumer decode).
+
+## Still needs a real GigE camera
+
 - **Camera-specific PTP/chunk behaviour** — the [PTP timestamp experiment](ptp-timestamp-experiment.md):
   confirm `GevIEEE1588Status=Slave`, `GevTimestampTickFrequency`, which of `chunk_ns`/`camera_ns`/`system_ns`
   is the authoritative capture time, and the real arrival jitter. Verify the exact chunk node names
   (`arv-tool-0.8 features`).
 - **Packed pixel formats** (Mono10p/Mono12Packed) — need a bit-unpack step (not implemented; a warning
   fires if detected).
-- **Host/deploy** — NIC MTU 9000 + `net.core.rmem_max`, `ptp4l`/`phc2sys` grandmaster, `default-runtime: nvidia`.
+- **Host/deploy** — NIC MTU 9000 + `net.core.rmem_max`, `ptp4l`/`phc2sys` grandmaster (JP6 hosts:
+  `default-runtime: nvidia`; JP7 uses CDI, no runtime change).
 
 ## How to resume (for a future session)
 
 1. Read [DESIGN.md](DESIGN.md) (architecture + decisions) and this file.
-2. Build + run the test suites above to confirm the current state is green (`docker build` the four
-   images: `cam-dev`, `ros2-bridge`, `cam-chunks`, `webrtc-bridge`, then the `*_test.sh` scripts).
+2. Build + run the test suites above to confirm the current state is green (`docker build` the
+   images: `cam-dev` — plus its 24.04 variant `cam-dev-jp7` for the RTSP/NTP tests — `ros2-bridge`,
+   `cam-chunks`, `webrtc-bridge`, then the `*_test.sh` scripts; they exit non-zero on failure).
 3. Recalled memory (this machine's Claude) holds the same facts in condensed form; the in-repo docs
    are canonical and shareable.
 
@@ -63,8 +80,10 @@ Cross-container and cross-GStreamer-version (1.20↔1.24) shm both work.
 
 - Custom Aravis `appsrc` (not `aravissrc`) for frame_id + chunk access.
 - Chunk timestamp used whenever available; PTP-lock is provenance (`ptp_synced`).
-- Recorder pluggable: 8-bit → HW HEVC-lossless, >8-bit → FFV1 (intra) / x265 (temporal).
-- Transport = shm + 36-byte header (shm drops PTS/metas); optional raw endpoint; `unixfd`/Zenoh later.
+- Recorder pluggable: 8-bit → HW HEVC-lossless (x265 the explicit CPU-temporal option), >8-bit → FFV1;
+  encoded sources stream-copy; encoder elements probed at build (missing NVENC → FFV1, warned).
+- Transport = JP7 `unixfd` (native caps + buffer fields; replaces the header endpoint) / JP6 shm +
+  36-byte header (shm drops PTS/metas); optional raw endpoint either way; Zenoh later.
 - Python core + C++ ros2-bridge; one container per sensor; supervisor spawns plugins.
 - SEI declined (use the CSV sidecar; RTP header extension for the streaming path).
 - WebRTC egress = gst-plugins-rs `webrtcsink` (built from source), sibling container on the raw shm
