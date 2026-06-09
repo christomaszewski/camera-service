@@ -44,7 +44,7 @@ docker build -f core-driver/Dockerfile -t cam-core --build-arg BASE_IMAGE=ubuntu
 docker run --rm cam-core gst-inspect-1.0 aravissrc | head -1    # Aravis built OK
 ```
 Point a config at your camera with the **software** recorder (decouples this from the NVENC unknown):
-copy `core-driver/config/camera.yaml`, set `camera.fake: false` + `camera.camera_id: <serial>`, and
+copy `core-driver/config/camera.yaml`, set `gige.fake: false` + `gige.camera_id: <serial>`, and
 `recording.encoder: ffv1`. Then run the core against the camera:
 ```bash
 docker run --rm --network host --ipc=host \

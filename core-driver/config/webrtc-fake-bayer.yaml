@@ -4,10 +4,13 @@
 #   raw_endpoint    -> raw shm (/tmp/cam/raw)                          (the JP6 path)
 # Both carry the raw mosaic; the bridge debayers to color in-pipeline (bayer2rgb).
 camera:
+  type: gige
+  frame_rate: 25.0
+
+gige:
   fake: true
   camera_id: Fake_1
   pixel_format: BayerRG8
-  frame_rate: 25.0
   timestamp_source: ptp_chunk     # fake camera has no chunks -> falls back to camera/system (expected)
   ptp_enable: false
 

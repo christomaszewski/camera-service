@@ -10,13 +10,13 @@ mkdir -p /tmp/camval
 
 mkcfg() {  # $1 = protocols (udp|tcp)
   cat > "/tmp/camval/cfg_$1.yaml" <<YAML
-source:
+camera:
   type: rtsp
+  reconnect: false
 rtsp:
   url: rtsp://10.160.1.80:8554/main.264
   protocols: $1
   probe: false
-  reconnect: false
   codec: h265
   width: 3840
   height: 2160

@@ -41,9 +41,8 @@ def main(argv=None) -> int:
     log = logging.getLogger("cam")
 
     cfg = load_config(args.config)
-    log.info("config: source=%s camera=%s pixel_format=%s ts=%s encoder=%s",
-             cfg.source.type, cfg.camera.camera_id or "<first>", cfg.camera.pixel_format,
-             cfg.camera.timestamp_source, cfg.recording.encoder)
+    log.info("config: source=%s frame_rate=%s recording=%s encoder=%s",
+             cfg.camera.type, cfg.camera.frame_rate, cfg.recording.enabled, cfg.recording.encoder)
 
     # The source owns the frontend: device + timestamp policy + feeder (here: GigE/Aravis,
     # incl. chunk/PTP setup). Everything downstream (pipeline) is source-agnostic.

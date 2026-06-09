@@ -4,10 +4,13 @@ service: camera-service
 name: cam_b
 
 camera:
+  type: gige
+  frame_rate: 25.0
+
+gige:
   fake: true
   camera_id: Fake_1       # Aravis fake device id (fixed); real cameras use distinct serials
   pixel_format: Mono8
-  frame_rate: 25.0
   timestamp_source: ptp_chunk
   ptp_enable: false
 

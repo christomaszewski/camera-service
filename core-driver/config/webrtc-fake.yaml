@@ -2,10 +2,13 @@
 # Fake camera -> raw shm endpoint, which the webrtc-bridge container consumes.
 # Recording + plugin (header) endpoint are off here; this exercises only the raw->webrtc path.
 camera:
+  type: gige
+  frame_rate: 25.0
+
+gige:
   fake: true
   camera_id: Fake_1
   pixel_format: Mono8
-  frame_rate: 25.0
   timestamp_source: ptp_chunk     # fake camera has no chunks -> falls back to camera/system (expected)
   ptp_enable: false
 

@@ -3,9 +3,15 @@
 Unknown keys in the YAML are ignored (with the dataclass defaults applied) so the
 config file can carry forward-looking knobs without breaking older code.
 
-One file, two consumers: the `camera` / `recording` / `preview` / `transport`
-sections drive the core pipeline; the `plugins` list is for the (future) per-sensor
-supervisor that spawns each enabled plugin as its own process.
+Schema (symmetric across source types):
+  camera:   GENERAL settings + `type` (gige|usb|rtsp) -> selects the source frontend.
+  gige:/usb:/rtsp:   the SELECTED source's specifics.
+The `camera.frame_rate` + reconnect knobs are general; parse_config overlays them onto the active
+source's effective config, so the source code reads them from its own block while the YAML sets them
+ONCE under `camera:`.
+
+One file, two consumers: the `camera`/`<source>`/`recording`/`preview`/`transport` sections drive the
+core pipeline; the `plugins` list is for the per-sensor supervisor / cam-up (spawns each enabled plugin).
 """
 from __future__ import annotations
 
@@ -22,19 +28,29 @@ class ROI:
 
 
 @dataclass
-class SourceConfig:
-    # Which capture-source strategy drives the pipeline frontend. Everything downstream
-    # (appsrc -> tee -> recorder/transport/preview) is identical regardless of source.
-    type: str = "gige"        # gige (GVSP/Aravis) | usb (v4l2, future)
+class CameraConfig:
+    """GENERAL camera settings, shared by every source. `type` selects the source frontend; per-source
+    specifics live in the matching gige:/usb:/rtsp: block. frame_rate + the reconnect knobs are general
+    -- parse_config overlays them onto the active source's config (the source reads them from its own
+    block; the YAML sets them once here)."""
+    type: str = "gige"                       # gige (GVSP/Aravis) | usb (v4l2) | rtsp
+    frame_rate: Optional[float] = None       # target/delivered fps: gige requests it, usb pins it, rtsp informational
+    # Reconnect/backoff: recover from a source dropping/stalling without dying or corrupting the recording
+    # -- the pipeline stays up while a watchdog re-opens the source (gige: control-lost/no-buffer; usb:
+    # unplug/stall; rtsp: stalled stream).
+    reconnect: bool = True
+    reconnect_timeout_s: float = 5.0         # no data for this long => disconnected -> reopen
+    reconnect_backoff_s: float = 1.0         # initial delay between re-open attempts
+    reconnect_backoff_max_s: float = 30.0    # exponential backoff cap
 
 
 @dataclass
-class CameraConfig:
+class GigeConfig:
+    """GVSP/Aravis source params (camera.type == gige)."""
     camera_id: Optional[str] = None          # serial / name; None = first device found
     fake: bool = False                        # use Aravis in-process "Fake" camera (no hardware/network)
     pixel_format: Optional[str] = "Mono8"
     roi: Optional[ROI] = None
-    frame_rate: Optional[float] = None
     packet_size: int = 9000
     packet_delay: Optional[int] = None
     n_stream_buffers: int = 20
@@ -47,54 +63,50 @@ class CameraConfig:
     chunk_timestamp_name: str = "ChunkTimestamp"
     chunk_frame_id_name: str = "ChunkFrameID"
 
-    # Reconnect/backoff: recover from a camera dropping off the link without dying or
-    # corrupting the recording. The pipeline stays up; a watchdog re-opens the camera.
+    # General settings -- set in the `camera:` block; parse_config overlays them here (NOT per-source YAML).
+    frame_rate: Optional[float] = None
     reconnect: bool = True
-    reconnect_timeout_s: float = 3.0        # no buffer for this long => treat as disconnected
-    reconnect_backoff_s: float = 1.0        # initial delay between re-open attempts
-    reconnect_backoff_max_s: float = 30.0   # exponential backoff cap
+    reconnect_timeout_s: float = 5.0
 
 
 @dataclass
 class UsbConfig:
-    # USB / v4l2 source (used when source.type == usb). Step 3 handles raw GRAY8; color/decode
-    # + caps negotiation and device/hotplug come in step 4.
+    """USB / v4l2 source params (camera.type == usb)."""
     device: str = "/dev/video0"       # prefer a stable /dev/v4l/by-id/... path on real hardware
     fake: bool = False                # videotestsrc instead of v4l2src (CI/dev; no device needed)
-    pixel_format: str = "GRAY8"       # delivered raw format fed to the shared pipeline
+    pixel_format: str = "GRAY8"       # delivered format: raw (GRAY8/YUY2/I420/...) or encoded (MJPEG/H264/H265)
     width: int = 640
     height: int = 480
-    frame_rate: float = 30.0
     sof_timestamps: bool = False      # use the v4l2 DRIVER per-frame timestamp (do-timestamp=false ->
     #   'sof' provenance) instead of host arrival. OPT-IN: the gain is camera-dependent -- a cam that
     #   timestamps at start-of-exposure wins; many cheap UVC cams timestamp at dequeue (== arrival, no
     #   gain) or report zeros (we sanity-check and fall back to arrival). Ignored for fake sources.
+
+    # General settings -- set in the `camera:` block; parse_config overlays them here (NOT per-source YAML).
+    frame_rate: float = 30.0
     reconnect: bool = True            # hotplug/stall recovery: a data-starvation watchdog reopens the v4l2
-    #   device when frames stop (unplug, stall, or absent at startup). Use a STABLE /dev/v4l/by-id/... device
-    #   path so a replug -- which can renumber /dev/videoN -- reconnects to the SAME camera. Ignored for fake.
-    reconnect_timeout_s: float = 5.0  # no frame for this long => treat as unplugged/stalled -> reopen
+    #   device when frames stop (unplug, stall, or absent at startup). Use a STABLE /dev/v4l/by-id/... path.
+    reconnect_timeout_s: float = 5.0
 
 
 @dataclass
 class RtspConfig:
-    # RTSP source (used when source.type == rtsp). Always encoded -> stream-copy recording +
-    # decode for consumers, with RTCP->NTP per-frame provenance on gst>=1.24.
+    """RTSP source params (camera.type == rtsp). Always encoded -> stream-copy recording + decode for
+    consumers, with RTCP->NTP per-frame provenance on gst>=1.24."""
     url: str = "rtsp://127.0.0.1:8554/test"
-    probe: bool = True                # gst-discoverer the live stream at open() for codec+geometry
-    #                                   (the source of truth). codec/width/height below are FALLBACKS
-    #                                   used only if the probe fails or probe=false.
+    probe: bool = True                # `rtspsrc ! parsebin` probe at open() for codec+geometry (the source
+    #                                   of truth). codec/width/height below are FALLBACKS (probe fail/off).
     codec: str = "h264"               # h264 | h265 | mjpeg (fallback; the probe overrides)
     latency_ms: int = 200             # rtspsrc jitter-buffer latency
     width: int = 640                  # fallback (the probe overrides)
     height: int = 480                 # fallback (the probe overrides)
-    frame_rate: float = 30.0          # informational; the stream sets the real rate
     protocols: str = ""               # rtspsrc transport: "" = default (udp w/ tcp fallback),
     #                                   "tcp" forces RTP-over-TCP (firewalls / Docker NAT / lossy nets)
-    reconnect: bool = True            # auto-recover a stalled stream. Cameras sometimes ACK PLAY (200) then
-    #                                   stream NO media (RTP-over-TCP stall / session exhaustion); without this
-    #                                   the pipeline sits at 0 frames forever. A data-starvation watchdog then
-    #                                   reopens the stream (fresh DESCRIBE/SETUP/PLAY), which clears it.
-    reconnect_timeout_s: float = 5.0  # no frame for this long (from start, or since the last frame) => reopen
+
+    # General settings -- set in the `camera:` block; parse_config overlays them here (NOT per-source YAML).
+    frame_rate: float = 30.0          # informational; the stream sets the real rate
+    reconnect: bool = True            # auto-recover a stalled stream (camera ACKs PLAY then streams no media)
+    reconnect_timeout_s: float = 5.0
 
 
 @dataclass
@@ -172,8 +184,8 @@ class PluginConfig:
 
 @dataclass
 class AppConfig:
-    source: SourceConfig = field(default_factory=SourceConfig)
-    camera: CameraConfig = field(default_factory=CameraConfig)   # gige source params
+    camera: CameraConfig = field(default_factory=CameraConfig)   # GENERAL settings + source `type`
+    gige: GigeConfig = field(default_factory=GigeConfig)         # gige source params
     usb: UsbConfig = field(default_factory=UsbConfig)            # usb source params
     rtsp: RtspConfig = field(default_factory=RtspConfig)         # rtsp source params
     recording: RecordingConfig = field(default_factory=RecordingConfig)
@@ -202,10 +214,23 @@ def _merge_endpoint(data, default: TransportEndpoint) -> TransportEndpoint:
 def parse_config(raw: dict) -> AppConfig:
     """Build the config from an already-parsed dict (no YAML dependency; unit-testable)."""
     raw = raw or {}
-    cam_raw = dict(raw.get("camera", {}) or {})
-    roi_raw = cam_raw.pop("roi", None)
-    camera = _build(CameraConfig, cam_raw)
-    camera.roi = _build(ROI, roi_raw) if roi_raw else None
+    camera = _build(CameraConfig, raw.get("camera"))   # general (type + shared settings)
+
+    gige_raw = dict(raw.get("gige", {}) or {})
+    roi_raw = gige_raw.pop("roi", None)
+    gige = _build(GigeConfig, gige_raw)
+    gige.roi = _build(ROI, roi_raw) if roi_raw else None
+    usb = _build(UsbConfig, raw.get("usb"))
+    rtsp = _build(RtspConfig, raw.get("rtsp"))
+
+    # Overlay the GENERAL camera settings onto each source's effective config -- the source code reads
+    # frame_rate/reconnect from its own block, but the YAML sets them ONCE under `camera:`. frame_rate
+    # only overrides when actually given (else each source keeps its sensible default).
+    for sc in (gige, usb, rtsp):
+        if camera.frame_rate is not None:
+            sc.frame_rate = camera.frame_rate
+        sc.reconnect = camera.reconnect
+        sc.reconnect_timeout_s = camera.reconnect_timeout_s
 
     defaults = TransportConfig()
     tr_raw = dict(raw.get("transport", {}) or {})
@@ -226,10 +251,10 @@ def parse_config(raw: dict) -> AppConfig:
             params={k: v for k, v in p.items() if k not in reserved}))
 
     return AppConfig(
-        source=_build(SourceConfig, raw.get("source")),
         camera=camera,
-        usb=_build(UsbConfig, raw.get("usb")),
-        rtsp=_build(RtspConfig, raw.get("rtsp")),
+        gige=gige,
+        usb=usb,
+        rtsp=rtsp,
         recording=_build(RecordingConfig, raw.get("recording")),
         preview=_build(PreviewConfig, raw.get("preview")),
         transport=transport_cfg,

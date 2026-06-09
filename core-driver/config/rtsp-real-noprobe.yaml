@@ -1,14 +1,14 @@
 # Same real RTSP camera as rtsp-real.yaml but with the live probe DISABLED -- codec/resolution are
-# pinned here instead. Used to isolate whether the gst-discoverer probe (a second, heavy HW-decode
-# session) is what intermittently starves the main connection's startup on a real 4K H.265 camera.
-source:
+# pinned here instead. Used to isolate whether the parsebin probe (a second connection at open())
+# affects the main connection's startup on a real 4K H.265 camera.
+camera:
   type: rtsp
 
 rtsp:
   url: rtsp://10.160.1.80:8554/main.264
   protocols: tcp
   latency_ms: 200
-  probe: false                  # <-- pin codec/geometry; no separate discoverer connection
+  probe: false                  # <-- pin codec/geometry; no separate probe connection
   codec: h265
   width: 3840
   height: 2160

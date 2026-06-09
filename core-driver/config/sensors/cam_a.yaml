@@ -4,10 +4,13 @@ service: camera-service      # which stack handles this config (registry key for
 name: cam_a               # instance id -> compose project (cam_cam_a), shm volume (cam_cam_a_sock), ROS ns (/cam_a)
 
 camera:
+  type: gige              # gige (GVSP/Aravis) | usb | rtsp
+  frame_rate: 25.0
+
+gige:
   fake: true              # demo/dev: in-process fake camera (real deploy sets a serial + drops fake)
   camera_id: Fake_1       # the Aravis fake device is always "Fake_1"; real cameras use distinct serials
   pixel_format: Mono8
-  frame_rate: 25.0
   timestamp_source: ptp_chunk
   ptp_enable: false
 

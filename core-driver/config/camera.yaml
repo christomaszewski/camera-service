@@ -1,15 +1,19 @@
-# GigE Vision core driver configuration.
+# GigE Vision core driver configuration (the default the container runs).
 #
 # Recording encoder guidance (Jetson AGX Orin):
 #   Mono8 / Bayer*8  + encoder: auto  -> hardware HEVC lossless (NVENC, temporal). Recommended default.
 #   Mono16 / Bayer*16 + encoder: auto -> FFV1 (lossless, high-bit-depth, INTRA-only).
 #   For 10/12-bit WITH temporal compression, set encoder: x265-lossless (CPU-bound).
 
-camera:
+camera:                        # GENERAL: `type` selects the source; frame_rate + reconnect are shared
+  type: gige                   # gige (GVSP/Aravis) | usb (v4l2) | rtsp
+  frame_rate: null             # null = camera default
+  # reconnect: true            # auto-reopen on control-lost / no-buffer (default: on, 5s timeout)
+
+gige:                          # GVSP/Aravis source specifics
   camera_id: null              # null = first device found; else serial or "Vendor-Model-Serial"
   pixel_format: Mono8          # see guidance above
   # roi: { x: 0, y: 0, width: 1920, height: 1080 }
-  frame_rate: null             # null = camera default
   packet_size: 9000            # jumbo frames; requires host NIC MTU >= 9000. 0 = auto-negotiate.
   packet_delay: null           # GevSCPD ticks; raise (e.g. 9500) for multi-camera links
   n_stream_buffers: 20
@@ -46,10 +50,8 @@ transport:
     socket_path: /tmp/cam/raw
 
 plugins: []                   # IN-IMAGE plugins the supervisor spawns as separate processes.
-# The ros2-bridge is heavy (ROS2/DDS) and runs as a SIBLING CONTAINER (see docker-compose.yml),
-# so it is not listed here. Add lightweight in-image plugins, e.g.:
+# Heavy plugins (ros2-bridge, webrtc-bridge) run as SIBLING CONTAINERS via `isolation: container`
+# (cam-up selects them as compose profiles). Add lightweight in-image plugins, e.g.:
 #   - name: my-tap
 #     command: ["python3", "/app/plugins/my_tap.py"]
 #     restart: true
-# (A plugin named `ros2-bridge` is spawnable in-image too, but only in a combined core+ROS2
-#  image; by default the bridge is a sibling container.)

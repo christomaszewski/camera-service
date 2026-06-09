@@ -1,18 +1,17 @@
 # Test config: FAKE USB COLOR source (videotestsrc I420, no /dev/video device).
 #
 # Exercises the color path end to end: a 4:2:0 (I420) source -> shared pipeline -> recorder.
-# `encoder: auto` resolves to FFV1 for color (lossless, no chroma resample); the recording
-# must decode back as I420 (NOT NV24/GRAY8), which proves the format flowed without a
-# fidelity-breaking conversion. (Real v4l2 color + NVENC color-lossless are step-4 hardware.)
-source:
+# `encoder: auto` resolves to FFV1 for color (lossless, no chroma resample); the recording must
+# decode back as I420 (NOT NV24/GRAY8), proving the format flowed without a fidelity-breaking convert.
+camera:
   type: usb
+  frame_rate: 25.0
 
 usb:
   fake: true
   pixel_format: I420            # 4:2:0 color
   width: 512
   height: 512
-  frame_rate: 25.0
 
 recording:
   enabled: true
