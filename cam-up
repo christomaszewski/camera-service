@@ -67,11 +67,19 @@ export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
 # shm transport = a stable EXTERNAL volume, so sibling and other-stack containers can attach
 docker volume create "$CAM_SOCK_VOLUME" >/dev/null
 
-# Resolve auto -> jp6/jp7 from the L4T release line (R36 = JP6; R38+ = JP7). Skipped under --dev
-# (non-Jetson host); a missing release file falls back to jp6 (the conservative l4t/nvidia path).
+# Resolve auto -> the target platform (drives BOTH the image tag cam-core:<platform> AND the runtime
+# overlay docker-compose.<platform>.yml). rig's DECLARED target wins over host detection: RIG_IMAGE_TAG
+# (= vehicle.yaml images.tag, e.g. jp7) is authoritative because rig bakes on a dev box that often isn't a
+# Jetson -- host-detecting THERE picks the wrong platform (jp6 on a Mac), pinning the wrong image tag AND
+# omitting the target's NVENC/CDI overlay. Standalone (RIG_IMAGE_TAG unset): fall back to the L4T release
+# line (R36 = JP6; R38+ = JP7). Skipped under --dev; a missing release file -> jp6 (conservative).
 if [ "$DEV" = 0 ] && [ "$PLATFORM" = auto ]; then
-  REL=""; [ -r /etc/nv_tegra_release ] && REL="$(sed -n 's/^# R\([0-9][0-9]*\).*/\1/p' /etc/nv_tegra_release)"
-  if [ "${REL:-0}" -ge 38 ] 2>/dev/null; then PLATFORM=jp7; else PLATFORM=jp6; fi
+  if [ -n "${RIG_IMAGE_TAG:-}" ]; then
+    PLATFORM="$RIG_IMAGE_TAG"
+  else
+    REL=""; [ -r /etc/nv_tegra_release ] && REL="$(sed -n 's/^# R\([0-9][0-9]*\).*/\1/p' /etc/nv_tegra_release)"
+    if [ "${REL:-0}" -ge 38 ] 2>/dev/null; then PLATFORM=jp7; else PLATFORM=jp6; fi
+  fi
 fi
 # Dev / unresolved -> the conservative shm+header transport. Export the resolved platform so the
 # ros2-bridge picks the matching consumer (CamUnixfdBridge on jp7, CamHeaderBridge otherwise) -- the
