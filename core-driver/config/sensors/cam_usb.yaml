@@ -1,0 +1,51 @@
+# Real USB/UVC camera (NexiGo HD Webcam on the Orin's /dev/video0) with BOTH bridges enabled:
+#   ros2-bridge   -> publishes the decoded image as /cam_usb/image_raw (I420 -> rgb8)
+#   webrtc-bridge -> serves a live preview over WebRTC (signalling on :8446)
+# Run:  cam-up config/sensors/cam_usb.yaml up -d   (Orin = JP7 -> unixfd; MJPEG stream-copy record + sw decode)
+# NOTE: the v4l2 device must be mapped into the core container (e.g. `--device /dev/video0` / a devices: entry).
+service: camera-service
+name: cam_usb
+
+camera:
+  type: usb
+  frame_rate: 30.0
+
+usb:
+  # Stable by-id path so a hotplug/replug reconnects the SAME camera (a bare /dev/videoN renumbers on replug):
+  device: /dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._NexiGo_HD_Webcam_SN0001-video-index0
+  pixel_format: MJPEG      # NexiGo MJPEG up to 1080p60 -> stream-copy record + decode I420 for consumers
+  width: 1280
+  height: 720
+  sof_timestamps: true     # v4l2 driver per-frame timestamp (closer to capture than host arrival)
+
+recording:
+  enabled: true
+  encoder: auto            # encoded (MJPEG) -> stream-copy the delivered JPEG (no re-encode)
+  output_dir: /data/recordings
+  name_prefix: cam_usb
+  segment_seconds: 60
+
+transport:
+  plugin_endpoint:
+    enabled: true          # JP7: unixfd -- BOTH bridges read this decoded-I420 endpoint
+    socket_path: /tmp/cam/frames
+  raw_endpoint:
+    enabled: true          # JP6 fallback: webrtc reads decoded I420 from the raw shm here
+    socket_path: /tmp/cam/raw
+
+plugins:
+  - name: ros2-bridge
+    enabled: true
+    isolation: container
+    params:
+      topic: image_raw     # -> /cam_usb/image_raw
+      frame_id: cam_usb
+  - name: webrtc-bridge
+    enabled: true
+    isolation: container
+    params:
+      port: 8446           # host-facing signalling port -- unique per camera
+      width: 1280          # JP6-only geometry hint (JP7 unixfd self-describes)
+      height: 720
+      format: I420
+      fps: 30
