@@ -1,0 +1,51 @@
+# Real RTSP camera (SIYI ZR30 gimbal cam on the LAN) with BOTH bridges enabled:
+#   ros2-bridge   -> publishes the decoded image as /cam_rtsp/image_raw (I420 -> rgb8)
+#   webrtc-bridge -> serves a live preview over WebRTC (signalling on :8445)
+# Run:  cam-up config/sensors/cam_rtsp.yaml up -d   (Orin = JP7 -> unixfd transport + HW NVDEC)
+service: camera-service
+name: cam_rtsp
+
+camera:
+  type: rtsp
+  # frame_rate is auto-probed (informational); reconnect (on by default, 5s) recovers a stalled stream.
+
+rtsp:
+  url: rtsp://10.160.1.80:8554/main.264
+  protocols: tcp           # RTP-over-TCP (robust through NAT/firewalls)
+  latency_ms: 200
+  # codec/width/height/frame_rate are auto-probed at open() (rtspsrc ! parsebin); the ZR30 has run
+  # H.265 / H.264 at up to 4K. To pin them instead: set codec/width/height + probe: false.
+
+recording:
+  enabled: true
+  encoder: auto            # encoded source -> stream-copy the delivered bitstream (faithful, no re-encode)
+  output_dir: /data/recordings
+  name_prefix: cam_rtsp
+  segment_seconds: 60
+
+transport:
+  plugin_endpoint:
+    enabled: true          # JP7: unixfd -- BOTH bridges read this decoded-I420 endpoint (ros2 + webrtc share it)
+    socket_path: /tmp/cam/frames
+  raw_endpoint:
+    enabled: true          # JP6 fallback: webrtc reads decoded I420 from the raw shm here
+    socket_path: /tmp/cam/raw
+
+plugins:
+  - name: ros2-bridge
+    enabled: true
+    isolation: container
+    params:
+      topic: image_raw     # -> /cam_rtsp/image_raw
+      frame_id: cam_rtsp
+  - name: webrtc-bridge
+    enabled: true
+    isolation: container
+    params:
+      port: 8445           # host-facing signalling port -- MUST be unique per camera across the vehicle
+      width: 3840          # JP6-only geometry hint (JP7 unixfd self-describes); the ZR30's 4K decode
+      height: 2160
+      format: I420         # the decoded format the bridge consumes
+      fps: 25
+      # 4K needs more than webrtcsink's 8 Mbps default ceiling -- raise it (generic UPPERCASE env passthrough):
+      CAM_WEBRTC_MAX_BITRATE: 20000000
