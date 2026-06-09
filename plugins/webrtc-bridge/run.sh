@@ -21,10 +21,11 @@
 # to pin the codec), RUN_SIGNALLING (1=start the bundled signalling server, default 1),
 # CAM_WEBRTC_{MIN,MAX,START}_BITRATE (bit/sec; bound webrtcsink's adaptive-bitrate range -- the element
 # default max is 8 Mbps, raise it for 4K), CAM_WEBRTC_CONGESTION ({gcc|homegrown|disabled}, default gcc).
-# H.264: CAM_WEBRTC_PROFILE ({constrained-baseline|high}, default constrained-baseline) + CAM_WEBRTC_MAX_LEVEL
-# (clamp on the AUTO-derived level, default 5.2). The level is computed from the streamed resolution+fps so
-# the SDP profile-level-id matches the stream -- applied by the python launcher via webrtcsink's encoder
-# signals (NOT the CAM_LAUNCHER=gst-launch hatch, which keeps webrtcsink's fixed defaults).
+# H.264: CAM_WEBRTC_PROFILE (effectively FIXED at constrained-baseline -- webrtcsink forces it for raw
+# input at codec discovery; `high` warns + falls back) + CAM_WEBRTC_MAX_LEVEL (clamp on the AUTO-derived
+# level, default 5.2). The level is computed from the streamed resolution+fps so the SDP profile-level-id
+# matches the stream -- applied by the python launcher via webrtcsink's encoder signals (NOT the
+# CAM_LAUNCHER=gst-launch hatch, which keeps webrtcsink's fixed defaults).
 set -eu
 
 PLATFORM="${CAM_PLATFORM:-jp6}"

@@ -1,8 +1,11 @@
 # Dev override (no Jetson) — applied by `cam-up --dev`. Runs the core from the cam-dev image
 # (Ubuntu + GStreamer + Aravis, NO NVIDIA stack) instead of the l4t image, with the source
-# mounted for live iteration. The heavy plugins (ros2-bridge / webrtc-bridge) aren't l4t images,
-# so they run unchanged from their normal definitions. cam-up --dev also sets CAM_NETWORK=bridge.
+# mounted for live iteration. The ros2-bridge isn't an l4t image and runs unchanged; the
+# webrtc-bridge just gets its JP6 nvidia runtime swapped back to runc (no NVENC off-Jetson —
+# webrtcsink falls back to x264enc). cam-up --dev also sets CAM_NETWORK=bridge.
 services:
+  webrtc-bridge:
+    runtime: runc                       # no nvidia runtime on a laptop / CI; x264enc fallback
   core-driver:
     image: ${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}cam-dev:${RIG_IMAGE_TAG:-latest}
     build:
