@@ -1,15 +1,15 @@
 # REAL RTSP camera (not the fake server) -- e.g. the SIYI ZR30 on the LAN. The RtspSource PROBES the
-# live stream at startup (rtspsrc ! parsebin, no decode) for codec + resolution + framerate, so you DON'T pin them
-# here: the camera can switch codec/res (this one has run H.265 720p and H.264 4K) and it just works.
+# live stream at startup (rtspsrc ! parsebin, no decode) for codec + resolution + framerate, so you
+# DON'T pin them here: the camera can switch codec/res (this one has run H.265 720p and H.264 4K).
 # protocols=tcp forces RTP-over-TCP (needed through Docker Desktop's NAT; also handy on firewalled nets).
-source:
+camera:
   type: rtsp
 
 rtsp:
   url: rtsp://10.160.1.80:8554/main.264
   protocols: tcp
   latency_ms: 200
-  # codec/width/height are auto-probed (probe: true by default). To override, set them + probe: false.
+  # codec/width/height/frame_rate are auto-probed (probe: true by default). To override, set them + probe: false.
 
 recording:
   enabled: true

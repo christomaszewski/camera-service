@@ -1,17 +1,20 @@
 # Reconnect/backoff test: the real pipeline vs the GVSP fake camera, where the emitter is
 # killed mid-stream and restarted (see tools/gvsp-chunk-emitter/reconnect_test.sh).
 camera:
-  fake: false
-  camera_id: null            # discover the GV camera on loopback
-  pixel_format: Mono8
+  type: gige
   frame_rate: 25.0
-  packet_size: 0             # auto-negotiate
-  timestamp_source: ptp_chunk
-  ptp_enable: false          # emitter has no PTP; skip the per-reopen PTP wait so reconnect is fast
   reconnect: true
   reconnect_timeout_s: 3.0   # no frame for 3s => treat as disconnected
   reconnect_backoff_s: 1.0
   reconnect_backoff_max_s: 8.0
+
+gige:
+  fake: false
+  camera_id: null            # discover the GV camera on loopback
+  pixel_format: Mono8
+  packet_size: 0             # auto-negotiate
+  timestamp_source: ptp_chunk
+  ptp_enable: false          # emitter has no PTP; skip the per-reopen PTP wait so reconnect is fast
 
 recording:
   enabled: true

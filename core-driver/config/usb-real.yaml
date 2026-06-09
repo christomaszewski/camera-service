@@ -1,16 +1,16 @@
 # REAL USB/UVC camera (not the videotestsrc fake). A NexiGo HD Webcam on /dev/video0 delivering
 # MJPEG -> stream-copy the delivered JPEG (faithful) + decode I420 for consumers. (The cam also
 # offers YUY2 raw at lower res -- see usb-real-raw.yaml -- which records via FFV1.)
-source:
+camera:
   type: usb
+  frame_rate: 30.0              # general (the recorder + the v4l2 capture rate)
 
 usb:
-  device: /dev/video0
+  device: /dev/video0          # prefer a stable /dev/v4l/by-id/... path so hotplug reconnects the same cam
   fake: false
   pixel_format: MJPEG           # NexiGo offers MJPEG up to 1080p60 + YUY2 raw at lower res
   width: 1280
   height: 720
-  frame_rate: 30.0
   sof_timestamps: true          # use the v4l2 driver per-frame ts (this cam stamps at dequeue ~= arrival;
   #                               a start-of-exposure cam would gain -- the delta shows in the sidecar)
 

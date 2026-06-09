@@ -24,16 +24,16 @@ mkdir -p "$REC" /tmp/cam
 trap 'echo "$USBDEV" | sudo tee /sys/bus/usb/drivers/usb/bind >/dev/null 2>&1 || true' EXIT
 
 cat > "$WORK/cam.yaml" <<YAML
-source:
+camera:
   type: usb
+  frame_rate: $FPS
+  reconnect: true
+  reconnect_timeout_s: 5
 usb:
   device: $BYID
   pixel_format: $FMT
   width: $W
   height: $H
-  frame_rate: $FPS
-  reconnect: true
-  reconnect_timeout_s: 5
 recording:
   enabled: true
   encoder: auto

@@ -81,9 +81,9 @@ def _decomment(raw):
 
 def _load_fallback(text):
     """Stdlib-only parser for OUR sensor-config subset, used only when PyYAML is absent: top-level
-    `name`, the `camera` map (flat scalars), and a `plugins` list of maps with scalar keys + a nested
-    `params` map. Indent-width agnostic; '#' comments; scalar leaves. NOT general YAML."""
-    cfg = {"name": None, "camera": {}, "plugins": []}
+    `name`, the `camera`/`gige`/`usb`/`rtsp` maps (flat scalars), and a `plugins` list of maps with
+    scalar keys + a nested `params` map. Indent-width agnostic; '#' comments; scalar leaves. NOT general YAML."""
+    cfg = {"name": None, "camera": {}, "gige": {}, "usb": {}, "rtsp": {}, "plugins": []}
     section = None       # current top-level section name
     cur = None           # current plugin map
     key_indent = None    # indent of the current plugin's direct keys
@@ -106,10 +106,10 @@ def _load_fallback(text):
                     cfg["name"] = _scalar(v)
             continue
 
-        if section == "camera":                          # flat scalar keys (pixel_format, ...)
+        if section in ("camera", "gige", "usb", "rtsp"):  # flat scalar keys (type, pixel_format, ...)
             k, _, v = s.partition(":")
             if v.strip():
-                cfg["camera"][k.strip()] = _scalar(v)
+                cfg[section][k.strip()] = _scalar(v)
             continue
         if section != "plugins":                         # ignore recording/transport/etc. bodies
             continue
@@ -152,6 +152,9 @@ def main() -> int:
 
     name = str(cfg.get("name") or "camera")
     cam = cfg.get("camera") or {}
+    stype = str(cam.get("type") or "gige")           # general `camera.type` selects the source block
+    src = cfg.get(stype) or {}                        # the active source block (gige/usb/rtsp)
+    pixfmt = str(src.get("pixel_format") or "")       # for Bayer derivation (rtsp has none -> '' -> mono path)
     plugins = [p for p in (cfg.get("plugins") or [])
                if isinstance(p, dict) and p.get("name")
                and p.get("enabled", True)
@@ -170,7 +173,7 @@ def main() -> int:
         env["CAM_ROS_TOPIC"] = str(ros.get("topic", "image_raw"))
         env["CAM_FRAME_ID"] = str(ros.get("frame_id", name))
         # A: label a Bayer stream so image_proc can debayer it ('' = mono, derived from the header).
-        env["CAM_ROS_ENCODING"] = ros_bayer_encoding(str(cam.get("pixel_format") or ""))
+        env["CAM_ROS_ENCODING"] = ros_bayer_encoding(pixfmt)
         # B: optional in-bridge demosaic to rgb8.
         env["CAM_DEBAYER"] = "true" if ros.get("debayer", False) else "false"
 
@@ -187,7 +190,7 @@ def main() -> int:
         # Bayer pattern from the camera pixel_format -> webrtc debayers the CFA preview to color
         # (bayer2rgb). '' = mono/raw passthrough. JP7/unixfd caps already carry it; JP6/raw-shm
         # run.sh applies it as video/x-bayer caps.
-        env["CAM_BAYER"] = bayer_pattern(str(cam.get("pixel_format") or ""))
+        env["CAM_BAYER"] = bayer_pattern(pixfmt)
 
     for k, v in env.items():
         print(f"{k}={v}")
