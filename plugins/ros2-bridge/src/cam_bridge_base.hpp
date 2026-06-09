@@ -11,8 +11,10 @@
 //                       the negotiated caps + native buffer fields).
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <gst/gst.h>
@@ -42,8 +44,8 @@ int bytes_per_pixel(const std::string& encoding);
 
 // YUV layouts the bridge converts to rgb8 -- sensor_msgs has no encoding for planar/semi-planar YUV,
 // and the decode branch delivers I420 for every color (encoded/RTSP) source. NONE = a directly-mappable
-// format (mono/rgb/bgr), handled without conversion.
-enum class Yuv { NONE, I420, NV12, YUY2 };
+// format (mono/rgb/bgr/rgba/bgra), handled without conversion.
+enum class Yuv { NONE, I420, NV12, YUY2, UYVY, YV12, NV24 };
 
 // Convert a YUV plane (full-range BT.601, as decoded MJPEG/JPEG produces) into a packed rgb8 buffer in
 // `out` (resized to w*h*3). Returns false if `src_size` is too small for w*h in `fmt`.
@@ -86,6 +88,9 @@ class CamBridgeBase : public rclcpp::Node {
   void publish(const FrameMeta& m);
 
   GstElement* pipeline_ = nullptr;
+  GstBus* bus_ = nullptr;              // watched for ERROR/EOS (producer restart) by bus_thread_
+  std::thread bus_thread_;
+  std::atomic<bool> stopping_{false};  // set by the destructor so the bus watcher exits quietly
   image_transport::Publisher pub_;
 };
 

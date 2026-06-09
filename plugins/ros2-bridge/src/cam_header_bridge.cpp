@@ -31,6 +31,7 @@ struct FrameHeader {
   uint16_t width;
   uint16_t height;
   uint32_t pixfmt;       // 1=GRAY8 2=GRAY16_LE 3=GRAY16_BE 4=I420 5=NV12 6=YUY2 7=RGB 8=BGR
+                         // 9=NV24 10=YV12 11=UYVY 12=RGBA 13=BGRA 14=RGBx 15=BGRx
   uint8_t  ts_source;    // 0=ptp_chunk 1=camera 2=system 3=sof 4=rtp_ntp
   uint8_t  flags;
   uint16_t reserved;
@@ -55,6 +56,13 @@ bool pixfmt_info(uint32_t code, PixInfo& out) {
     case 6: out = {"rgb8", 3, false, Yuv::YUY2}; return true;   // YUY2 -> rgb8
     case 7: out = {"rgb8", 3, false, Yuv::NONE}; return true;   // RGB -> rgb8 (direct)
     case 8: out = {"bgr8", 3, false, Yuv::NONE}; return true;   // BGR -> bgr8 (direct)
+    case 9: out = {"rgb8", 3, false, Yuv::NV24}; return true;   // NV24 (4:4:4) -> rgb8
+    case 10: out = {"rgb8", 3, false, Yuv::YV12}; return true;  // YV12 (I420, V/U swapped) -> rgb8
+    case 11: out = {"rgb8", 3, false, Yuv::UYVY}; return true;  // UYVY (4:2:2) -> rgb8
+    // RGBx/BGRx: the 4th byte is undefined padding, published as alpha -- consumers that
+    // care about alpha shouldn't be fed an x-format; the geometry/stride are what matter.
+    case 12: case 14: out = {"rgba8", 4, false, Yuv::NONE}; return true;  // RGBA/RGBx (direct)
+    case 13: case 15: out = {"bgra8", 4, false, Yuv::NONE}; return true;  // BGRA/BGRx (direct)
     default: return false;
   }
 }
@@ -84,6 +92,13 @@ class CamHeaderBridge : public CamBridgeBase {
     std::memcpy(&hdr, map.data, sizeof(hdr));
     if (std::memcmp(hdr.magic, kMagic, 4) != 0 || hdr.version != kVersion) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "bad header (magic/version)");
+      return false;
+    }
+    // header_len is wire data: bound it before it becomes a pointer offset (an oversized value
+    // would underflow src_size below and read past the mapped shm region).
+    if (hdr.header_len < sizeof(FrameHeader) || hdr.header_len > map.size) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                           "bad header_len %u (buffer %zu)", hdr.header_len, map.size);
       return false;
     }
     PixInfo pix;
