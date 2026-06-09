@@ -21,6 +21,10 @@
 # to pin the codec), RUN_SIGNALLING (1=start the bundled signalling server, default 1),
 # CAM_WEBRTC_{MIN,MAX,START}_BITRATE (bit/sec; bound webrtcsink's adaptive-bitrate range -- the element
 # default max is 8 Mbps, raise it for 4K), CAM_WEBRTC_CONGESTION ({gcc|homegrown|disabled}, default gcc).
+# H.264: CAM_WEBRTC_PROFILE ({constrained-baseline|high}, default constrained-baseline) + CAM_WEBRTC_MAX_LEVEL
+# (clamp on the AUTO-derived level, default 5.2). The level is computed from the streamed resolution+fps so
+# the SDP profile-level-id matches the stream -- applied by the python launcher via webrtcsink's encoder
+# signals (NOT the CAM_LAUNCHER=gst-launch hatch, which keeps webrtcsink's fixed defaults).
 set -eu
 
 PLATFORM="${CAM_PLATFORM:-jp6}"
@@ -90,9 +94,10 @@ echo "webrtc-bridge: ${TRANSPORT} ${SOCK}${BAYER:+ bayer=${BAYER}}${DEBAYER_EL:+
 # Default launcher: a small Python process (tools/bridge_stream.py) that OWNS this pipeline and, once it
 # is streaming, advertises the stream over Zenoh for fleet discovery (docs/DISCOVERY.md). It shares this
 # process, so the liveliness token lives exactly as long as the bridge (crash/kill -> presence withdrawn).
-# Escape hatch: CAM_LAUNCHER=gst-launch runs the bare pipeline with NO discovery (debugging / minimal).
+# Escape hatch: CAM_LAUNCHER=gst-launch runs the bare pipeline with NO discovery AND no H.264
+# profile/level pinning (webrtcsink's fixed defaults) -- debugging / minimal only.
 if [ "${CAM_LAUNCHER:-python}" = "gst-launch" ]; then
-  echo "webrtc-bridge: launcher=gst-launch (discovery off)"
+  echo "webrtc-bridge: launcher=gst-launch (discovery + H.264 profile/level off)"
   exec gst-launch-1.0 -e ${PIPELINE}
 fi
 export CAM_PIPELINE="$PIPELINE"
