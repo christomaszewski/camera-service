@@ -1,0 +1,15 @@
+# USB / v4l2 source overlay. cam-up applies this ONLY when the sensor config's `camera.type == usb`
+# (a real, non-fake device) -- a gige/rtsp source needs no device, so the mapping is conditional.
+# sensor_env exports CAM_DEVICE (the config's usb.device); cam-up resolves it to CAM_DEVICE_REAL via
+# `readlink -f`, so a /dev/v4l/by-id/... symlink maps cleanly onto its real /dev/videoN node while the
+# container still sees it at the configured path.
+#
+# HOTPLUG CAVEAT: `devices:` creates a ONE-TIME device node from the host device at container start;
+# Docker does NOT track a later unplug/replug (the node goes stale, and a renumbered device isn't
+# picked up). So the in-pipeline data-starvation watchdog still recovers a transient STALL, but a true
+# unplug/replug recovery in a container needs either the core run natively, or `/dev` bind-mounted live
+# (advanced -- a live /dev overlaps the CDI-injected GPU nodes on JP7, so it's not wired here).
+services:
+  core-driver:
+    devices:
+      - "${CAM_DEVICE_REAL:-/dev/video0}:${CAM_DEVICE:-/dev/video0}"

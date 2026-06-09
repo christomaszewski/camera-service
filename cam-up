@@ -88,6 +88,13 @@ if [ "$DEV" = 0 ] && [ "$PLATFORM" = jp7 ]; then
   FILES+=(-f "$REPO/docker-compose.jp7.yml")
   export CAM_CORE_BASE="${CAM_CORE_BASE:-ubuntu:24.04}"
 fi
+# USB source: map the v4l2 device into the core container (gige/rtsp need no device). sensor_env exports
+# CAM_DEVICE for a REAL (non-fake) usb config; apply the overlay only when that device exists on the host.
+# The config path (e.g. /dev/v4l/by-id/...) is resolved to its real node so the symlink maps cleanly.
+if [ -n "${CAM_DEVICE:-}" ] && [ -e "$CAM_DEVICE" ]; then
+  export CAM_DEVICE CAM_DEVICE_REAL="$(readlink -f "$CAM_DEVICE" 2>/dev/null || echo "$CAM_DEVICE")"
+  FILES+=(-f "$REPO/docker-compose.usb.yml")
+fi
 # Registry deploy (no per-vehicle build): CAM_REGISTRY points every image at <registry>/<name>:<tag>,
 # tag following the detected platform (matches tools/build-images.sh) so one var pulls the whole stack.
 # Per-image vars still override individually. Then `cam-up <cfg> pull` + `up -d` runs the pulled images.
