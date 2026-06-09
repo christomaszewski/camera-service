@@ -40,7 +40,14 @@ def main(argv=None) -> int:
     )
     log = logging.getLogger("cam")
 
-    cfg = load_config(args.config)
+    try:
+        cfg = load_config(args.config)
+    except (ValueError, OSError) as e:
+        # A config typo (e.g. `height: 1080p`) or an unreadable file: fail fast + legibly HERE,
+        # naming the offending field, instead of crashing deep in a source -- where it reads as a
+        # downstream transport/bridge failure (a dead core never serves its socket).
+        log.error("config error: %s", e)
+        return 2
     # Recording dir from the deploy env: rig sets RIG_DATA_DIR (absolute host data root, bind-mounted at
     # the same path) to keep recordings OFF the repo; cam-up sets CAM_INSTANCE to namespace per sensor.
     # A bare run / a pinned output_dir is unaffected (see docker-compose.yml's `recordings` bind).

@@ -152,6 +152,46 @@ def test_reconnect_overlay():
     assert d.usb.reconnect is True and d.rtsp.reconnect_timeout_s == 5.0
 
 
+# ---- numeric coercion + legible errors (a YAML typo must fail fast, naming the field) -------
+def test_numeric_fields_coerced_from_strings():
+    # quoted / env-sourced numerics coerce to the annotated type
+    c = parse_config({"camera": {"type": "usb"}, "usb": {"width": "1920", "height": "1080"}})
+    assert (c.usb.width, c.usb.height) == (1920, 1080)
+    assert isinstance(c.usb.width, int) and isinstance(c.usb.height, int)
+    f = parse_config({"camera": {"frame_rate": "24"}})          # Optional[float] coerces too
+    assert f.usb.frame_rate == 24.0 and isinstance(f.usb.frame_rate, float)
+
+
+def test_numeric_typo_raises_named_error():
+    # the real-world bug: `height: 1080p` -> a clear, field-named error, not a cryptic int() crash
+    try:
+        parse_config({"camera": {"type": "usb"}, "usb": {"width": 1920, "height": "1080p"}})
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "UsbConfig.height" in str(e) and "1080p" in str(e)
+
+
+def test_numeric_field_rejects_bool():
+    # bool subclasses int; int(True)==1 would pass silently -> reject it explicitly, named
+    try:
+        parse_config({"usb": {"width": True}})
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "UsbConfig.width" in str(e)
+
+
+def test_optional_numeric_none_stays_none():
+    # Optional[float] with no value stays None (gige's default), never coerced to 0.0
+    assert parse_config({"camera": {"type": "gige"}}).gige.frame_rate is None
+
+
+def test_transport_endpoint_numeric_coerced():
+    # coercion also covers the merged transport endpoints, not just _build dataclasses
+    c = parse_config({"transport": {"plugin_endpoint": {"max_rate_hz": "10"}}})
+    assert c.transport.plugin_endpoint.max_rate_hz == 10.0
+    assert c.transport.plugin_endpoint.enabled is True   # merge still preserves the default
+
+
 def test_resolve_recording_dir():
     R = resolve_recording_dir
     assert R("/data/recordings", "", "") == "/data/recordings"               # bare run -> default untouched

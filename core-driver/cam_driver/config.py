@@ -15,6 +15,8 @@ core pipeline; the `plugins` list is for the per-sensor supervisor / cam-up (spa
 """
 from __future__ import annotations
 
+import functools
+import typing
 from dataclasses import dataclass, field, fields
 from typing import Optional
 
@@ -194,11 +196,45 @@ class AppConfig:
     plugins: list = field(default_factory=list)   # list[PluginConfig], for the plugin supervisor
 
 
+@functools.lru_cache(maxsize=None)
+def _hints(cls):
+    """Resolve a dataclass's (PEP 563 string) annotations to real types, once per class."""
+    return typing.get_type_hints(cls)
+
+
+def _numeric_kind(hint):
+    """Return int/float if `hint` is that numeric type (incl. Optional[...]), else None.
+    bool is intentionally NOT numeric here: it subclasses int, so int(True)==1 would otherwise
+    coerce a stray boolean silently."""
+    args = typing.get_args(hint)
+    if args:                                   # Optional[X] == Union[X, None]
+        non_none = [a for a in args if a is not type(None)]
+        hint = non_none[0] if len(non_none) == 1 else None
+    return hint if hint in (int, float) else None
+
+
+def _coerce(cls, key, value):
+    """Coerce `value` to field `key`'s annotated numeric type, with a clear, field-named error.
+    Non-numeric fields (and None) pass through untouched. This turns a YAML typo like
+    `height: 1080p` into a fast, legible `UsbConfig.height: expected int, got '1080p'` at parse
+    time -- instead of a cryptic int() crash deep in a source that then looks like a downstream
+    transport/bridge failure (the bug that motivated this)."""
+    kind = _numeric_kind(_hints(cls).get(key))
+    if kind is None or value is None:
+        return value
+    if isinstance(value, bool):                # see _numeric_kind: bool is not a valid numeric here
+        raise ValueError(f"{cls.__name__}.{key}: expected {kind.__name__}, got bool {value!r}")
+    try:
+        return kind(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{cls.__name__}.{key}: expected {kind.__name__}, got {value!r}") from None
+
+
 def _build(cls, data):
-    """Instantiate a dataclass from a dict, ignoring unknown keys."""
+    """Instantiate a dataclass from a dict, ignoring unknown keys and coercing numeric fields."""
     data = data or {}
     known = {f.name for f in fields(cls)}
-    return cls(**{k: v for k, v in data.items() if k in known})
+    return cls(**{k: _coerce(cls, k, v) for k, v in data.items() if k in known})
 
 
 def _merge_endpoint(data, default: TransportEndpoint) -> TransportEndpoint:
@@ -207,7 +243,7 @@ def _merge_endpoint(data, default: TransportEndpoint) -> TransportEndpoint:
         return default
     known = {f.name for f in fields(TransportEndpoint)}
     merged = {f.name: getattr(default, f.name) for f in fields(TransportEndpoint)}
-    merged.update({k: v for k, v in data.items() if k in known})
+    merged.update({k: _coerce(TransportEndpoint, k, v) for k, v in data.items() if k in known})
     return TransportEndpoint(**merged)
 
 
