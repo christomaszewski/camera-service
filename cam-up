@@ -132,7 +132,11 @@ fi
 # come out right -- the raw ${RIG_IMAGE_REGISTRY}/cam-core prefix in the composes would resolve :latest.
 CAM_REGISTRY="${CAM_REGISTRY:-${RIG_IMAGE_REGISTRY:-}}"
 if [ "$DEV" = 0 ] && [ -n "${CAM_REGISTRY:-}" ]; then
-  IMG_TAG="${CAM_IMAGE_TAG:-$PLATFORM}"
+  # The PULL TAG and the runtime PLATFORM are separate concerns. The tag follows the fleet tag VERBATIM
+  # (build/pull agreement: `rig build` pushes <image>:<images.tag>, whatever that string is); only the
+  # overlay/runtime selection above validates jp6|jp7. Platform is the standalone fallback when no fleet
+  # tag is set; CAM_IMAGE_TAG pins a release over both.
+  IMG_TAG="${CAM_IMAGE_TAG:-${RIG_IMAGE_TAG:-$PLATFORM}}"
   export CAM_CORE_IMAGE="${CAM_CORE_IMAGE:-$CAM_REGISTRY/cam-core:$IMG_TAG}"
   export CAM_ROS2_IMAGE="${CAM_ROS2_IMAGE:-$CAM_REGISTRY/ros2-bridge:$IMG_TAG}"
   export CAM_ROS1_IMAGE="${CAM_ROS1_IMAGE:-$CAM_REGISTRY/ros1-bridge:$IMG_TAG}"   # Noetic; ros1-bridge is jp6-class

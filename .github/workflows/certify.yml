@@ -1,0 +1,26 @@
+name: launcher-contract
+# The rig launcher contract, as an executable gate: `rig certify` runs cam-up's `config` verb under a
+# poisoned fleet env and asserts the contract held (COMPOSE_PROJECT_NAME honored, images pulled from
+# RIG_IMAGE_REGISTRY as :RIG_IMAGE_TAG, fleet ROS env unmangled, deterministic + host-independent output,
+# identity derived from the config name). This is what caught the project-name override and the
+# tag/platform coupling — both shipped past review and unit tests, neither survived certify.
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  certify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: christomaszewski/rig
+          path: .rig
+      - run: python3 -m pip install --user pyyaml
+      # Certify against both real sensor shapes (usb exercises the device overlay, rtsp the probe-less
+      # path). Warnings don't fail the job; contract errors do.
+      - name: certify (usb config)
+        run: ./.rig/rig certify --repo . --config core-driver/config/sensors/cam_usb.yaml
+      - name: certify (rtsp config)
+        run: ./.rig/rig certify --repo . --config core-driver/config/sensors/cam_rtsp.yaml
