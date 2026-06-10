@@ -19,7 +19,8 @@ class DropStats:
         self.frames = 0             # frames received + processed by the core
         self.source_gaps = 0        # number of frame-id discontinuities observed
         self.frames_missing = 0     # total frames skipped across those gaps
-        self.enqueue_failures = 0   # received but the pipeline could not accept (push != OK)
+        self.enqueue_failures = 0   # received but the RECORDING feed could not accept (queue full / push != OK)
+        self.publish_drops = 0      # best-effort transport publishes skipped (consumer stalled, queue full)
         self._last_fid = None
 
     def observe_frame(self, frame_id: int) -> int:
@@ -38,10 +39,14 @@ class DropStats:
     def note_enqueue_failure(self) -> None:
         self.enqueue_failures += 1
 
+    def note_publish_drop(self) -> None:
+        self.publish_drops += 1
+
     def summary(self) -> dict:
         return {
             "frames": self.frames,
             "source_gaps": self.source_gaps,
             "frames_missing": self.frames_missing,
             "enqueue_failures": self.enqueue_failures,
+            "publish_drops": self.publish_drops,
         }

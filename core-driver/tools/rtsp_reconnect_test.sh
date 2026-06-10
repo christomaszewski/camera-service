@@ -27,18 +27,26 @@ docker run --rm -v "$PWD/core-driver:/app" --entrypoint bash "$IMG" -c '
 
   echo "=== reconnect timeline (core.log) ==="
   grep -nE "pipeline: running|reports disconnect|reconnecting|reconnect attempt|reconnected|resuming capture|stop requested" /tmp/core.log || true
+  grep -q "reports disconnect" /tmp/core.log || { echo "FAIL: watchdog never detected the stall"; exit 1; }
+  grep -q "resuming capture" /tmp/core.log || { echo "FAIL: source never reconnected"; exit 1; }
   echo "=== sidecar analysis (stall gap + frames on both sides) ==="
   python3 - <<PY
-import csv
-rows=list(csv.DictReader(open("/data/recordings/rtspmjpeg.csv")))
+import csv, glob, sys
+paths = glob.glob("/data/recordings/rtspmjpeg-*.csv")
+if not paths:
+    sys.exit("FAIL: no sidecar CSV written")
+rows=list(csv.DictReader(open(paths[0])))
 print("total recorded rows:", len(rows))
 ts=[int(r["timestamp_ns"]) for r in rows]
 if len(ts)>2:
     gaps=[(ts[i+1]-ts[i])/1e9 for i in range(len(ts)-1)]
     mx=max(gaps); idx=gaps.index(mx)
     print("max inter-frame gap: %.1fs  (rows %d before / %d after the gap)" % (mx, idx+1, len(rows)-idx-1))
-    print("VERDICT:", "RECOVERED" if (mx>5 and (len(rows)-idx-1)>10) else "NOT RECOVERED")
-else:
-    print("VERDICT: NOT RECOVERED (too few rows)")
+    ok = mx>5 and (len(rows)-idx-1)>10
+    print("VERDICT:", "RECOVERED" if ok else "NOT RECOVERED")
+    sys.exit(0 if ok else 1)
+print("VERDICT: NOT RECOVERED (too few rows)")
+sys.exit(1)
 PY
 '
+echo "PASS: rtsp reconnect/recovery"

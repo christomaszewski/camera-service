@@ -18,6 +18,8 @@ the supervisor's (in-image) and are ignored here.
 Uses PyYAML when it's importable; otherwise falls back to a tiny built-in parser that covers the
 (simple, fixed) sensor-config schema, so a vehicle host needs nothing but stock python3.
 """
+import re
+import shlex
 import sys
 
 try:
@@ -27,6 +29,18 @@ except ImportError:  # pragma: no cover
     _HAVE_YAML = False
 
 _BAYER = {"RG": "rggb", "GR": "grbg", "GB": "gbrg", "BG": "bggr"}
+
+# Passthrough keys must look like env-var names, and must not be able to hijack the derived
+# per-sensor identity (compose project/profiles/volume, device mapping) or the shell/cam-up
+# environment itself. Friendly per-plugin defaults (CAM_WIDTH, CAM_ROS_TOPIC, ...) stay
+# overridable by design.
+_ENV_KEY = re.compile(r"[A-Z][A-Z0-9_]*\Z")
+_RESERVED_KEYS = {
+    "COMPOSE_PROJECT_NAME", "COMPOSE_PROFILES", "CAM_INSTANCE", "CAM_SOCK_VOLUME",
+    "CAM_SOURCE_TYPE", "CAM_DEVICE", "CAM_CONFIG", "CAM_NETWORK", "CAM_PLATFORM",
+    "PATH", "HOME", "SHELL", "IFS", "TMPDIR", "PYTHONPATH", "LD_LIBRARY_PATH", "LD_PRELOAD",
+}
+_RESERVED_PREFIXES = ("RIG_",)   # rig-owned host facts (data dir, image tag) -- never per-sensor YAML
 
 
 def bayer_pattern(pixel_format: str) -> str:
@@ -200,16 +214,24 @@ def main() -> int:
         env["CAM_BAYER"] = bayer_pattern(pixfmt)
 
     # Generic env passthrough: any UPPERCASE param key on an enabled plugin (e.g. CAM_WEBRTC_MAX_BITRATE,
-    # VIDEO_CAPS, GST_PLUGIN_FEATURE_RANK) is emitted VERBATIM as an env var -- so ANY bridge env knob is
+    # VIDEO_CAPS, GST_PLUGIN_FEATURE_RANK) is emitted as an env var -- so ANY bridge env knob is
     # settable straight from the sensor YAML without teaching this file about it. Lowercase param keys keep
-    # the friendly per-plugin mapping above. Runs last, so an explicit UPPERCASE key overrides a friendly default.
+    # the friendly per-plugin mapping above. Runs last, so an explicit UPPERCASE key overrides a friendly
+    # default. Keys must be well-formed env names and must not collide with the derived sensor identity
+    # or the host environment (see _RESERVED_KEYS) -- config data must never steer cam-up itself.
     for params in by_name.values():
         for k, v in params.items():
-            if k.isupper():
-                env[k] = str(v)
+            if not k.isupper():
+                continue
+            if not _ENV_KEY.match(k) or k in _RESERVED_KEYS or k.startswith(_RESERVED_PREFIXES):
+                sys.stderr.write(f"sensor_env: ignoring param {k!r} (reserved or not a valid env name)\n")
+                continue
+            env[k] = str(v)
 
+    # shell-quoted: cam-up eval-exports these lines, and values are config data -- a space must not
+    # split a value and a metacharacter must never execute. (shlex.quote leaves simple tokens bare.)
     for k, v in env.items():
-        print(f"{k}={v}")
+        print(f"{k}={shlex.quote(str(v))}")
     return 0
 
 

@@ -8,18 +8,28 @@ encode, analyze, forward).
 ## The contract
 
 A plugin consumes:
-1. **Transport** — the core publishes frames on a shared endpoint (a Unix-socket /
-   shared-memory transport on the same host). Phase plan:
-   - **JP6 (now):** `shmsink` (CPU shared memory) + a 36-byte frame header (see Time below).
-   - **JP7 / Thor (later):** `nvunixfdsink` for true zero-copy GPU (`NvBufSurface`) sharing.
-   Because the publish branch is just `tee. ! queue ! <sink>`, swapping transports is a
-   localized change, not a rearchitecture.
-2. **Caps** — the negotiated raw video format (e.g. `GRAY8`, width/height, framerate).
-3. **Time** — shm transmits only bytes (PTS + `GstMeta` are dropped at the process boundary),
-   so the per-frame **PTP capture time + frame_id travel in the 36-byte header** prepended to
-   each frame (caps `application/x-cam-frame`). The consumer parses the header and stamps its
-   messages from it — e.g. ros2-bridge sets `sensor_msgs/Image.header.stamp` from the header's
-   `timestamp_ns`. (An optional header-free `video/x-raw` endpoint exists for generic tools.)
+1. **Transport** — the core publishes frames on a shared per-sensor `plugin_endpoint`, whose
+   implementation `pipeline.build()` picks at runtime by capability (see
+   [docs/unixfd-migration.md](../docs/unixfd-migration.md)):
+   - **JP7 (GStreamer ≥ 1.24):** `unixfdsink` at `/tmp/cam/unixfd` — native caps, PTS intact,
+     `frame_id` in the buffer `offset`, absolute capture ns in `offset_end`. **Replaces** the
+     header endpoint on JP7 (the core does *not* publish both).
+   - **JP6 (GStreamer 1.20):** `shmsink` at `/tmp/cam/frames` + a 36-byte frame header
+     (see Time below).
+   - **Thor / later:** `nvunixfdsink` for true zero-copy GPU (`NvBufSurface`) sharing.
+   An optional header-free **raw `video/x-raw` shm endpoint** (`/tmp/cam/raw`,
+   `transport.raw_endpoint.enabled`) exists on both platforms for generic tools — that's what
+   the webrtc-bridge reads. The publish branch is a localized sink swap, not a rearchitecture.
+2. **Caps** — the negotiated video format. On JP7/unixfd the stream is self-describing
+   (`video/x-raw` GRAY8/16, or `video/x-bayer` with the pattern for 8-bit CFA); on JP6 the
+   header endpoint's caps are `application/x-cam-frame` and the geometry/format ride the header.
+3. **Time** — on **JP6**, shm transmits only bytes (PTS + `GstMeta` are dropped at the process
+   boundary), so the per-frame **PTP capture time + frame_id travel in the 36-byte header**
+   prepended to each frame; the consumer parses it and stamps its messages — e.g. ros2-bridge
+   sets `sensor_msgs/Image.header.stamp` from the header's `timestamp_ns`. On **JP7**, the same
+   metadata rides the GstBuffer fields (`offset` = frame_id, `offset_end` = absolute capture ns).
+   The ros2-bridge ships both consumers (`CamHeaderBridge` / `CamUnixfdBridge`), selected by
+   `CAM_PLATFORM` in its launch.
 
 ## Plugins
 

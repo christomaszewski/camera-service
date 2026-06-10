@@ -12,6 +12,16 @@ services:
     init: true
     network_mode: ${CAM_NETWORK:-host}     # host = expose signalling + WebRTC media to viewers
     ipc: host                               # share /dev/shm with the core (JP6 raw endpoint; harmless for unixfd)
+    # JP6 (the base compose IS the JP6 shape, like the core): the nvidia runtime CSV-mounts the host's
+    # BSP GStreamer plugins (nvv4l2h264enc & co) into the container, which is what gives the RANK env
+    # below something to rank. This image isn't l4t-based, so the injection trigger env
+    # (NVIDIA_VISIBLE_DEVICES, set in-image by l4t bases) is set explicitly under environment.
+    # UNVALIDATED on JP6 hardware: r36 CSV ships gst-1.20/22.04-built plugins into this 24.04/gst-1.24
+    # container (plugin ABI is forward-compatible and the .so deps ride along in the CSV) -- verify on
+    # the vehicle with:  docker compose ... run --rm webrtc-bridge gst-inspect-1.0 nvv4l2h264enc
+    # Worst case the plugin blacklists at registry scan and webrtcsink falls back to x264enc.
+    # Overridden to runc by --dev (no nvidia runtime) and by the jp7 overlay (CDI device instead).
+    runtime: nvidia
     volumes:
       - cam_sock:/tmp/cam
     environment:
@@ -53,16 +63,25 @@ services:
       - CAM_ROS_TOPIC=${CAM_ROS_TOPIC:-}                  # OPTIONAL linkage if a ros bridge coexists
       - CAM_RECORDING_GLOB=${CAM_RECORDING_GLOB:-}        # OPTIONAL recording linkage
       - VIDEO_CAPS=${VIDEO_CAPS:-}                          # pin a codec (e.g. video/x-h264) -> descriptor hint
+      # JP6 CSV-injection triggers (l4t base images carry these in-image; this ubuntu base doesn't).
+      # Inert under --dev/runc and on JP7 (CDI grants by device, not env).
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
       # Force the Jetson HW encoder: webrtcsink picks the highest-RANKED encoder for the negotiated codec,
       # which by default is the CPU x264enc. Bump nvv4l2h264enc so NVENC is used (pair with VIDEO_CAPS=
-      # video/x-h264). It's a plain GStreamer env var read at registry load; a no-op if the element is
-      # absent (e.g. Orin Nano has no H.264 NVENC -> falls back to x264enc). Also what makes profile=high
-      # take effect (set on that HW encoder). Comma-list for multiple, e.g. nvv4l2h264enc:MAX,nvv4l2h265enc:MAX.
+      # video/x-h264). The element exists in this container only via the platform grant (CDI device on
+      # JP7 -- docker-compose.jp7.yml; nvidia-runtime CSV mounts on JP6 -- above); webrtcsink inserts the
+      # nvvidconv->NVMM hop itself. A plain GStreamer env var read at registry load; a no-op if the
+      # element is absent (--dev, or Orin Nano which has no H.264 NVENC -> falls back to x264enc).
+      # Comma-list for multiple, e.g. nvv4l2h264enc:MAX,nvv4l2h265enc:MAX.
       - GST_PLUGIN_FEATURE_RANK=${GST_PLUGIN_FEATURE_RANK:-}
-      # H.264 encode (webrtcsink re-encodes from raw): the PROFILE is a config knob; the LEVEL is
-      # AUTO-derived from the resolution+fps fed to webrtcsink so the SDP profile-level-id matches the
-      # stream (a fixed level = an out-of-level black tile in the browser on high-res streams).
-      - CAM_WEBRTC_PROFILE=${CAM_WEBRTC_PROFILE:-}          # constrained-baseline (default) | high
+      # H.264 encode (webrtcsink re-encodes from raw): the LEVEL is AUTO-derived from the resolution+fps
+      # fed to webrtcsink so the SDP profile-level-id matches the stream (a fixed level = an out-of-level
+      # black tile in the browser on high-res streams). The PROFILE is effectively FIXED at
+      # constrained-baseline: webrtcsink pins it on its parser filter for raw input at codec discovery
+      # (parser_caps force_profile -- unchanged through gst-plugins-rs 0.15), so `high` cannot take
+      # effect on ANY encoder; the launcher warns + falls back. Knob kept for when upstream honors it.
+      - CAM_WEBRTC_PROFILE=${CAM_WEBRTC_PROFILE:-}          # constrained-baseline (default; `high` warns + falls back)
       - CAM_WEBRTC_MAX_LEVEL=${CAM_WEBRTC_MAX_LEVEL:-}      # safety clamp on the auto level (e.g. 4.2); default 5.2
       # Adaptive bitrate: webrtcsink runs Google Congestion Control (gcc) and scales the encoder bitrate
       # to each viewer's link automatically. These OPTIONAL bounds (bit/sec) frame that range; the element

@@ -16,6 +16,7 @@ find_package(image_transport REQUIRED)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GST REQUIRED IMPORTED_TARGET gstreamer-1.0 gstreamer-app-1.0)
+find_package(Threads REQUIRED)   # std::thread (the bus watcher)
 
 # One shared library holds the base + both transport components, so they can be loaded into a
 # component_container_mt (and share a process with image_proc on JP6 for intra-process debayering).
@@ -27,6 +28,7 @@ target_include_directories(cam_bridge_components PRIVATE src)
 # Modern CMake linkage (works on Jazzy + Lyrical). `ament_target_dependencies` was removed in Lyrical;
 # link the exported targets directly -- they carry their include dirs transitively.
 target_link_libraries(cam_bridge_components
+  Threads::Threads
   PkgConfig::GST
   rclcpp::rclcpp
   rclcpp_components::component

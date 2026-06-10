@@ -45,7 +45,8 @@ exactly like the ros2-bridge.
 
 ```bash
 docker build -f plugins/webrtc-bridge/Dockerfile -t webrtc-bridge .       # ~15-25 min (Rust)
-# JP7 (unixfd, self-describing — no geometry needed), sharing the core's transport volume:
+# JP7 (unixfd, self-describing — no geometry needed), sharing the core's transport volume
+# (add --device nvidia.com/gpu=all for HW NVENC — the per-sensor stack grants it via the jp7 overlay):
 docker run --rm -v cam_sock:/tmp/cam --network host \
   -e CAM_PLATFORM=jp7 -e CAM_BAYER=rggb webrtc-bridge
 # JP6 (raw shm — geometry must match the camera):
@@ -69,7 +70,7 @@ Or via the per-sensor stack: `cam-up <sensor>.yaml up -d webrtc-bridge` (cam-up 
 | `CAM_FORMAT` | `GRAY8` | **JP6 raw shm only** — mono raw format when not debayering |
 | `CAM_FPS` | `25` | **JP6 raw shm only** — frame rate |
 | `VIDEO_CAPS` | _(unset)_ | e.g. `video/x-h264` to pin the codec; unset → webrtcsink picks |
-| `CAM_WEBRTC_PROFILE` | `constrained-baseline` | H.264 profile: `constrained-baseline` \| `high`. `high` is set on the encoder (needs a HW encoder, e.g. `nvv4l2h264enc`); software `x264enc` keeps its native constrained-baseline |
+| `CAM_WEBRTC_PROFILE` | `constrained-baseline` | effectively fixed: webrtcsink forces constrained-baseline for raw input at codec discovery, so `high` **warns + falls back** (knob kept for future upstream support) |
 | `CAM_WEBRTC_MAX_LEVEL` | `5.2` | safety clamp on the **auto-derived** H.264 level (the level is computed from the streamed resolution+fps — never fixed) |
 | `SIGNALLING_PORT` | `8443` | signalling server port |
 | `RUN_SIGNALLING` | `1` | run the bundled signalling server in-container |
@@ -139,21 +140,33 @@ Brings up a `rmw_zenohd` router + core + bridge, and a Zenoh probe
 ## Jetson notes
 
 - **HW encoder:** `webrtcsink` discovers encoders and picks the highest-RANKED one for the negotiated
-  codec — by default the CPU `x264enc`. To force NVENC set `GST_PLUGIN_FEATURE_RANK=nvv4l2h264enc:MAX`
-  **+** `VIDEO_CAPS=video/x-h264` (both forwarded by compose; settable from the sensor YAML's
-  `webrtc-bridge` params — see `config/sensors/cam_rtsp.yaml`). This is also what makes
-  `CAM_WEBRTC_PROFILE=high` take effect, since it's set on that HW encoder. Some Orin variants (e.g.
-  Orin Nano) have no H.264 HW encoder — the rank is then a no-op and it falls back to `x264enc`
-  (constrained-baseline). Verify with `gst-inspect-1.0 nvv4l2h264enc`.
+  codec — by default the CPU `x264enc`. NVENC needs two things. (1) **The platform grant** that puts
+  `nvv4l2h264enc` in this container: on JP7 the `webrtc-bridge` CDI device entry in
+  [docker-compose.jp7.yml](../../docker-compose.jp7.yml) — **validated end-to-end on an R39 AGX Orin**
+  (webrtcsink picked `nvv4l2h264enc`, a `webrtcsrc` consumer decoded the stream); on JP6 the
+  `runtime: nvidia` + `NVIDIA_VISIBLE_DEVICES` CSV grant in [compose.yml](compose.yml) —
+  **unvalidated on JP6 hardware** (r36 CSV injects gst-1.20/22.04-built plugins into this
+  24.04/gst-1.24 image; plugin ABI is forward-compatible, but if it doesn't load it blacklists and
+  x264enc is used). (2) **The rank**: `GST_PLUGIN_FEATURE_RANK=nvv4l2h264enc:MAX` **+**
+  `VIDEO_CAPS=video/x-h264` (both forwarded by compose; settable from the sensor YAML's
+  `webrtc-bridge` params — see `config/sensors/cam_rtsp.yaml`). `webrtcsink` inserts the
+  `nvvidconv` → NVMM hop itself for `nvv4l2*` encoders; `kmod` is baked in (NVENC init runs `lsmod`).
+  The rank is a no-op if the element is absent (e.g. Orin Nano has no H.264 NVENC) — falls back to
+  `x264enc`. Verify on the vehicle:
+  `cam-up <sensor>.yaml run --rm --no-deps webrtc-bridge gst-inspect-1.0 nvv4l2h264enc`.
 - **H.264 level (auto) & profile:** the SDP `profile-level-id` must match the encoded stream or browsers
   receive RTP but decode nothing (a black tile). The bridge derives the **minimum** H.264 level for the
   resolution+fps fed to `webrtcsink` and pins it on the encoder output, so the advertised level tracks the
-  stream and any resolution decodes — no fixed level. `CAM_WEBRTC_PROFILE` selects the profile
-  (`constrained-baseline` default; `high` is ~15–25% smaller but is set on the encoder, so it needs a HW
-  encoder — sw `x264enc` keeps constrained-baseline). `CAM_WEBRTC_MAX_LEVEL` (default `5.2`) clamps the
-  auto level. B-frames are forced off for live either way. (Applied by the Python launcher via
-  `webrtcsink`'s `encoder-setup` / `request-encoded-filter` signals; the `CAM_LAUNCHER=gst-launch` hatch
-  keeps `webrtcsink`'s fixed defaults.)
+  stream and any resolution decodes — no fixed level. `CAM_WEBRTC_MAX_LEVEL` (default `5.2`) clamps the
+  auto level. The **profile is always constrained-baseline**: `webrtcsink` hard-pins it on its internal
+  parser filter whenever it encodes raw input (`parser_caps(force_profile=true)` at codec discovery,
+  unchanged through gst-plugins-rs 0.15), so a higher profile cannot be produced by **any** encoder —
+  forcing one on the encoder element makes the SPS contradict that filter and discovery dies with
+  "No caps found" (reproduced on-device with NVENC). `CAM_WEBRTC_PROFILE=high` therefore warns + falls
+  back; the knob remains for the day upstream honors a requested profile. B-frames are forced off for
+  live either way. (Applied by the Python launcher via `webrtcsink`'s `encoder-setup` /
+  `request-encoded-filter` signals; the `CAM_LAUNCHER=gst-launch` hatch keeps `webrtcsink`'s fixed
+  defaults.)
 - **Adaptive bitrate / quality ceiling:** `webrtcsink` runs Google Congestion Control (`gcc`) and scales
   the encoder bitrate to each viewer's link automatically — nothing to enable. The bounds are optional
   env knobs (bit/sec): `CAM_WEBRTC_MIN_BITRATE` / `CAM_WEBRTC_MAX_BITRATE` / `CAM_WEBRTC_START_BITRATE`,

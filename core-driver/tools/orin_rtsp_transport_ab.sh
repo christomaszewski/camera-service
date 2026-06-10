@@ -4,7 +4,7 @@
 # as 0 (or few) frames -- isolating whether TCP-interleaved is what intermittently stalls.
 #   rows ~= 30s * stream-fps for a clean run; firstframe = connect->first-frame latency.
 set -u
-REPO="${REPO:-/home/uxv/ws/gige-vision-service}"
+REPO="${REPO:-/home/uxv/ws/camera-service}"
 REC=/tmp/camval/rec
 mkdir -p /tmp/camval
 

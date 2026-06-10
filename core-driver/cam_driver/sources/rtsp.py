@@ -21,6 +21,7 @@ from gi.repository import GLib, Gst
 
 from ..formats import encoded_info, select_decoder
 from ..timestamps import TimestampSource
+from .base import SourceConfigChanged
 from .gstbase import GstPipelineSource
 
 log = logging.getLogger(__name__)
@@ -144,6 +145,20 @@ class RtspSource(GstPipelineSource):
                  self.cfg.url, self._codec, self._width, self._height)
 
     def reopen(self) -> None:
+        # RE-PROBE before rebuilding. reopen() otherwise reuses the codec/geometry resolved at
+        # open() -- but if the boot-time probe MISSED (camera still powering up -> config fallbacks)
+        # or the camera changed modes, a rebuild with stale parameters can never negotiate and the
+        # watchdog would reopen forever while the sensor stays dark. The old session is already torn
+        # down here, so the lightweight parsebin probe isn't contending with a live stream. A failed
+        # probe (camera still away) keeps the current parameters -- the backoff retry re-probes.
+        if getattr(self.cfg, "probe", True):
+            probed = _probe_rtsp(self.cfg.url, getattr(self.cfg, "protocols", ""))
+            if probed:
+                codec, w, h, _fps = probed
+                if (codec, w, h) != (self._codec, self._width, self._height):
+                    raise SourceConfigChanged(
+                        f"rtsp stream is now codec={codec} {w}x{h}, but the pipelines were built "
+                        f"for codec={self._codec} {self._width}x{self._height}")
         # The rebuilt pipeline restarts the PTS timeline, so drop the NTP extrapolation anchor (it's
         # keyed on the old PTS). The first frame after reconnect re-anchors from its RTCP->NTP meta.
         self._ntp_anchor = None

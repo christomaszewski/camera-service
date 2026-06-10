@@ -20,8 +20,11 @@ docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
   echo "=== outputs ==="
   ls -la /data/recordings/
   echo "=== decode FFV1 mkv (must reach EOS, no error) ==="
-  gst-launch-1.0 filesrc location=/data/recordings/usbfake-00000.mkv ! matroskademux ! avdec_ffv1 ! fakesink 2>&1 \
-    | grep -iE "error|got eos" | head -4
+  M=$(ls /data/recordings/usbfake-*-00000.mkv) || { echo "FAIL: no recording segment"; exit 1; }
+  gst-launch-1.0 filesrc location="$M" ! matroskademux ! avdec_ffv1 ! fakesink >/tmp/decode.log 2>&1 \
+    || { echo "FAIL: mkv decode errored"; tail -5 /tmp/decode.log; exit 1; }
+  grep -qi "got eos" /tmp/decode.log || { echo "FAIL: decode never reached EOS"; exit 1; }
+  echo "decode OK (EOS, no error)"
 '
 
 echo
@@ -34,12 +37,18 @@ docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
   CORE=$!
   sleep 5
   echo "-- consumers get DECODED I420 via the header endpoint --"
-  python3 tools/shm_probe.py --socket /tmp/cam/frames --count 3 --timeout 5 || true
+  python3 tools/shm_probe.py --socket /tmp/cam/frames --count 3 --timeout 5 \
+    || { echo "FAIL: header endpoint not delivering decoded frames"; exit 1; }
   kill -INT "$CORE"; wait "$CORE" 2>/dev/null || true; echo "core done"
   grep -iE "recorder: stream-copy|drop summary" /tmp/m.log | head -2
+  grep -q "recorder: stream-copy" /tmp/m.log || { echo "FAIL: auto did not pick stream-copy for MJPEG"; exit 1; }
   echo "-- recording is STREAM-COPIED MJPEG (demuxes as image/jpeg + decodes; NOT re-encoded) --"
-  gst-launch-1.0 filesrc location=/data/recordings/usbmjpeg-00000.mkv ! matroskademux ! jpegdec ! fakesink -v 2>&1 \
-    | grep -oE "image/jpeg|Got EOS" | sort -u | head
+  M=$(ls /data/recordings/usbmjpeg-*-00000.mkv) || { echo "FAIL: no recording segment"; exit 1; }
+  gst-launch-1.0 -v filesrc location="$M" ! matroskademux ! jpegdec ! fakesink >/tmp/decode.log 2>&1 \
+    || { echo "FAIL: mkv decode errored"; tail -5 /tmp/decode.log; exit 1; }
+  grep -q "image/jpeg" /tmp/decode.log || { echo "FAIL: recording is not MJPEG (stream-copy broken)"; exit 1; }
+  grep -qi "got eos" /tmp/decode.log || { echo "FAIL: decode never reached EOS"; exit 1; }
+  echo "stream-copy MJPEG decode OK"
 '
 
 echo
@@ -48,8 +57,16 @@ docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
   set -e
   mkdir -p /data/recordings /tmp/cam
   echo "=== fake USB COLOR (videotestsrc I420) producer (auto encoder should pick ffv1) ==="
-  timeout -s INT 6 python3 main.py -c config/usb-fake-color.yaml 2>&1 | grep -iE "recorder: encoder|drop summary" | head -3 || true
+  timeout -s INT 6 python3 main.py -c config/usb-fake-color.yaml >/tmp/c.log 2>&1 || true   # timeout(1) exits 124
+  grep -iE "recorder: encoder|drop summary" /tmp/c.log | head -3
+  grep -q "recorder: encoder=ffv1" /tmp/c.log || { echo "FAIL: auto did not pick ffv1 for a color source"; exit 1; }
   echo "=== recording stores I420 natively (NOT NV24/GRAY8 => no resample) + decodes ==="
-  gst-launch-1.0 filesrc location=/data/recordings/usbcolor-00000.mkv ! matroskademux ! avdec_ffv1 ! fakesink -v 2>&1 \
-    | grep -oE "format=\(string\)[A-Za-z0-9_]+|Got EOS" | sort -u | head
+  M=$(ls /data/recordings/usbcolor-*-00000.mkv) || { echo "FAIL: no recording segment"; exit 1; }
+  gst-launch-1.0 -v filesrc location="$M" ! matroskademux ! avdec_ffv1 ! fakesink >/tmp/decode.log 2>&1 \
+    || { echo "FAIL: mkv decode errored"; tail -5 /tmp/decode.log; exit 1; }
+  grep -oE "format=\(string\)[A-Za-z0-9_]+|Got EOS" /tmp/decode.log | sort -u | head
+  grep -q "format=(string)I420" /tmp/decode.log || { echo "FAIL: recording is not native I420"; exit 1; }
+  grep -qi "got eos" /tmp/decode.log || { echo "FAIL: decode never reached EOS"; exit 1; }
+  echo "color FFV1 native-I420 decode OK"
 '
+echo "PASS: usb_test"

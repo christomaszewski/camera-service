@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from cam_driver.config import parse_config, resolve_recording_dir  # noqa: E402
+from cam_driver.config import parse_config, resolve_recording_dir, unique_run_prefix  # noqa: E402
 from cam_driver.sources import make_source  # noqa: E402
 
 
@@ -35,8 +35,11 @@ def test_raw_endpoint_enable():
 
 
 def test_plugins_parsed_with_params():
+    # the documented shape: plugin-specific keys nest under `params:` (what every sensor
+    # config and tools/sensor_env.py use)
     c = parse_config({"plugins": [
-        {"name": "ros2-bridge", "enabled": True, "topic": "/cam/image", "frame_id": "camera"},
+        {"name": "ros2-bridge", "enabled": True,
+         "params": {"topic": "/cam/image", "frame_id": "camera"}},
         {"name": "mqtt", "enabled": False},
         {"no_name": "skipped"},
     ]})
@@ -44,6 +47,15 @@ def test_plugins_parsed_with_params():
     assert c.plugins[0].enabled is True
     assert c.plugins[0].params == {"topic": "/cam/image", "frame_id": "camera"}
     assert c.plugins[1].enabled is False
+
+
+def test_plugin_flat_extras_still_collected():
+    # bare top-level extras remain a fallback; an explicit `params:` map wins on collision
+    c = parse_config({"plugins": [
+        {"name": "ros2-bridge", "topic": "/flat", "extra": 1,
+         "params": {"topic": "/nested", "frame_id": "camera"}},
+    ]})
+    assert c.plugins[0].params == {"topic": "/nested", "frame_id": "camera", "extra": 1}
 
 
 def test_plugin_command_and_restart():
@@ -200,6 +212,24 @@ def test_resolve_recording_dir():
     assert R("/data/recordings", "", "cam_b") == "/data/recordings/cam_b"    # cam-up standalone: instance, no RDD
     assert R("/data/recordings", "/data", "") == "/data/recordings"          # RDD, no instance -> rooted, not namespaced
     assert R("/mnt/custom/rec", "/data", "cam_usb") == "/mnt/custom/rec"     # explicit pin -> untouched
+
+
+def test_unique_run_prefix():
+    # a restart must yield a fresh prefix (same-second restarts get a .N suffix, not a collision)
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        p1 = unique_run_prefix(d, "cam", _now=1700000000)
+        assert p1 == "cam-20231114-221320"                        # UTC stamp, deterministic for _now
+        open(os.path.join(d, f"{p1}-00000.mkv"), "w").close()     # simulate that run's outputs
+        open(os.path.join(d, f"{p1}.csv"), "w").close()
+        p2 = unique_run_prefix(d, "cam", _now=1700000000)         # crash loop inside the same second
+        assert p2 == f"{p1}.2"
+        open(os.path.join(d, f"{p2}.csv"), "w").close()
+        assert unique_run_prefix(d, "cam", _now=1700000000) == f"{p1}.3"
+        # a different second never collides with the old run
+        assert unique_run_prefix(d, "cam", _now=1700000001) == "cam-20231114-221321"
+    # output dir not created yet -> nothing to collide with
+    assert unique_run_prefix("/nonexistent-dir-for-test", "cam", _now=1700000000) == "cam-20231114-221320"
 
 
 def _main():

@@ -5,7 +5,7 @@
 # gracefully falls back to 'camera' (host realtime) -- you'll see that in the log.
 # Defaults: Mono8, 512x512, 25 fps. frame_id increments 1..65535.
 #
-# Run:  docker compose run --rm core-driver -c config/fake-camera.yaml
+# Run:  docker compose run --rm core-driver main.py -c config/fake-camera.yaml
 camera:
   type: gige
   frame_rate: 25.0
@@ -19,8 +19,10 @@ gige:
 
 recording:
   enabled: true
-  encoder: ffv1                  # CPU + robust for a first smoke test (no NVENC dependency).
-                                 # Switch to 'auto' / 'hw-hevc-lossless' to validate the NVENC path.
+  encoder: auto                  # 8-bit mono -> hw-hevc-lossless; on a host without NVENC (the
+                                 # cam-dev container, x86) the build-time probe logs a warning and
+                                 # falls back to ffv1 -- so this config exercises the capability
+                                 # fallback. On a Jetson it validates the real NVENC path.
   output_dir: /data/recordings
   name_prefix: fake
   segment_seconds: 30

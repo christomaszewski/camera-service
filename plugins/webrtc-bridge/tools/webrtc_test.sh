@@ -81,10 +81,11 @@ run_scenario "JP6 raw shm + mono (GRAY8 passthrough)" \
 
 # H.264 with an AUTO-derived level (the fix for the fixed-profile-level-id black tile). Pinning
 # VIDEO_CAPS=video/x-h264 forces the H.264 codec so the level/profile path is exercised; the bridge
-# derives the level from the streamed resolution (512x512@25 -> level 3) and pins it on the encoder
-# output so the SDP profile-level-id matches the stream. BOTH profiles must stay green: the default
-# (constrained-baseline, pinned in caps) and `high` (level pinned in caps; profile set on the encoder,
-# x264enc falls back to its native profile).
+# derives the level from the streamed resolution (512x512@25 -> level 3) and pins it (+ profile
+# constrained-baseline, the one webrtcsink itself forces at discovery) on the encoder output so the
+# SDP profile-level-id matches the stream. BOTH knob values must stay green: the default
+# (constrained-baseline) and `high`, which must WARN + fall back to constrained-baseline without
+# breaking the stream (webrtcsink rejects any other profile for raw input -- see bridge_stream.py).
 run_scenario "H.264 auto-level, constrained-baseline" \
   config/webrtc-fake.yaml \
   -e CAM_PLATFORM=jp6 -e CAM_SHM_SOCKET=/tmp/cam/raw \
@@ -92,7 +93,7 @@ run_scenario "H.264 auto-level, constrained-baseline" \
   -e VIDEO_CAPS=video/x-h264 -e CAM_WEBRTC_PROFILE=constrained-baseline \
   || FAILED=1
 
-run_scenario "H.264 auto-level, high (profile opt-in)" \
+run_scenario "H.264 auto-level, high (warns + falls back to constrained-baseline)" \
   config/webrtc-fake.yaml \
   -e CAM_PLATFORM=jp6 -e CAM_SHM_SOCKET=/tmp/cam/raw \
   -e CAM_WIDTH=512 -e CAM_HEIGHT=512 -e CAM_FORMAT=GRAY8 -e CAM_FPS=25 \

@@ -58,11 +58,11 @@ def main() -> int:
         for i in range(n_in):
             f.write(random.Random(i).randbytes(IMG))
 
-    for argv in (encode_argv(), decode_argv()):
+    for stage, argv in (("encode", encode_argv()), ("decode", decode_argv())):
         r = subprocess.run(argv, stderr=subprocess.STDOUT, stdout=subprocess.PIPE, text=True)
         if r.returncode != 0:
             print(r.stdout)
-            print(f"FAIL: gst-launch exited {r.returncode} ({'encode' if argv is encode_argv() else 'decode'})")
+            print(f"FAIL: gst-launch exited {r.returncode} ({stage})")
             return 1
 
     n_out = os.path.getsize(OUT) // IMG

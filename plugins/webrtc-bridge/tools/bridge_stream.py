@@ -47,15 +47,22 @@ _H264_PROFILES = ("constrained-baseline", "high")
 
 
 def webrtc_profile():
-    """H.264 encode profile (config knob CAM_WEBRTC_PROFILE): constrained-baseline (DEFAULT -- universal
-    HW decode, lowest latency) | high (~15-25% smaller at equal quality with B-frames off; decodes on
-    modern Chrome/Safari, dicey on Firefox/old clients). An unknown value warns + falls back to the safe
-    default. (main is omitted: its only win is B-frames, which we disable for live.)"""
+    """H.264 encode profile (config knob CAM_WEBRTC_PROFILE) -- effectively ALWAYS constrained-baseline.
+    webrtcsink hard-pins profile=constrained-baseline on its internal parser filter whenever it encodes
+    raw input (utils.rs parser_caps(force_profile=true); initial discovery passes output_caps=ANY --
+    unchanged through gst-plugins-rs 0.15), so a stream in any OTHER profile fails caps negotiation
+    inside webrtcsink. Verified on-device: forcing nvv4l2h264enc's `profile` property to High made
+    h264parse re-expose profile=high behind that filter -> not-negotiated -> discovery died with
+    "No caps found for stream video_0". So `high` warns + falls back; the knob survives for the day
+    upstream honors a requested profile. Unknown values warn + fall back likewise."""
     p = (_env("CAM_WEBRTC_PROFILE", "constrained-baseline") or "").strip().lower()
-    if p not in _H264_PROFILES:
+    if p == "high":
+        log.warning("CAM_WEBRTC_PROFILE=high: this webrtcsink forces constrained-baseline for raw input "
+                    "at codec discovery; using constrained-baseline (encoder choice -- x264enc vs NVENC "
+                    "-- is unaffected)")
+    elif p not in _H264_PROFILES:
         log.warning("CAM_WEBRTC_PROFILE=%r not in %s; using constrained-baseline", p, list(_H264_PROFILES))
-        return "constrained-baseline"
-    return p
+    return "constrained-baseline"
 
 
 def webrtc_max_level():
@@ -214,13 +221,14 @@ def _negotiated_caps(el, which):
             return None
 
 
-def _configure_live_encoder(encoder, profile):
-    """Force B-frames OFF (real-time -- the `high` profile would otherwise permit them) + a low-latency
-    tune, DEFENSIVELY across encoders (x264enc / nvv4l2h264enc / openh264enc): only sets properties that
-    exist, so it's a no-op on a non-H.264 encoder. The PROFILE is set here on the encoder (nvv4l2h264enc
-    `profile` property) -- this is the ONLY way `high` takes effect, since pinning profile=high in the
-    output caps breaks webrtcsink's discovery on the software x264enc (which has no profile property and so
-    keeps its native constrained-baseline)."""
+def _configure_live_encoder(encoder):
+    """Force B-frames OFF (real-time) + a low-latency tune, DEFENSIVELY across encoders (x264enc /
+    nvv4l2h264enc / openh264enc): only sets properties that exist, so it's a no-op on a non-H.264
+    encoder. Deliberately does NOT touch the encoder's `profile`: the bitstream profile is negotiated
+    from the downstream caps (webrtcsink's parser filter pins constrained-baseline -- see
+    webrtc_profile), and forcing a DIFFERENT profile on the element makes the SPS contradict those
+    caps (h264parse re-parses the real profile) -> not-negotiated -> webrtcsink discovery dies.
+    Hit exactly this on-device the first time nvv4l2h264enc was actually reachable."""
     fac = encoder.get_factory()
     name = fac.get_name() if fac is not None else "?"
     done = []
@@ -248,8 +256,7 @@ def _configure_live_encoder(encoder, profile):
             log.debug("x264enc tune set failed: %s", e)
     elif name == "nvv4l2h264enc":
         setp("maxperf-enable", True)
-        setp("insert-sps-pps", True)
-        setp("profile", {"high": 4, "main": 2}.get(profile, 0))   # 0=Baseline covers constrained-baseline
+        setp("insert-sps-pps", True)                  # mid-stream joiners get SPS/PPS at every IDR
     log.info("encoder-setup: %s -> %s", name, ", ".join(done) or "(no matching low-latency props)")
 
 
@@ -279,7 +286,7 @@ class Bridge:
                 log.info("webrtcsink meta name=%s", pid)
             except Exception as e:
                 log.warning("could not set webrtcsink meta: %s", e)
-            # H.264: pin the profile (config) + the derived MINIMUM level on the encoder output, per
+            # H.264: pin the profile + the derived MINIMUM level on the encoder output, per
             # consumer, so the payloader's profile-level-id matches the actual stream (no more fixed
             # 42e01f -> out-of-level black tile). encoder-setup also forces B-frames off for live.
             try:
@@ -351,7 +358,7 @@ class Bridge:
         return None
 
     def _h264_output_caps(self):
-        """The forced H.264 output caps string (profile from config + level derived from the encode
+        """The forced H.264 output caps string (constrained-baseline + level derived from the encode
         resolution), computed once and cached. Returns None -- leaving webrtcsink's defaults -- when the
         geometry can't yet be read (retried on the next call, so a later consumer still gets it)."""
         if self._h264_caps_str:
@@ -371,25 +378,20 @@ class Bridge:
         if not level_covers(level, w, h, fps):
             log.warning("h264: %dx%d@%d needs a level above the clamp %s -- the stream may not decode; "
                         "lower the resolution or raise CAM_WEBRTC_MAX_LEVEL", w, h, fps, maxlvl)
-        # The LEVEL is always pinned in the output caps -> the payloader's profile-level-id matches the
-        # stream (the bug fix). The PROFILE is trickier: pinning profile=constrained-baseline (the default
-        # and the software x264enc's native profile) in the caps is verified-safe, but pinning profile=high
-        # makes webrtcsink's discovery negotiation fail on x264enc ("no caps found"). So for `high` we pin
-        # ONLY the level in the caps and set the profile on the ENCODER instead (nvv4l2h264enc profile
-        # property, in encoder-setup) where it's supported; x264enc keeps its native profile. Either way
-        # the advertised profile reflects what the encoder actually produced.
-        if profile == "high":
-            self._h264_caps_str = "video/x-h264,level=(string){}".format(level)
-        else:
-            self._h264_caps_str = "video/x-h264,profile=constrained-baseline,level=(string){}".format(level)
-        log.info("h264 encode: profile=%s(req) level=%s for %dx%d@%d (from %s) -> caps %s",
+        # Pin BOTH fields: the derived LEVEL, so the payloader's profile-level-id matches the stream
+        # (the fixed-42e01f black-tile fix), and profile=constrained-baseline -- the same profile
+        # webrtcsink itself forces on its parser filter for raw input (see webrtc_profile), so this pin
+        # can never conflict. Verified-safe on x264enc AND nvv4l2h264enc (the v4l2 encoder negotiates
+        # its profile/level V4L2 controls straight from these downstream caps).
+        self._h264_caps_str = "video/x-h264,profile={},level=(string){}".format(profile, level)
+        log.info("h264 encode: profile=%s level=%s for %dx%d@%d (from %s) -> caps %s",
                  profile, level, w, h, fps, src, self._h264_caps_str)
         return self._h264_caps_str
 
     def _on_request_encoded_filter(self, _sink, consumer_id, codec_name, caps):
-        """webrtcsink: a filter inserted AFTER the encoder, BEFORE the payloader. For H.264 we pin the
-        derived level (+ profile for the default constrained-baseline) here, so the payloader emits a
-        matching profile-level-id. See _h264_output_caps for why `high` pins level only."""
+        """webrtcsink: a filter inserted AFTER the encoder, BEFORE the payloader. For H.264 we pin
+        constrained-baseline + the derived level here, so the payloader emits a
+        matching profile-level-id. See webrtc_profile for why the profile is always constrained-baseline."""
         log.debug("request-encoded-filter: consumer=%r codec=%r caps=%s",
                   consumer_id, codec_name, caps.to_string() if caps is not None else None)
         # Apply during BOTH discovery (consumer_id None) AND per-consumer: discovery builds the SDP from
@@ -410,7 +412,7 @@ class Bridge:
         """webrtcsink: configure the per-consumer encoder -- force B-frames OFF + low-latency for live.
         Return False so webrtcsink still layers its own bitrate / congestion-control defaults on top."""
         try:
-            _configure_live_encoder(encoder, webrtc_profile())
+            _configure_live_encoder(encoder)
         except Exception as e:                        # noqa: BLE001 -- never break the video path
             log.warning("encoder-setup failed: %s", e)
         return False

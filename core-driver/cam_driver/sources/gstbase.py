@@ -131,9 +131,11 @@ class GstPipelineSource(Source):
     def reopen(self) -> None:
         """Rebuild the mini-pipeline from scratch (NULL -> re-parse -> reattach the stamp probe). For
         RTSP this re-runs DESCRIBE/SETUP/PLAY on a FRESH session -- the reliable way to clear a camera's
-        stalled stream. Reuses the codec/geometry resolved at open() (NO second discoverer probe, which
-        would add another contended connection on an already-struggling camera). The caller re-arms via
-        start(). Raises (caught by the pipeline's backoff loop) only if re-parse fails."""
+        stalled stream. Reuses the codec/geometry resolved at open(); RtspSource overrides this to
+        re-probe first and raise SourceConfigChanged when the stream no longer matches what the
+        pipelines were built for (the probe runs while the old session is torn down, so it doesn't
+        contend with a live stream). The caller re-arms via start(). Raises (caught by the pipeline's
+        backoff loop) if re-parse fails."""
         self.stop()
         self.configure()
 

@@ -5,11 +5,11 @@
 #
 # Prereq:  docker build -f tools/gvsp-chunk-emitter/Dockerfile -t cam-chunks .
 # Run:     ./tools/gvsp-chunk-emitter/gvsp_test.sh
-set -u
+set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 
 docker run --rm -v "$REPO/core-driver:/app" -v "$REPO/tools/gvsp-chunk-emitter:/t" cam-chunks bash -c '
-  set -e
+  set -eo pipefail
   echo "== unit tests =="
   python3 tests/test_timestamps.py | tail -1
   python3 tests/test_transport.py  | tail -1
@@ -26,11 +26,18 @@ docker run --rm -v "$REPO/core-driver:/app" -v "$REPO/tools/gvsp-chunk-emitter:/
   CORE=$!
   sleep 6
   kill -INT "$CORE"; wait "$CORE" 2>/dev/null || true
-  grep -iE "chunk mode enabled|Active timestamp" /tmp/core.log | head -2
+  grep -iE "chunk mode enabled|Active timestamp" /tmp/core.log | head -2 || true
+  grep -qi "chunk mode enabled" /tmp/core.log || { echo "FAIL: chunk mode never engaged"; exit 1; }
   echo "-- sidecar CSV (frame_id, ..., chunk_ns, camera_ns, system_ns) --"
-  head -3 /data/recordings/gvsp.csv
-  echo "-- ptp provenance --"; grep -E "timestamp_source|ptp_synced" /data/recordings/gvsp.json
+  CSV=$(ls /data/recordings/gvsp-*.csv) || { echo "FAIL: no sidecar CSV"; exit 1; }
+  head -3 "$CSV"
+  [ "$(wc -l < "$CSV")" -gt 1 ] || { echo "FAIL: sidecar CSV has no frame rows"; exit 1; }
+  echo "-- ptp provenance --"; grep -E "timestamp_source|ptp_synced" /data/recordings/gvsp-*.json
   echo "-- lossless mkv decodes --"
-  gst-launch-1.0 filesrc location=$(ls /data/recordings/gvsp-*.mkv | head -1) ! \
-    matroskademux ! avdec_ffv1 ! fakesink 2>&1 | grep -iE "error|got eos" | head -1
+  M=$(ls /data/recordings/gvsp-*-00000.mkv) || { echo "FAIL: no recording segment"; exit 1; }
+  gst-launch-1.0 filesrc location="$M" ! matroskademux ! avdec_ffv1 ! fakesink >/tmp/decode.log 2>&1 \
+    || { echo "FAIL: mkv decode errored"; tail -5 /tmp/decode.log; exit 1; }
+  grep -qi "got eos" /tmp/decode.log || { echo "FAIL: decode never reached EOS"; exit 1; }
+  echo "decode OK (EOS, no error)"
 '
+echo "PASS: gvsp chunk extraction + recording"

@@ -64,8 +64,16 @@ def main() -> int:
         pipe.set_state(Gst.State.NULL)
 
     print(f"read {n} frame(s)")
-    return 0 if n > 0 else 1
+    if n < args.count:
+        # The test scripts lean on this as their binding transport assertion: reading fewer
+        # frames than asked (producer wedged after one frame, stalled endpoint) must FAIL.
+        print(f"FAIL: expected {args.count} frame(s), got {n}")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:   # long-running probe stopped by the supervisor's SIGINT
+        sys.exit(130)

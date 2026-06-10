@@ -8,12 +8,15 @@ file plus ROADMAP.md should get you oriented without re-deriving anything.
 ## Goal & context
 
 A **multi-source camera service** on **GStreamer**, deployed on **NVIDIA Jetson** (AGX Orin on
-JetPack 6 or 7; also Thor). Capture sources are pluggable behind a `Source` interface: **GigE
-Vision (GVSP, via Aravis)** is the validated source today, and a **USB/v4l2** source is scaffolded
-behind the same seam (real-device color/decode + device mgmt in progress). It must: extract
-**per-frame hardware timestamps** (PTP/chunk on GigE) so we record true sensor-capture time
-(not arrival time, which carries network + processing latency/jitter); record **losslessly with
-temporal compression**; and **distribute** frames to consumer "plugins" (ROS2, WebRTC, MQTT, …).
+JetPack 6 or 7; also Thor). Capture sources are pluggable behind a `Source` interface, and three
+are implemented: **GigE Vision (GVSP, via Aravis)** with PTP/chunk timestamps (protocol-validated
+against a chunk-emitting GVSP fake; real-camera PTP is the remaining hardware step), **USB/v4l2**
+(raw or MJPEG/H.264 stream-copy, hotplug reconnect — Orin-validated), and **RTSP** (probe-on-open
+self-configuration, stream-copy, RTCP→NTP timestamps — Orin-validated against a real 4K H.265
+camera). It must: extract **per-frame hardware timestamps** (PTP/chunk on GigE, v4l2 SOF on USB,
+RTCP→NTP on RTSP) so we record true sensor-capture time (not arrival time, which carries network +
+processing latency/jitter); record **losslessly with temporal compression** (stream-copying
+already-encoded delivery verbatim); and **distribute** frames to consumer "plugins" (ROS2, WebRTC, MQTT, …).
 Dev happens on macOS; everything actually runs on the Jetson in Docker (and in CI-style container
 tests — see ROADMAP).
 
@@ -31,9 +34,11 @@ tests — see ROADMAP).
    per-frame timestamp policy, feeder) and delivers each frame to the shared pipeline as
    `(FrameStamp, image_bytes)` via one callback — so everything downstream (appsrc → tee → recorder /
    transport / preview / discovery) is source-agnostic and every source shares the *same*
-   timestamp-provenance, recording, and distribution path. GigE Vision (Aravis) is the validated
-   source; a USB/v4l2 source (`v4l2src`/`videotestsrc` → appsink → the same callback) is scaffolded
-   behind the seam. `source.type` (default `gige`) selects it.
+   timestamp-provenance, recording, and distribution path. Three sources sit behind the seam:
+   **gige** (the Aravis feeder), and the `GstPipelineSource`-based **usb** (`v4l2src`) and **rtsp**
+   (`rtspsrc`) — both of which are *dual-output* for encoded delivery: the recorder stream-copies the
+   delivered MJPEG/H.264/H.265 verbatim while a parallel decode branch feeds raw frames to consumers.
+   `camera.type` (default `gige`) selects the frontend.
 
 ## Pipeline
 
@@ -42,7 +47,7 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
                        │ (custom appsrc, ~Python)
                        ▼
                      appsrc ─► tee ─┬─► recorder (lossless, temporal) ─► splitmuxsink .mkv + .csv/.json
-                                    ├─► shm publish (application/x-cam-frame header endpoint) ─► plugins
+                                    ├─► plugin transport (JP7: unixfd · JP6: shm + x-cam-frame header) ─► plugins
                                     ├─► (optional) raw video/x-raw shm endpoint ─► generic tools
                                     └─► webrtcsink (lossy, low-latency) ─► remote viewers
 ```
@@ -67,8 +72,12 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
   temporal P/B frames) is **8-bit only**. For 10/12-bit you go CPU: `x265 --lossless` (temporal,
   throughput-limited at 4K) or **FFV1** (lossless, high-bit-depth, but **intra-only**). The recorder
   is therefore **pluggable/auto-selecting**: 8-bit → HW HEVC-lossless (default), >8-bit → FFV1, with
-  x265 as an explicit option. A mono/Bayer mosaic rides in the Y plane of NV24; the Bayer pattern is
-  recorded in the sidecar for post-debayer.
+  x265 as an explicit (8-bit-only) CPU-temporal option. Encoder elements are **probed at build time**:
+  a missing NVENC (x86 dev box, container without the L4T stack) falls back to FFV1 with a warning
+  instead of failing the pipeline, and >8-bit through x265 falls back to FFV1 rather than silently
+  dropping sensor bits. A mono/Bayer mosaic rides in the Y plane of NV24; the Bayer pattern is
+  recorded in the sidecar for post-debayer. (NVENC lossless validated bit-exact on a JP7.2 Orin AGX —
+  see [jetpack7-bringup.md](jetpack7-bringup.md).)
 
 - **Transport = shm + a 36-byte header (`application/x-cam-frame`).** GStreamer's `shmsink`/`shmsrc`
   transmit **only raw bytes** — PTS, DTS, and all `GstMeta` are dropped across the process boundary
@@ -78,9 +87,12 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
   That's an inherent shm limitation (a generic consumer would get arrival-time anyway), so: our
   plugins know the header; for generic tools there's an **optional clean `video/x-raw` shm endpoint**;
   and the real interop surface is the **egress layer** (WebRTC / Zenoh), not raw shm. The clean
-  "standard payload + metadata together" only arrives with **`unixfd`** (GStreamer ≥1.24 — i.e. JP7, now
-  runnable on the Orin via JP7.2)
-  or **Zenoh attachments** — the transport is a swappable sink so that upgrade is localized.
+  "standard payload + metadata together" **shipped with `unixfd`** (GStreamer ≥1.24): on JP7 the
+  plugin endpoint is a `unixfdsink` carrying native caps with `frame_id`/capture-ns in the buffer
+  fields, and it **replaces** the header endpoint there — `pipeline.build()` probes for `unixfdsink`
+  and picks per host, JP6 keeps shm+header (implemented + validated 2026-06-04; see
+  [unixfd-migration.md](unixfd-migration.md)). **Zenoh attachments** remain the future network-capable
+  step — the transport is a swappable sink so that upgrade stays localized.
 
 - **Language: Python core + C++ ROS2 bridge.** GStreamer is C; you build/control pipelines from any
   binding. Standard elements run in C regardless of host language; only `appsrc`/`appsink`/pad probes
