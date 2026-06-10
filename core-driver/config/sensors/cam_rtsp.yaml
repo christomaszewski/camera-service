@@ -7,7 +7,11 @@ name: cam_rtsp
 
 camera:
   type: rtsp
-  # frame_rate is auto-probed (informational); reconnect (on by default, 5s) recovers a stalled stream.
+  # frame_rate is auto-probed (informational); reconnect (on by default) recovers a stalled stream.
+  reconnect_timeout_s: 10  # ZR30's live555 session hiccups with ~6 s output gaps every few minutes;
+  #                          a 5 s timeout turns each into a full reopen (and every reopen joins
+  #                          mid-GOP -> decoder waits/conceals until the next IDR, ~15-20 s away).
+  #                          10 s rides the gaps out as a brief freeze instead.
 
 rtsp:
   url: rtsp://10.160.1.80:8554/main.264
@@ -59,6 +63,12 @@ plugins:
       fps: 25
       # 4K needs more than webrtcsink's 8 Mbps default ceiling -- raise it (generic UPPERCASE env passthrough):
       CAM_WEBRTC_MAX_BITRATE: 20000000
+      # The deployed bridge image is MISSING the rtpgccbwe element (gst-plugins-rs "rtp" plugin), so
+      # webrtcsink's congestion control never runs and each consumer's encoder PARKS at start-bitrate
+      # (element default 2 Mbps -> visible re-encode artifacts). Until rtpgccbwe is added to the image,
+      # disable CC explicitly and pin a sane fixed rate for the LAN dashboard:
+      CAM_WEBRTC_CONGESTION: disabled
+      CAM_WEBRTC_START_BITRATE: 6000000
       # HW NVENC H.264 for the Chrome operator dashboard: VIDEO_CAPS pins H.264 (universal browser decode);
       # GST_PLUGIN_FEATURE_RANK forces nvv4l2h264enc over CPU x264enc, freeing the CPU at 4K. The element
       # exists in the bridge container via the platform grant (JP7: CDI device in docker-compose.jp7.yml,

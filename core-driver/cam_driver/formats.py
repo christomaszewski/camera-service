@@ -82,6 +82,14 @@ def select_decoder(sw_decoder, hw_available=False, mode="auto"):
         mode = "auto"
     if mode != "software" and hw_available and sw_decoder in _HW_DECODER:
         return _HW_DECODER[sw_decoder]
+    if sw_decoder.startswith("avdec_"):
+        # Drop concealment frames instead of showing them: when avdec joins a stream mid-GOP (every
+        # source reopen on a long-GOP camera), it conceals from missing references -- full-frame
+        # color garbage for up to a GOP until the next IDR. Discarding corrupt frames trades that
+        # for a brief freeze on the last good frame. Both knobs exist on all gst-libav video
+        # decoders (output-corrupt = let libav emit corrupt frames; discard-corrupted-frames =
+        # drop error-flagged frames at the gst layer).
+        return f"{sw_decoder} output-corrupt=false discard-corrupted-frames=true", "videoconvert"
     return sw_decoder, "videoconvert"
 
 
