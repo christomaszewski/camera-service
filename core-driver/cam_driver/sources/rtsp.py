@@ -166,7 +166,8 @@ class RtspSource(GstPipelineSource):
 
     def _pipeline_desc(self) -> str:
         caps, parser, sw_decoder = self._enc
-        decoder, conv = select_decoder(sw_decoder, self._hw_decode_available())
+        decoder, conv = select_decoder(
+            sw_decoder, self._hw_decode_available(), getattr(self.cfg, "decoder", "auto"))
         w, h = self._width, self._height
         log.info("rtsp decode branch: %s ! %s (%s)", decoder, conv,
                  "HW NVDEC" if decoder == "nvv4l2decoder" else "software")

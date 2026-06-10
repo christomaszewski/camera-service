@@ -133,14 +133,17 @@ def test_rtsp_config_defaults():
     r = parse_config({}).rtsp
     assert (r.codec, r.latency_ms) == ("h264", 200) and r.url.startswith("rtsp://")
     assert r.probe is True        # self-configure from the live stream by default
+    assert r.decoder == "auto"    # HW when present unless explicitly forced to software
 
 
 def test_rtsp_block_parsed():
     c = parse_config({"camera": {"type": "rtsp"},
-                      "rtsp": {"url": "rtsp://x/y", "codec": "mjpeg", "probe": False, "protocols": "tcp"}})
+                      "rtsp": {"url": "rtsp://x/y", "codec": "mjpeg", "probe": False, "protocols": "tcp",
+                               "decoder": "software"}})
     assert c.camera.type == "rtsp"
     assert (c.rtsp.url, c.rtsp.codec, c.rtsp.protocols) == ("rtsp://x/y", "mjpeg", "tcp")
     assert c.rtsp.probe is False
+    assert c.rtsp.decoder == "software"
 
 
 # ---- general -> source overlay (the symmetric schema's key behaviour) --------

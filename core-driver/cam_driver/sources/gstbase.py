@@ -48,6 +48,14 @@ class GstPipelineSource(Source):
         self._last_data_ns = 0       # arrival of the most recent frame (set in _new_stamp); 0 = none yet
         self._start_ns = 0           # when the current capture attempt began (start())
         self._started = False
+        # Decode-wedge detection (encoded sources): compressed AUs arriving pre-tee while the decode
+        # branch delivers nothing is a DECODER failure, not a link failure -- e.g. NVDEC waiting for a
+        # keyframe a no-IDR/intra-refresh camera (SIYI ZR30) never sends. Without this, the liveness
+        # watchdog masks it as an endless reconnect loop. Counters are sampled in reopen().
+        self._raw_delivered = 0          # frames the decode branch handed to _on_raw, ever
+        self._reopen_frame_mark = 0      # _frame_id at the last reopen() sample
+        self._reopen_raw_mark = 0        # _raw_delivered at the last reopen() sample
+        self._decode_dead_cycles = 0     # consecutive reopens with AUs in but 0 decoded out
 
     # ---- subclass hook -----------------------------------------------------
     def _pipeline_desc(self) -> str:
@@ -136,8 +144,31 @@ class GstPipelineSource(Source):
         pipelines were built for (the probe runs while the old session is torn down, so it doesn't
         contend with a live stream). The caller re-arms via start(). Raises (caught by the pipeline's
         backoff loop) if re-parse fails."""
+        self._note_decode_health()
         self.stop()
         self.configure()
+
+    def _note_decode_health(self) -> None:
+        """Called per reopen: if compressed frames arrived (pre-tee) but the decode branch delivered
+        nothing, the reconnect isn't fixing anything -- the DECODER is wedged. Say so, loudly, with
+        the fix, instead of letting the liveness loop mask it as a flaky link."""
+        if self.encoded_caps is None:
+            return  # raw source: pre-tee frames ARE rawsink deliveries; nothing to compare
+        frames_in = self._frame_id - self._reopen_frame_mark
+        raw_out = self._raw_delivered - self._reopen_raw_mark
+        self._reopen_frame_mark = self._frame_id
+        self._reopen_raw_mark = self._raw_delivered
+        if frames_in > 0 and raw_out == 0:
+            self._decode_dead_cycles += 1
+            if self._decode_dead_cycles >= 3:
+                log.error(
+                    "decode branch wedged: %d compressed frame(s) in, 0 decoded out, %d reopens in a row "
+                    "-- the decoder is not producing (e.g. HW NVDEC waiting for a keyframe on a "
+                    "no-IDR/intra-refresh stream). Reconnecting won't fix this; set `decoder: software` "
+                    "in the source block to use the software decoder.",
+                    frames_in, self._decode_dead_cycles)
+        elif raw_out > 0:
+            self._decode_dead_cycles = 0
 
     def _pts_to_realtime(self, pts):
         """Map a buffer running-time PTS to CLOCK_REALTIME ns via the live pipeline-clock offset (the
@@ -207,6 +238,7 @@ class GstPipelineSource(Source):
         buf = sample.get_buffer()
         # encoded: correlate with the pre-tee stamp (carries the NTP meta); raw: stamp this buffer
         stamp = self._stamp_for(buf) if self.encoded_caps is not None else self._new_stamp(buf)
+        self._raw_delivered += 1
         data = buf.extract_dup(0, buf.get_size())
         if self._on_frame is not None:
             self._on_frame(stamp, data)

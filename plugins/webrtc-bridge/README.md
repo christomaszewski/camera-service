@@ -167,10 +167,15 @@ Brings up a `rmw_zenohd` router + core + bridge, and a Zenoh probe
   live either way. (Applied by the Python launcher via `webrtcsink`'s `encoder-setup` /
   `request-encoded-filter` signals; the `CAM_LAUNCHER=gst-launch` hatch keeps `webrtcsink`'s fixed
   defaults.)
-- **Adaptive bitrate / quality ceiling:** `webrtcsink` runs Google Congestion Control (`gcc`) and scales
-  the encoder bitrate to each viewer's link automatically — nothing to enable. The bounds are optional
-  env knobs (bit/sec): `CAM_WEBRTC_MIN_BITRATE` / `CAM_WEBRTC_MAX_BITRATE` / `CAM_WEBRTC_START_BITRATE`,
-  plus `CAM_WEBRTC_CONGESTION` (`gcc`|`homegrown`|`disabled`). The element default `max-bitrate` is 8 Mbps,
+- **Adaptive bitrate / quality ceiling:** `webrtcsink` wants to run Google Congestion Control (`gcc`)
+  and scale the encoder bitrate per viewer. ⚠️ **The current image does NOT ship the `rtpgccbwe`
+  element** (it lives in the gst-plugins-rs `rtp` plugin, which the Dockerfile doesn't build) —
+  webrtcsink warns `Failed to find element factory ... rtpgccbwe` and **parks every consumer's
+  encoder at `start-bitrate` (element default 2 Mbps — visibly blocky at 1080p+)**. Until the image
+  grows the rtp plugin, set `CAM_WEBRTC_CONGESTION=disabled` + `CAM_WEBRTC_START_BITRATE=<bps>` to
+  pin an honest fixed rate (fine on a LAN). The bounds knobs (bit/sec):
+  `CAM_WEBRTC_MIN_BITRATE` / `CAM_WEBRTC_MAX_BITRATE` / `CAM_WEBRTC_START_BITRATE`, plus
+  `CAM_WEBRTC_CONGESTION` (`gcc`|`homegrown`|`disabled`). The element default `max-bitrate` is 8 Mbps,
   which caps quality on a fast link at high res — raise `CAM_WEBRTC_MAX_BITRATE` (e.g. `20000000`) for 4K.
 - **5MP color is CPU-heavy.** `bayer2rgb` + `videoconvert` + (software) encode at 2448×2048 is a load;
   the `leaky=downstream` queue drops to the newest frame under pressure (correct for a live preview).

@@ -66,7 +66,7 @@ def test_select_encoder_encoded_is_stream_copy():
 
 def test_select_decoder_software_default():
     # no HW -> per-codec software decoder + CPU videoconvert (dev/x86/JP6-no-NVDEC)
-    assert select_decoder("avdec_h264") == ("avdec_h264", "videoconvert")
+    assert select_decoder("avdec_h264") == ("avdec_h264 output-corrupt=false discard-corrupted-frames=true", "videoconvert")
     assert select_decoder("jpegdec", hw_available=False) == ("jpegdec", "videoconvert")
 
 
@@ -84,7 +84,19 @@ def test_select_decoder_mjpeg_stays_software():
 
 def test_select_decoder_unknown_codec_stays_software():
     # a codec with no HW mapping falls back to software even when HW is available
-    assert select_decoder("avdec_vp8", hw_available=True) == ("avdec_vp8", "videoconvert")
+    assert select_decoder("avdec_vp8", hw_available=True) == ("avdec_vp8 output-corrupt=false discard-corrupted-frames=true", "videoconvert")
+
+
+def test_select_decoder_software_mode_overrides_hw():
+    # decoder: software forces avdec even with NVDEC present -- for streams HW decode can't
+    # start on (no-IDR/intra-refresh cameras, e.g. SIYI ZR30 live RTSP H.265)
+    assert select_decoder("avdec_h265", hw_available=True, mode="software") == ("avdec_h265 output-corrupt=false discard-corrupted-frames=true", "videoconvert")
+    assert select_decoder("avdec_h264", hw_available=True, mode="software") == ("avdec_h264 output-corrupt=false discard-corrupted-frames=true", "videoconvert")
+
+
+def test_select_decoder_unknown_mode_falls_back_to_auto():
+    assert select_decoder("avdec_h265", hw_available=True, mode="nonsense") == ("nvv4l2decoder", "nvvidconv")
+    assert select_decoder("avdec_h265", hw_available=False, mode="nonsense") == ("avdec_h265 output-corrupt=false discard-corrupted-frames=true", "videoconvert")
 
 
 def _main():
