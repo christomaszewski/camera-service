@@ -1,0 +1,94 @@
+# Real GigE Vision camera (GVSP via Aravis) with BOTH bridges enabled — and the full timestamp
+# spine wired: chunk-mode per-frame ChunkTimestamp/ChunkFrameID with PTP discipline, all three
+# candidate stamps (chunk/camera/system) logged per frame to the sidecar CSV. This is the config
+# for the PTP experiment (docs/ptp-timestamp-experiment.md).
+#   ros2-bridge   -> publishes /cam_gige/image_raw (mono8; a Bayer camera is labeled bayer_*8)
+#   webrtc-bridge -> serves a live preview over WebRTC (signalling on :8447)
+# Run:  cam-up config/sensors/cam_gige.yaml up -d   (Orin = JP7 -> unixfd transport + HW NVENC record)
+#
+# Host prep (once, per the README):
+#   sudo ip link set <cam-iface> mtu 9000          # jumbo frames (>= gige.packet_size below)
+#   sudo sysctl -w net.core.rmem_max=33554432
+#   sudo ptp4l -i <cam-iface> -m  &&  sudo phc2sys -a -r    # PTP grandmaster the camera slaves to
+# Find the camera + its feature names:
+#   arv-tool-0.8                                   # lists devices as "<Vendor>-<serial>"
+#   arv-tool-0.8 features | grep -iE "chunk|1588|Ptp"       # chunk/PTP node names (vary per vendor)
+service: camera-service
+name: cam_gige
+
+camera:
+  type: gige
+  frame_rate: 25.0         # requested on the camera (AcquisitionFrameRate); also pins the pipeline caps
+  # reconnect is on by default: Aravis control-lost / no-frame watchdog -> backoff reopen while the
+  # pipeline (and the recording) stays up. reconnect_timeout_s: 5.0 is the no-data trip point.
+
+gige:
+  camera_id: null          # null = first camera found; pin a serial for multi-camera ("Vendor-12345678")
+  pixel_format: Mono8      # Mono8 / Bayer*8 = the full HW NVENC lossless path. Mono16/Bayer*16 records
+  #                          FFV1 (lossless, intra-only). Packed formats (Mono10p/12Packed) unsupported.
+  packet_size: 9000        # GVSP packet size; host NIC MTU must be >= this
+  # packet_delay: 20000    # ns between packets -- stagger cameras sharing one NIC (bandwidth headroom)
+  n_stream_buffers: 20
+  # roi:                   # optional sensor crop; defaults to the full frame
+  #   x: 0
+  #   y: 0
+  #   width: 2448
+  #   height: 2048
+
+  # Timestamp policy: chunk-mode PTP capture time, with the provenance-tracked fallback ladder
+  # (ptp_chunk -> camera clock -> host arrival). PTP lock state is recorded as `ptp_synced` in the
+  # sidecar header -- the chunk stamp is used whenever chunk data arrives; lock is provenance.
+  timestamp_source: ptp_chunk
+  ptp_enable: true
+  ptp_mode: SlaveOnly
+  ptp_lock_timeout_s: 10.0      # wait this long for GevIEEE1588Status=Slave before starting anyway
+  chunk_selectors: Timestamp,FrameID
+  # Vendor-specific chunk node names (check `arv-tool-0.8 features`); the defaults fit most cameras:
+  # chunk_timestamp_name: ChunkTimestamp
+  # chunk_frame_id_name: ChunkFrameID
+
+recording:
+  enabled: true
+  encoder: auto            # Mono8 -> hw-hevc-lossless (NVENC, bit-exact); off-Jetson the build-time
+  #                          probe falls back to FFV1 with a warning. Outputs are run-stamped:
+  #                          cam_gige-<UTCstamp>-00000.mkv + .csv/.json (restarts never overwrite).
+  output_dir: /data/recordings
+  name_prefix: cam_gige
+  segment_seconds: 60
+  keyframe_interval_s: 10  # temporal window: I-frame every ~10 s (bigger = smaller files, coarser seek)
+  # bayer_tile: plain      # Bayer cameras: deinterleave the CFA into quadrant planes pre-encode
+  #                          (recorder-only; better spatial+temporal compression, untiled in post)
+  # nvenc_preset: medium   # HW search depth: bigger = smaller lossless files, slower (must hold fps)
+
+transport:
+  plugin_endpoint:
+    enabled: true          # JP7: unixfd -- both bridges read this; JP6: shm + 36-byte header
+    socket_path: /tmp/cam/frames
+  raw_endpoint:
+    enabled: true          # JP6 fallback: webrtc reads the raw shm here
+    socket_path: /tmp/cam/raw
+
+plugins:
+  - name: ros2-bridge
+    enabled: true
+    isolation: container
+    params:
+      topic: image_raw     # -> /cam_gige/image_raw, header.stamp = the PTP capture time
+      frame_id: cam_gige
+      # A Bayer pixel_format is labeled automatically (bayer_*8 via sensor_env) so a downstream
+      # image_proc can demosaic; set `debayer: true` to compose that demosaic into this bridge.
+  - name: webrtc-bridge
+    enabled: true
+    isolation: container
+    params:
+      port: 8447           # host-facing signalling port -- MUST be unique per camera across the vehicle
+      width: 2448          # JP6-only geometry hint (JP7 unixfd self-describes) -- match the camera/ROI
+      height: 2048
+      format: GRAY8        # what the bridge consumes: the raw mono plane (a Bayer cam debayers in-bridge)
+      fps: 25
+      # HW NVENC H.264 for the browser dashboard: VIDEO_CAPS pins H.264 (universal browser decode);
+      # the RANK forces nvv4l2h264enc over CPU x264enc (a no-op where H.264 NVENC is absent). Profile
+      # is constrained-baseline (webrtcsink forces it at discovery); the level is auto-derived from
+      # the stream so the SDP profile-level-id matches. See cam_rtsp.yaml for the full story.
+      VIDEO_CAPS: video/x-h264
+      GST_PLUGIN_FEATURE_RANK: nvv4l2h264enc:MAX
