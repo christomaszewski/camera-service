@@ -4,7 +4,7 @@
 The sensor config is the single source of truth. This *selects and parameterizes* — it does not
 generate a compose file. It emits `KEY=value` lines:
 
-  COMPOSE_PROJECT_NAME   cam_<name>            (isolates one sensor's containers/networks)
+  COMPOSE_PROJECT_NAME   inherited if set (rig owns it), else cam_<name>  (isolates one sensor's stack)
   COMPOSE_PROFILES       <enabled container plugins, comma-separated>
   CAM_INSTANCE          <name>                 (ROS namespace, labels)
   CAM_SOCK_VOLUME       cam_<name>_sock       (stable shm volume name; other stacks attach to it)
@@ -18,6 +18,7 @@ the supervisor's (in-image) and are ignored here.
 Uses PyYAML when it's importable; otherwise falls back to a tiny built-in parser that covers the
 (simple, fixed) sensor-config schema, so a vehicle host needs nothing but stock python3.
 """
+import os
 import re
 import shlex
 import sys
@@ -178,7 +179,9 @@ def main() -> int:
     by_name = {p["name"]: (p.get("params") or {}) for p in plugins}
 
     env = {
-        "COMPOSE_PROJECT_NAME": f"cam_{name}",
+        # An orchestrator (rig) owns the compose project name and exports COMPOSE_PROJECT_NAME per call
+        # (<name>-vehicle-<id>); honor it. cam_<name> is the standalone fallback only.
+        "COMPOSE_PROJECT_NAME": os.environ.get("COMPOSE_PROJECT_NAME") or f"cam_{name}",
         "COMPOSE_PROFILES": ",".join(p["name"] for p in plugins),
         "CAM_INSTANCE": name,
         "CAM_SOCK_VOLUME": f"cam_{name}_sock",
