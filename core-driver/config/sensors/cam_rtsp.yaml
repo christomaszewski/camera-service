@@ -15,12 +15,16 @@ rtsp:
   latency_ms: 200
   # codec/width/height/frame_rate are auto-probed at open() (rtspsrc ! parsebin); the ZR30 has run
   # H.265 / H.264 at up to 4K. To pin them instead: set codec/width/height + probe: false.
-  decoder: software        # REQUIRED for the ZR30: its live RTSP H.265 carries NO random-access point,
-  #                          ever (no IDR/CRA NALs -- rolling intra refresh; verified by NAL histogram,
-  #                          45 s / 1076 frames / 0 IRAP, and no GOP knob exists in default.ini / SDK /
-  #                          ONVIF / Boa). HW NVDEC correctly waits forever for a sync point -> 0 frames
-  #                          -> endless reconnect loop; software avdec_h265 converges after one refresh
-  #                          sweep and holds 4K@25 on an Orin CPU core (measured 475 frames / 20 s).
+  decoder: software        # REQUIRED for the ZR30, in BOTH codec modes (no GOP knob exists in
+  #                          default.ini / SDK / ONVIF / Boa):
+  #                          - H.265 mode: NO random-access point, ever (NAL histogram: 45 s / 1076
+  #                            frames / 0 IDR/CRA -- rolling intra refresh). NVDEC waits forever.
+  #                          - H.264 mode (1080p): real IDRs but a ~15-20 s GOP, and nvv4l2decoder
+  #                            inside the tee'd driver pipeline wedges the whole graph within ~1 s
+  #                            while waiting for its first keyframe (standalone NVDEC chains wait
+  #                            fine) -> the 5 s liveness watchdog reopens mid-GOP forever.
+  #                          Software decode is also what makes the picture CLEAN: with IDRs (H.264
+  #                          mode) avdec starts at a keyframe instead of concealing gray garbage.
 
 recording:
   enabled: true
