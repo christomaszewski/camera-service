@@ -15,6 +15,12 @@ rtsp:
   latency_ms: 200
   # codec/width/height/frame_rate are auto-probed at open() (rtspsrc ! parsebin); the ZR30 has run
   # H.265 / H.264 at up to 4K. To pin them instead: set codec/width/height + probe: false.
+  decoder: software        # REQUIRED for the ZR30: its live RTSP H.265 carries NO random-access point,
+  #                          ever (no IDR/CRA NALs -- rolling intra refresh; verified by NAL histogram,
+  #                          45 s / 1076 frames / 0 IRAP, and no GOP knob exists in default.ini / SDK /
+  #                          ONVIF / Boa). HW NVDEC correctly waits forever for a sync point -> 0 frames
+  #                          -> endless reconnect loop; software avdec_h265 converges after one refresh
+  #                          sweep and holds 4K@25 on an Orin CPU core (measured 475 frames / 20 s).
 
 recording:
   enabled: true

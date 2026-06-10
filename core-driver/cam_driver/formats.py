@@ -29,6 +29,8 @@ _GST_RAW = _GST_MONO | _GST_COLOR
 
 VALID_ENCODERS = ("auto", "hw-hevc-lossless", "ffv1", "x265-lossless", "stream-copy")
 
+VALID_DECODERS = ("auto", "software")
+
 # Encoded delivery (already-compressed sources: MJPEG USB, H.264/H.265 RTSP). Per codec:
 #   src_caps -- caps the source tags the encoded buffers with (= the recorder appsrc caps)
 #   parser   -- the recorder stream-copies through this into the muxer (no re-encode)
@@ -58,7 +60,7 @@ _HW_DECODER = {
 }
 
 
-def select_decoder(sw_decoder, hw_available=False):
+def select_decoder(sw_decoder, hw_available=False, mode="auto"):
     """(decoder, converter) for the encoded->raw consumer branch. On a Jetson with the L4T plugins
     present, the per-codec HW decoder (nvv4l2decoder for H.26x, nvjpegdec for MJPEG) + nvvidconv
     (NVMM->system); otherwise the software decoder + CPU videoconvert. `decoder` may be a multi-element
@@ -67,8 +69,18 @@ def select_decoder(sw_decoder, hw_available=False):
     HW selection is AUTOMATIC (caller passes hw_available = the L4T HW decoder present), so a JP6->JP7
     host upgrade activates NVDEC with no code change -- only a deploy that exposes the GPU (CDI
     --device nvidia.com/gpu=all on JP7). Recording is stream-copy and never decodes, so this affects
-    only the live-consumer path."""
-    if hw_available and sw_decoder in _HW_DECODER:
+    only the live-consumer path.
+
+    `mode="software"` (per-sensor `decoder:` config) forces the software decoder even with HW present:
+    for streams HW decode cannot START on. The motivating case is the SIYI ZR30's live RTSP H.265,
+    which carries NO random-access point, ever (no IDR/CRA NALs -- rolling intra refresh only;
+    verified by NAL histogram, 45 s / 1076 frames / 0 IRAP). nvv4l2decoder correctly waits forever
+    for a sync point, while avdec converges to clean output after one refresh sweep and holds
+    4K@25 on an Orin CPU core."""
+    if mode not in VALID_DECODERS:
+        log.warning("unknown decoder mode %r; falling back to auto", mode)
+        mode = "auto"
+    if mode != "software" and hw_available and sw_decoder in _HW_DECODER:
         return _HW_DECODER[sw_decoder]
     return sw_decoder, "videoconvert"
 

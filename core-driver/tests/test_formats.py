@@ -87,6 +87,18 @@ def test_select_decoder_unknown_codec_stays_software():
     assert select_decoder("avdec_vp8", hw_available=True) == ("avdec_vp8", "videoconvert")
 
 
+def test_select_decoder_software_mode_overrides_hw():
+    # decoder: software forces avdec even with NVDEC present -- for streams HW decode can't
+    # start on (no-IDR/intra-refresh cameras, e.g. SIYI ZR30 live RTSP H.265)
+    assert select_decoder("avdec_h265", hw_available=True, mode="software") == ("avdec_h265", "videoconvert")
+    assert select_decoder("avdec_h264", hw_available=True, mode="software") == ("avdec_h264", "videoconvert")
+
+
+def test_select_decoder_unknown_mode_falls_back_to_auto():
+    assert select_decoder("avdec_h265", hw_available=True, mode="nonsense") == ("nvv4l2decoder", "nvvidconv")
+    assert select_decoder("avdec_h265", hw_available=False, mode="nonsense") == ("avdec_h265", "videoconvert")
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

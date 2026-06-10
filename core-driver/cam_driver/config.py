@@ -106,6 +106,9 @@ class RtspConfig:
     height: int = 480                 # fallback (the probe overrides)
     protocols: str = ""               # rtspsrc transport: "" = default (udp w/ tcp fallback),
     #                                   "tcp" forces RTP-over-TCP (firewalls / Docker NAT / lossy nets)
+    decoder: str = "auto"             # consumer decode branch: auto = HW (NVDEC) when present |
+    #                                   software = force avdec, for streams HW decode can't start on
+    #                                   (no-IDR/intra-refresh cameras; see formats.select_decoder)
 
     # General settings -- set in the `camera:` block; parse_config overlays them here (NOT per-source YAML).
     frame_rate: float = 30.0          # informational; the stream sets the real rate
