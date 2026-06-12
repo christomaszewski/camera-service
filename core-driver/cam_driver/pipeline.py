@@ -601,6 +601,10 @@ class CapturePipeline:
             self.source.stop()
         if self.pipeline:
             self.pipeline.set_state(Gst.State.NULL)
+        try:
+            self.source.close()   # surrender the device (GigE: control privilege) deterministically
+        except Exception as e:    # noqa: BLE001 -- shutdown must finish regardless
+            log.warning("source close: %s", e)
         s = self.drops.summary()
         log.info("drop summary: frames=%(frames)d source_gaps=%(source_gaps)d "
                  "frames_missing=%(frames_missing)d enqueue_failures=%(enqueue_failures)d "

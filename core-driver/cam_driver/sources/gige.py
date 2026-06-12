@@ -78,6 +78,12 @@ class GigeSource(Source):
     def stop(self) -> None:
         self.camera.stop()
 
+    def close(self) -> None:
+        # Surrender the GigE control privilege NOW (Aravis releases it when the device object
+        # finalizes) instead of hoping interpreter-exit GC gets there -- a camera whose controller
+        # vanished uncleanly refuses new connections until its heartbeat timeout expires.
+        self.camera.close()
+
     # ---- the timestamp-extracting feeder (runs on the Aravis receive thread) ----
     def _on_new_buffer(self, stream) -> None:
         buf = stream.try_pop_buffer()

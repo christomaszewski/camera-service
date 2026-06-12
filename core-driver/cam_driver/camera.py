@@ -83,6 +83,16 @@ class GigECamera:
         log.info("opened %s %s (sn %s)",
                  self.camera.get_vendor_name(), self.camera.get_model_name(),
                  self.camera.get_device_serial_number())
+        # Diagnostic breadcrumb for stuck-controller hunts: after an UNCLEAN exit (SIGKILL -- no
+        # control-privilege release) the camera refuses new controllers for exactly this window.
+        # If a "pingable but won't connect" incident outlives it, the owner is a LIVE process
+        # (find it: `ss -aunp | grep 3956`), not a stale registration.
+        if self._has("GevHeartbeatTimeout"):
+            try:
+                hb = int(self.device.get_integer_feature_value("GevHeartbeatTimeout"))
+                log.info("GevHeartbeatTimeout=%d ms (controller-lock window after an unclean exit)", hb)
+            except GLib.Error as e:
+                log.debug("GevHeartbeatTimeout unreadable: %s", e)
 
     def _on_control_lost(self, _device) -> None:
         log.error("camera control channel lost (%s)", self.cfg.camera_id or "device")
@@ -97,6 +107,14 @@ class GigECamera:
         self.chunk_parser = None
         import gc
         gc.collect()
+
+    def close(self) -> None:
+        """Deterministically release the camera at shutdown. Finalizing the ArvDevice writes the
+        control privilege back to the camera (Aravis does this in its finalizer), freeing it for
+        the next controller IMMEDIATELY -- without this, the release rides on interpreter-exit GC
+        of gi objects, which is best-effort. stop() deliberately keeps control (reconnect re-uses
+        it); close() is the end-of-life counterpart."""
+        self._release()
 
     def reopen(self, n_buffers: int) -> None:
         """Full re-setup after a disconnect: release the dead stream, then open + configure +
