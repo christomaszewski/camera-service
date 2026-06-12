@@ -17,6 +17,7 @@
 #
 # Env (all optional): CAM_PLATFORM ({jp6|jp7}), CAM_TRANSPORT ({unixfd|shm} override),
 # CAM_TRANSPORT_SOCKET (unixfd), CAM_SHM_SOCKET (raw shm), CAM_BAYER, CAM_WEBRTC_DEBAYER,
+# CAM_WEBRTC_NORMALIZE (16-bit mono preview stretch: off | auto | "lo:hi" percentiles -- see below),
 # CAM_WIDTH/HEIGHT/FORMAT/FPS (JP6 raw shm only), SIGNALLING_PORT, VIDEO_CAPS (e.g. "video/x-h264"
 # to pin the codec), RUN_SIGNALLING (1=start the bundled signalling server, default 1),
 # CAM_WEBRTC_{MIN,MAX,START}_BITRATE (bit/sec; bound webrtcsink's adaptive-bitrate range -- the element
@@ -49,6 +50,22 @@ case "${CAM_WEBRTC_DEBAYER:-auto}" in
   0|false|no|off) : ;;
   *) [ -n "$BAYER" ] && DEBAYER_EL="bayer2rgb ! " ;;
 esac
+
+# 16-bit operator preview (CAM_WEBRTC_NORMALIZE): percentile-stretch GRAY16 -> GRAY8 in the python
+# launcher BEFORE the 8-bit conversion -- videoconvert alone keeps the TOP byte, which renders an
+# LSB-aligned radiometric camera (thermal Y16) near-black with the detail discarded. Preview-only:
+# the recording and the ROS topic keep the raw 16-bit. Values: off (default) | auto | "lo:hi"
+# percentiles (e.g. "5:99.5").
+NORM="$(printf %s "${CAM_WEBRTC_NORMALIZE:-off}" | tr '[:upper:]' '[:lower:]')"
+case "$NORM" in 0|false|no|off|"") NORM="" ;; esac
+if [ -n "$NORM" ] && [ -n "$DEBAYER_EL" ]; then
+  echo "webrtc-bridge: CAM_WEBRTC_NORMALIZE ignored (Bayer/debayer path is 8-bit color)" >&2
+  NORM=""
+fi
+if [ -n "$NORM" ] && [ "${CAM_LAUNCHER:-python}" = "gst-launch" ]; then
+  echo "webrtc-bridge: CAM_WEBRTC_NORMALIZE needs the python launcher; ignoring" >&2
+  NORM=""
+fi
 
 # Source chain (+ socket path) per transport.
 if [ "$TRANSPORT" = unixfd ]; then
@@ -88,9 +105,16 @@ SINK="webrtcsink name=cam_webrtcsink signaller::uri=ws://127.0.0.1:${PORT}"
 
 # Force I420 after videoconvert: webrtcsink's encoders want a YUV format, not GRAY8/RGBx. The leaky
 # queue drops frames if the encoder/network falls behind (live preview: the newest frame wins).
-PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=4 ! ${DEBAYER_EL}videoconvert ! video/x-raw,format=I420 ! ${SINK}"
+if [ -n "$NORM" ]; then
+  # Split pipeline: the python launcher pumps norm_in (appsink) -> 16->8 stretch -> norm_out (appsrc).
+  # The appsrc caps are set at runtime from the first frame's input caps, so this works on JP6
+  # (env-stamped caps) and JP7 (self-describing unixfd) alike.
+  PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=4 ! appsink name=norm_in emit-signals=true max-buffers=2 drop=true sync=false   appsrc name=norm_out is-live=true format=time ! queue leaky=downstream max-size-buffers=4 ! videoconvert ! video/x-raw,format=I420 ! ${SINK}"
+else
+  PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=4 ! ${DEBAYER_EL}videoconvert ! video/x-raw,format=I420 ! ${SINK}"
+fi
 
-echo "webrtc-bridge: ${TRANSPORT} ${SOCK}${BAYER:+ bayer=${BAYER}}${DEBAYER_EL:+ (debayer->color)} -> webrtcsink (signalling :${PORT})"
+echo "webrtc-bridge: ${TRANSPORT} ${SOCK}${BAYER:+ bayer=${BAYER}}${DEBAYER_EL:+ (debayer->color)}${NORM:+ normalize=${NORM}} -> webrtcsink (signalling :${PORT})"
 
 # Default launcher: a small Python process (tools/bridge_stream.py) that OWNS this pipeline and, once it
 # is streaming, advertises the stream over Zenoh for fleet discovery (docs/DISCOVERY.md). It shares this

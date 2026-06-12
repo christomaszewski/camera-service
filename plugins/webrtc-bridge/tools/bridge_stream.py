@@ -268,6 +268,14 @@ class Bridge:
         self._advertised = False
         self._stopping = False
         self._h264_caps_str = None      # cached forced H.264 output caps (profile + derived level)
+        # 16->8 preview normalize pump (CAM_WEBRTC_NORMALIZE; run.sh splits the pipeline at
+        # norm_in/norm_out when the knob is on -- see thermal_preview.py for the stretch itself).
+        self.norm = None                # PercentileStretch (built lazily when the elements exist)
+        self.norm_out = None            # the appsrc we push stretched frames into
+        self._norm_ready = False        # out-caps configured from the first input sample
+        self._norm_passthrough = False  # input wasn't GRAY16: forward unmodified
+        self._norm_dtype = None         # numpy dtype per the input caps ('<u2' / '>u2')
+        self._norm_w = self._norm_h = 0
 
     def build(self):
         Gst.init(None)
@@ -277,6 +285,21 @@ class Bridge:
             return False
         log.info("pipeline: %s", desc)
         self.pipeline = Gst.parse_launch(desc)
+        norm_in = self.pipeline.get_by_name("norm_in")
+        self.norm_out = self.pipeline.get_by_name("norm_out")
+        if norm_in is not None and self.norm_out is not None:
+            from thermal_preview import PercentileStretch, parse_window  # needs numpy (in the image)
+            spec = _env("CAM_WEBRTC_NORMALIZE", "auto")
+            try:
+                lo, hi = parse_window(spec)
+            except ValueError as e:
+                log.warning("CAM_WEBRTC_NORMALIZE=%r unparseable (%s); using the 1:99 default", spec, e)
+                lo, hi = parse_window("auto")
+            self.norm = PercentileStretch(lo, hi)
+            norm_in.connect("new-sample", self._on_norm_sample)
+            norm_in.connect("eos", self._on_norm_eos)
+            log.info("preview normalize: percentile window %g:%g (EMA-smoothed), 16->8 before encode",
+                     lo, hi)
         # webrtcsink meta.name == producer_id, so discovery + signalling line up (one server, many producers).
         sink = self.pipeline.get_by_name("cam_webrtcsink")
         if sink is not None:
@@ -416,6 +439,69 @@ class Bridge:
         except Exception as e:                        # noqa: BLE001 -- never break the video path
             log.warning("encoder-setup failed: %s", e)
         return False
+
+    # ---- 16->8 preview normalize pump (norm_in appsink -> stretch -> norm_out appsrc) ----------
+    def _norm_configure(self, caps):
+        """One-shot: read the INPUT caps off the first sample and set the matching OUTPUT caps.
+        GRAY16_LE/BE -> stretched GRAY8 at the same geometry/rate; anything else passes through
+        unchanged (the knob was set on a non-16-bit camera -- warn, don't break the preview)."""
+        st = caps.get_structure(0)
+        fmt = st.get_string("format") or ""
+        ok_w, w = st.get_int("width")
+        ok_h, h = st.get_int("height")
+        if fmt in ("GRAY16_LE", "GRAY16_BE") and ok_w and ok_h:
+            self._norm_dtype = "<u2" if fmt == "GRAY16_LE" else ">u2"
+            self._norm_w, self._norm_h = w, h
+            out = caps.copy()
+            out.set_value("format", "GRAY8")
+            log.info("normalize: %s %dx%d -> GRAY8 (percentile stretch)", fmt, w, h)
+        else:
+            self._norm_passthrough = True
+            out = caps
+            log.warning("normalize requested but input caps are %s; passing through unmodified",
+                        caps.to_string())
+        self.norm_out.set_property("caps", out)
+        self._norm_ready = True
+
+    def _on_norm_sample(self, sink):
+        sample = sink.emit("pull-sample")
+        if sample is None:
+            return Gst.FlowReturn.OK
+        buf = sample.get_buffer()
+        if not self._norm_ready:
+            try:
+                self._norm_configure(sample.get_caps())
+            except Exception as e:                       # noqa: BLE001 -- never kill the stream thread
+                log.warning("normalize: caps configure failed (%s); passing through", e)
+                self._norm_passthrough = True
+                self._norm_ready = True
+        ok, mi = buf.map(Gst.MapFlags.READ)
+        if not ok:
+            return Gst.FlowReturn.OK
+        try:
+            if self._norm_passthrough:
+                out_bytes = bytes(mi.data)
+            else:
+                import numpy as np
+                n = self._norm_w * self._norm_h
+                arr = np.frombuffer(mi.data, dtype=self._norm_dtype, count=-1)
+                if arr.size < n:                          # torn/short frame: drop it, stay alive
+                    log.warning("normalize: short frame (%d px < %dx%d); dropped",
+                                arr.size, self._norm_w, self._norm_h)
+                    return Gst.FlowReturn.OK
+                out_bytes = self.norm(arr[:n].reshape(self._norm_h, self._norm_w)).tobytes()
+        finally:
+            buf.unmap(mi)
+        obuf = Gst.Buffer.new_wrapped(out_bytes)
+        obuf.pts, obuf.dts, obuf.duration = buf.pts, buf.dts, buf.duration
+        ret = self.norm_out.emit("push-buffer", obuf)
+        if ret != Gst.FlowReturn.OK:
+            log.warning("normalize: push-buffer -> %s", ret)
+        return Gst.FlowReturn.OK
+
+    def _on_norm_eos(self, _sink):
+        if self.norm_out is not None:
+            self.norm_out.emit("end-of-stream")           # propagate EOS across the pump
 
     def _on_signal(self):
         if not self._stopping:

@@ -38,6 +38,11 @@ services:
       # raw mosaic. On JP7 the unixfd caps carry the pattern; on JP6 raw-shm run.sh applies it.
       - CAM_BAYER=${CAM_BAYER:-}
       - CAM_WEBRTC_DEBAYER=${CAM_WEBRTC_DEBAYER:-auto}
+      # 16-bit (thermal) operator preview: percentile-stretch GRAY16 -> GRAY8 in the bridge BEFORE the
+      # 8-bit convert (`auto` or `lo:hi` percentiles). PREVIEW-ONLY -- recording/ROS keep raw 16-bit.
+      # off (default) = plain videoconvert, which keeps only the top byte (near-black for LSB-aligned
+      # radiometric cameras).
+      - CAM_WEBRTC_NORMALIZE=${CAM_WEBRTC_NORMALIZE:-off}
       # JP6 raw shm carries no caps -> geometry from the sensor config (must match the camera frame).
       # Ignored on JP7 (unixfd caps are self-describing).
       - CAM_WIDTH=${CAM_WIDTH:-512}
