@@ -66,6 +66,7 @@ Or via the per-sensor stack: `cam-up <sensor>.yaml up -d webrtc-bridge` (cam-up 
 | `CAM_SHM_SOCKET` | `/tmp/cam/raw` | raw shm socket (JP6) |
 | `CAM_BAYER` | _(empty)_ | Bayer pattern (`rggb`/`grbg`/`gbrg`/`bggr`) → debayer to color; empty → mono |
 | `CAM_WEBRTC_DEBAYER` | `auto` | `false` to preview the raw mosaic instead of debayering |
+| `CAM_WEBRTC_NORMALIZE` | `off` | 16-bit mono preview stretch: `auto` (1–99% percentile window, EMA-smoothed) or `lo:hi` (e.g. `5:99.5`). Stretches GRAY16 → GRAY8 **before** the 8-bit convert, so an LSB-aligned radiometric camera (thermal Y16) previews with full contrast instead of near-black. Preview-only — the recording and ROS topic keep the raw 16-bit. Needs the python launcher (the default) |
 | `CAM_WIDTH` / `CAM_HEIGHT` | `512` | **JP6 raw shm only** — must match the camera geometry |
 | `CAM_FORMAT` | `GRAY8` | **JP6 raw shm only** — mono raw format when not debayering |
 | `CAM_FPS` | `25` | **JP6 raw shm only** — frame rate |
