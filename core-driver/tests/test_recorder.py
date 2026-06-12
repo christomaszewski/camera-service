@@ -89,6 +89,14 @@ def test_x265_gray16_depth_guard():
     assert "avenc_ffv1" in d and "x265enc" not in d
 
 
+def test_ffv1_encodes_threaded():
+    # avenc_ffv1 defaults to ONE thread, which caps 16-bit 640x512 at ~26-29 fps on an Orin core --
+    # a 60 fps thermal camera stalled the recorder in the field (tee blocked, consumers starved).
+    # FFV1 parallelizes across slices; these knobs must stay pinned (lossless is unaffected).
+    d = _desc(_JETSON, encoder="ffv1", bits=16)
+    assert "avenc_ffv1" in d and "threads=0" in d and "slices=4" in d and "slicecrc=1" in d
+
+
 def test_no_lossless_encoder_at_all_raises():
     try:
         _desc(_BARE, encoder="ffv1")
