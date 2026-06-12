@@ -92,6 +92,12 @@ class Source(ABC):
     def stop(self) -> None:
         """Stop acquisition (best-effort; safe during shutdown / before reopen)."""
 
+    def close(self) -> None:
+        """Release the device at END OF LIFE (after the pipeline is torn down). Distinct from
+        stop(): stop() may keep device control for a fast reconnect; close() must surrender it
+        deterministically (e.g. GigE control privilege) rather than relying on interpreter-exit
+        GC. Default: nothing to release beyond stop()."""
+
     # ---- reconnect (optional; default = unsupported) -----------------------
     @property
     def reconnect_enabled(self) -> bool:

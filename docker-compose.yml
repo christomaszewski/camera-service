@@ -58,6 +58,12 @@ services:
       timeout: 3s
       retries: 3
       start_period: 25s     # allow Aravis discovery + (optional) PTP lock wait + pipeline start
+    # Docker's default 10s stop grace barely covers the clean-stop chain (supervisor signal
+    # forwarding -> core EOS drain, up to its 5s force-quit timer -> recording finalization ->
+    # sidecar join, up to 5s). An overrun means SIGKILL: a truncated recording AND, for GigE, an
+    # unreleased control privilege (the camera then refuses new controllers until its heartbeat
+    # timeout). Give the chain real headroom; `down` only takes this long when it's earning it.
+    stop_grace_period: 25s
     restart: unless-stopped
 
 volumes:
