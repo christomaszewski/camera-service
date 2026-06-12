@@ -175,7 +175,12 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
     # (keyframe_interval_s / bframes) don't apply.
     if gop or bframes:
         log.info("recorder: ffv1 is intra-only; ignoring keyframe_interval_s/bframes")
+    # threads/slices: avenc_ffv1 defaults to ONE thread, which caps 16-bit 640x512 at ~26-29 fps on an
+    # Orin ARM core -- measured in the field as a permanent recorder stall against a 60 fps thermal
+    # camera (the tee blocks, consumers starve, the feeder drops half the frames). FFV1 parallelizes
+    # across slices (version 3 of the bitstream), so slices=4 + threads=0 (auto) restores real-time
+    # with headroom. slicecrc protects each slice; lossless fidelity is unaffected by slicing.
     return (
         f"queue max-size-buffers=12 name=rec_q ! {vconv} ! "
-        "avenc_ffv1 coder=1 context=1 ! " + sink
+        "avenc_ffv1 coder=1 context=1 threads=0 slices=4 slicecrc=1 ! " + sink
     )
