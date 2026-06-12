@@ -6,19 +6,33 @@
 #
 # Build (from repo root):  docker build -f plugins/webrtc-bridge/Dockerfile -t webrtc-bridge .
 ARG GST_RS_TAG=0.13.7
+# Pinned Rust toolchain + cargo-c (+ --locked): unpinned, this build broke in the field with NO repo
+# change (2026-06-10, fresh JP6 host): rustup grabbed the just-released stable and an UNLOCKED
+# `cargo install cargo-c` resolved a fresh dep set whose `time` crate fails trait coherence inside
+# cargo-credential ("conflicting implementations of trait `From<...HourBase>`") -- while hosts with
+# cached builder layers kept working on the frozen old toolchain. --locked builds cargo-c with the
+# dep set it shipped with; the pins make the layer deterministic. Bump the PAIR together, deliberately.
+# (Verified on arm64: rustc 1.96.0 + cargo-c 0.10.23 --locked build clean; gst-plugin-webrtc 0.13.7's
+# MSRV is 1.71, so the toolchain pin has wide headroom. gst-plugins-rs itself ships a Cargo.lock, so
+# its dep set was already reproducible -- the install steps here were the only float.)
+ARG RUST_TOOLCHAIN=1.96.0
+ARG CARGO_C_VER=0.10.23
 
 # ---- builder: compile gst-plugin-webrtc + the signalling server (Rust) ----
 FROM ubuntu:24.04 AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 ARG GST_RS_TAG
+ARG RUST_TOOLCHAIN
+ARG CARGO_C_VER
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl build-essential pkg-config cmake libssl-dev \
       libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
       libnice-dev libsrtp2-dev libx264-dev libvpx-dev libopus-dev \
     && rm -rf /var/lib/apt/lists/*
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal \
+      --default-toolchain ${RUST_TOOLCHAIN}
 ENV PATH=/root/.cargo/bin:$PATH
-RUN cargo install cargo-c
+RUN cargo install cargo-c --version ${CARGO_C_VER} --locked
 RUN git clone --depth 1 --branch ${GST_RS_TAG} \
       https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git /tmp/gst-rs
 # LTO off + limited jobs to dodge the OOM-during-link the full/LTO build hits in Docker.
