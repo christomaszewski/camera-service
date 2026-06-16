@@ -1,0 +1,82 @@
+# Real 16-bit RADIOMETRIC thermal USB camera (V4L2 Y16 -> GRAY16_LE, 640x512) with both bridges:
+#   recording     -> lossless FFV1, all 16 bits preserved (radiometric counts intact for analysis)
+#   ros2-bridge   -> publishes /cam_thermal/image_raw as mono16 (raw counts; downstream does its own AGC)
+#   webrtc-bridge -> operator preview, percentile-stretched to a visible 8-bit image (signalling :8448)
+# Run:  cam-up config/sensors/cam_thermal.yaml up -d
+# NOTE: map the v4l2 device into the core container (docker-compose.usb.yml does this from usb.device).
+#
+# Find the camera's real format/modes (no v4l2-ctl needed -- the core image has gst tools):
+#   docker exec <core> gst-device-monitor-1.0 Video/Source        # lists GRAY16_LE + its W/H/fps
+service: camera-service
+name: cam_thermal
+
+camera:
+  type: usb
+  # Thermal cores run at their OWN clock: v4l2 treats the requested framerate as advisory and many
+  # ignore it, so SET THIS TO WHAT THE DEVICE ACTUALLY DELIVERS (gst-device-monitor / the SOF stamps in
+  # the core log -- ~16.7ms apart = 60fps). It feeds the pipeline caps + the PTS interval; a wrong value
+  # mislabels timing, it does NOT throttle the camera. (Contrast: a GigE camera is clocked by this.)
+  frame_rate: 60.0
+
+usb:
+  # Stable by-id path so a hotplug/replug reconnects the SAME camera (a bare /dev/videoN renumbers):
+  device: /dev/v4l/by-id/usb-<vendor>-video-index0    # <-- set to your camera's by-id path
+  pixel_format: GRAY16_LE  # V4L2 Y16 (little-endian). RAW 16-bit mono -> FFV1 lossless record + mono16 ROS.
+  #                          Many cores ALSO offer an 8-bit AGC'd mode (I420/NV12/GRAY8); pick that
+  #                          instead if you want a baked-in visible image and DON'T need radiometry.
+  width: 640
+  height: 512
+  sof_timestamps: true     # v4l2 driver per-frame timestamp (closer to capture than host arrival;
+  #                          sanity-checked -- falls back to arrival if the device reports zeros)
+
+recording:
+  enabled: true
+  encoder: auto            # GRAY16 (>8-bit) -> FFV1: truly lossless + bit-exact, INTRA-only (no NVENC
+  #                          for >8-bit, and x265 would truncate the container -> auto picks FFV1).
+  #                          FFV1 is threaded (slices) so it sustains 60fps 16-bit on an Orin core.
+  output_dir: /data/recordings
+  name_prefix: cam_thermal # -> cam_thermal-<UTCstamp>-00000.mkv + .csv/.json (run-stamped; restarts
+  #                          start a NEW run beside the old one rather than overwriting)
+  segment_seconds: 60
+  # keyframe_interval_s/bframes don't apply to FFV1 (intra-only) -- omitted so they don't log "ignored".
+  # NB sustained write for 60fps 640x512 16-bit FFV1 of noisy thermal data is ~25-30 MB/s; if the core
+  # logs "camsrc queue full" with FFV1 threading already in the image, the data_dir disk is the ceiling
+  # (drop to a 30fps mode or point output_dir at faster storage).
+
+transport:
+  plugin_endpoint:
+    enabled: true          # JP7: unixfd (self-describing GRAY16 caps) -- ros2-bridge reads this
+    socket_path: /tmp/cam/frames
+  raw_endpoint:
+    enabled: true          # JP6 fallback: webrtc reads raw GRAY16 from the shm here
+    socket_path: /tmp/cam/raw
+
+plugins:
+  - name: ros2-bridge
+    enabled: true
+    isolation: container
+    params:
+      topic: image_raw     # -> /cam_thermal/image_raw, published as mono16 (raw radiometric counts)
+      frame_id: cam_thermal
+
+  - name: webrtc-bridge
+    enabled: true
+    isolation: container
+    params:
+      port: 8448           # host-facing signalling port -- MUST be unique per camera across the vehicle
+      # JP6 raw-shm caps are TRUSTED, not negotiated: these MUST match the camera exactly or the encoder
+      # reads mislabeled bytes (the classic green/garbage preview). On JP7/unixfd they're ignored (the
+      # stream self-describes), but set them right anyway so one config works on both platforms.
+      format: GRAY16_LE
+      width: 640
+      height: 512
+      fps: 60
+      # 16-bit OPERATOR PREVIEW: percentile-stretch GRAY16 -> GRAY8 BEFORE the 8-bit convert. Without it,
+      # videoconvert keeps only the top byte and LSB-aligned thermal counts render near-black. `auto` =
+      # a 1-99% window, EMA-smoothed (robust to hot/dead pixels, no flicker); or pin "lo:hi" (e.g. "5:99.5")
+      # if the default clips an interesting band. PREVIEW-ONLY -- the recording + ROS topic stay raw 16-bit.
+      CAM_WEBRTC_NORMALIZE: auto
+      # H.264 for universal browser decode (level auto-derived from the stream so the SDP matches).
+      # NO GST_PLUGIN_FEATURE_RANK here on purpose: at 640x512 software x264 is trivial, and forcing the
+      # JP6 NVENC path (unvalidated on this host) buys nothing. Add the rank only on big streams (cam_rtsp).
+      VIDEO_CAPS: video/x-h264
