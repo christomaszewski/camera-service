@@ -334,9 +334,18 @@ class Bridge:
 
     def _on_message(self, _bus, msg):
         t = msg.type
-        if t == Gst.MessageType.STATE_CHANGED and not self._advertised and isinstance(msg.src, Gst.Pipeline):
+        if t == Gst.MessageType.STATE_CHANGED and not self._advertised:
             _old, new, _pending = msg.parse_state_changed()
-            if new == Gst.State.PLAYING:
+            # Trigger on the SOURCE element (cam_src) reaching PLAYING, NOT the pipeline's aggregate
+            # PLAYING. A CAM_WEBRTC_NORMALIZE split pipeline (the appsink->appsrc 16->8 bridge) is two
+            # state-change islands whose aggregate async transition never completes, so the pipeline
+            # NEVER posts a pipeline-level STATE_CHANGED to PLAYING -- the advert keyed on that never
+            # fired (the stream ran fine, but no discovery tile). The source element DOES reach PLAYING
+            # in every pipeline variant once capture is live. Verified in cam-dev: for the split
+            # pipeline the pipeline-level PLAYING msg is never seen while the cam_src one reliably is.
+            # cam_src is the run.sh source name (shmsrc on JP6 / unixfdsrc on JP7); single-chain
+            # cameras post it too, so this is universal.
+            if new == Gst.State.PLAYING and msg.src is not None and msg.src.get_name() == "cam_src":
                 self._advertise()
         elif t == Gst.MessageType.EOS:
             log.info("EOS; stopping")
