@@ -80,7 +80,8 @@ shm both work.
 
 - Custom Aravis `appsrc` (not `aravissrc`) for frame_id + chunk access.
 - Chunk timestamp used whenever available; PTP-lock is provenance (`ptp_synced`).
-- Recorder pluggable: 8-bit → HW HEVC-lossless (x265 the explicit CPU-temporal option), >8-bit → FFV1;
+- Recorder pluggable: 8-bit → HW HEVC-lossless (x265 the explicit CPU-temporal option), >8-bit → FFV1
+  (threaded via slices — single-threaded caps ~27 fps for 16-bit, stalls a 60 fps thermal recorder);
   encoded sources stream-copy; encoder elements probed at build (missing NVENC → FFV1, warned).
 - Transport = JP7 `unixfd` (native caps + buffer fields; replaces the header endpoint) / JP6 shm +
   36-byte header (shm drops PTS/metas); optional raw endpoint either way; Zenoh later.

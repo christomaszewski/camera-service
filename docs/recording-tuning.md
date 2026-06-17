@@ -4,6 +4,11 @@ The recorder writes lossless video (HW HEVC on the Orin, ffv1/x265 on CPU). For 
 camera there are two levers to shrink the files, both under `recording:` in the sensor config. They're
 opt-in and recorder-only — transport/preview/raw always see the raw mosaic, so ROS/WebRTC are untouched.
 
+> **>8-bit / 16-bit (e.g. thermal Y16) cameras** take the **FFV1** path instead — see
+> [the FFV1 section below](#ffv1-path-for-16-bit-and-thermal-cameras). The Bayer-tiling and
+> temporal-window levers here are HW-HEVC/8-bit concepts and don't apply (FFV1 is intra-only); the
+> relevant knob there is throughput, not ratio.
+
 ## 1. CFA tiling — `recording.bayer_tile`
 
 A Bayer mosaic is a high-frequency colour checkerboard: adjacent pixels are different colours, which
@@ -81,6 +86,27 @@ mosaic, **`enc-fps`** (encode throughput — must be ≥ camera fps to record re
 (temporal). The CPU legs (x265/ffv1) run anywhere, but x265 at 5 MP is impractically slow off-Jetson —
 the **nvenc** leg is the one that represents your recorder, so run the benchmark on the box. The image
 needs numpy (the published `cam-core` may predate it: `cam-core:bench` = base `+ apt install python3-numpy`).
+
+## FFV1 path for 16-bit and thermal cameras
+
+A camera the auto-selector can't put on the HW path — **>8-bit** (Mono16, Bayer16, thermal Y16 →
+`GRAY16_LE`), color (YUV/RGB), or any host with no NVENC — records **FFV1**: truly lossless, all bits
+preserved, but **intra-only** (each frame is independent). So the CFA-tiling and temporal-window knobs
+above don't apply (there's no inter-frame prediction to tune, and `keyframe_interval_s`/`bframes` are
+ignored with a log note). `x265-lossless` is offered for CPU *temporal* lossless but is **8-bit only**:
+a >8-bit request rides in a GRAY16 container x265's ≤12-bit input formats can't carry, so it falls back
+to FFV1 rather than silently truncating sensor bits.
+
+The one thing that matters for FFV1 is **throughput**, and it has a real cliff: single-threaded
+`avenc_ffv1` caps around **27 fps for 16-bit 640×512 on an Orin core**, so a 60 fps thermal camera
+stalls the recorder (the tee backpressures, consumers starve, the feeder drops frames with
+`enqueue_failures` climbing). The recorder therefore runs FFV1 **multi-threaded across slices**
+(`threads=auto slices=4`), which restores real-time with headroom — no config knob, it's automatic.
+Once the encoder keeps up, the next ceiling is **sustained disk write** (~25–30 MB/s for 60 fps 16-bit
+640×512 — noisy thermal data barely compresses): if `camsrc queue full` warnings persist with the CPU
+idle, the `recording.output_dir` storage is the bottleneck — drop the frame rate or point it at faster
+media (NVMe over SD/eMMC). The radiometric data lands in the `.mkv` bit-exact regardless; for the
+operator's WebRTC preview see `CAM_WEBRTC_NORMALIZE` in the [webrtc-bridge README](../plugins/webrtc-bridge/README.md).
 
 ## Recommended path
 1. `probe_temporal` an existing recording → know if temporal is real on your encoder.

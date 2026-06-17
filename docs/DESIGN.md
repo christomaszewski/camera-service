@@ -76,8 +76,10 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
   a missing NVENC (x86 dev box, container without the L4T stack) falls back to FFV1 with a warning
   instead of failing the pipeline, and >8-bit through x265 falls back to FFV1 rather than silently
   dropping sensor bits. A mono/Bayer mosaic rides in the Y plane of NV24; the Bayer pattern is
-  recorded in the sidecar for post-debayer. (NVENC lossless validated bit-exact on a JP7.2 Orin AGX —
-  see [jetpack7-bringup.md](jetpack7-bringup.md).)
+  recorded in the sidecar for post-debayer. FFV1 is run **multi-threaded across slices** — single-
+  threaded it caps ~27 fps for 16-bit 640×512 on an Orin core, which stalled a 60 fps thermal recorder
+  until sliced. (NVENC lossless validated bit-exact on a JP7.2 Orin AGX — see
+  [jetpack7-bringup.md](jetpack7-bringup.md).)
 
 - **Transport = shm + a 36-byte header (`application/x-cam-frame`).** GStreamer's `shmsink`/`shmsrc`
   transmit **only raw bytes** — PTS, DTS, and all `GstMeta` are dropped across the process boundary

@@ -64,6 +64,18 @@ The recorder is **pluggable / capability-detecting**:
 > than silently dropping sensor bits. Encoder elements are also **probed at build time**: if the
 > selected encoder is missing on the host (e.g. no NVENC on an x86 dev box or in a container
 > without the L4T stack), the recorder warns and records FFV1 instead of failing the pipeline.
+> The **FFV1 path is multi-threaded** (`slices`): single-threaded FFV1 caps ~27 fps for 16-bit
+> 640×512 on an Orin core, so a 60 fps 16-bit (thermal) camera needs the slice parallelism to keep
+> up — once it does, sustained disk write (~25–30 MB/s for 16-bit) is the next ceiling to watch.
+
+### 16-bit / thermal (radiometric) cameras
+A 16-bit mono camera (Y16 → `GRAY16_LE`) records **FFV1 lossless with all 16 bits intact** and
+publishes the raw counts as a `mono16` ROS topic — both kept radiometric for analysis. For the
+WebRTC **operator preview**, set `CAM_WEBRTC_NORMALIZE: auto` on the webrtc-bridge: it
+percentile-stretches GRAY16→GRAY8 so the picture is visible (a plain 16→8 convert keeps only the
+top byte, which renders LSB-aligned thermal data near-black). The stretch is preview-only — the
+recording and ROS topic are untouched. See [`cam_thermal.yaml`](core-driver/config/sensors/cam_thermal.yaml)
+and the [webrtc-bridge README](plugins/webrtc-bridge/README.md).
 
 ## Repo layout
 
@@ -101,10 +113,21 @@ sudo sysctl -w net.core.rmem_max=33554432      # larger socket receive buffers
 #   sudo ptp4l -i <cam-iface> -m   &&   sudo phc2sys -a -r
 ```
 
-Build & run — one **sensor config** drives one camera's stack via `cam-up`:
+Build & run — one **sensor config** drives one camera's stack via `cam-up`. Start from the
+closest real-camera template under [core-driver/config/sensors/](core-driver/config/sensors/)
+(each is heavily commented with the host prep + knobs for that camera class):
+
+| Camera | Template | Notes |
+|---|---|---|
+| GigE Vision (PTP/chunk, mono or Bayer) | `cam_gige.yaml` | host MTU 9000 + `ptp4l`/`phc2sys`; the [PTP experiment](docs/ptp-timestamp-experiment.md) config |
+| RTSP (H.264/H.265, up to 4K) | `cam_rtsp.yaml` | self-probes codec/geometry; stream-copy record |
+| USB / UVC (MJPEG or raw) | `cam_usb.yaml` | map the v4l2 device in; MJPEG stream-copies to disk |
+| 16-bit radiometric **thermal** (Y16) | `cam_thermal.yaml` | FFV1 16-bit record + `mono16` ROS; `CAM_WEBRTC_NORMALIZE` gives a visible preview |
+| fake / dev (no hardware) | `cam_a.yaml`, `cam_b.yaml` | in-process Aravis fake camera |
+
 ```bash
 mkdir -p recordings
-cp core-driver/config/sensors/cam_a.yaml core-driver/config/sensors/my-cam.yaml   # then edit it
+cp core-driver/config/sensors/cam_gige.yaml core-driver/config/sensors/my-cam.yaml   # pick the closest, then edit it
 ./cam-up config/sensors/my-cam.yaml             # brings up core + the plugins the config enables
 ```
 
@@ -154,10 +177,12 @@ tool reads the plugin endpoint and prints each frame's parsed header — the sam
 ```bash
 # Decode back to raw frames
 ffmpeg -i cam-<stamp>-00000.mkv -f rawvideo -pix_fmt gray8 frames.raw      # 8-bit (Y plane = mosaic)
+ffmpeg -i cam-<stamp>-00000.mkv -f rawvideo -pix_fmt gray16le frames.raw   # 16-bit (Mono16 / thermal Y16)
 # Confirm bit-exact round trip
 ffmpeg -i cam-<stamp>-00000.mkv -i source.y4m -lavfi psnr -f null -        # expect psnr_avg:inf
 ```
 For raw Bayer recorded as gray, debayer using `bayer_pattern` from the JSON header after extraction.
+The JSON header records `bits_per_pixel`, so pick `gray8` vs `gray16le` from it.
 
 ## Transport endpoints (for plugins)
 
