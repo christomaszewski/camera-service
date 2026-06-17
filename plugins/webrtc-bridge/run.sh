@@ -109,7 +109,17 @@ if [ -n "$NORM" ]; then
   # Split pipeline: the python launcher pumps norm_in (appsink) -> 16->8 stretch -> norm_out (appsrc).
   # The appsrc caps are set at runtime from the first frame's input caps, so this works on JP6
   # (env-stamped caps) and JP7 (self-describing unixfd) alike.
-  PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=4 ! appsink name=norm_in emit-signals=true max-buffers=2 drop=true sync=false   appsrc name=norm_out is-live=true format=time ! queue leaky=downstream max-size-buffers=4 ! videoconvert ! video/x-raw,format=I420 ! ${SINK}"
+  #
+  # async=false on norm_in is LOAD-BEARING, not a tweak: without it the two chains form a circular
+  # preroll deadlock -- the appsrc chain's sink can't preroll until the pump feeds it, the pump
+  # (appsink new-sample) only fires once PLAYING, and PLAYING waits on that very preroll. The pipeline
+  # then hangs at PAUSED/pending=playing: frames flow eventually on some sources but the pipeline never
+  # posts aggregate PLAYING (broke discovery -- see the cam_src advert trigger in bridge_stream.py) and
+  # is generally wedged. async=false takes the appsink OUT of the preroll gate (correct for a pull tap:
+  # sync=false drop=true already says "hand me samples as they come, don't pace or block on me"), so the
+  # pipeline reaches PLAYING, new-sample starts firing, and the pump feeds the sink. Verified in cam-dev:
+  # baseline -> state=paused, 0 frames; +async=false -> state=playing, frames flow.
+  PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=4 ! appsink name=norm_in emit-signals=true max-buffers=2 drop=true sync=false async=false   appsrc name=norm_out is-live=true format=time ! queue leaky=downstream max-size-buffers=4 ! videoconvert ! video/x-raw,format=I420 ! ${SINK}"
 else
   PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=4 ! ${DEBAYER_EL}videoconvert ! video/x-raw,format=I420 ! ${SINK}"
 fi
