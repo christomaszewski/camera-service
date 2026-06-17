@@ -265,7 +265,8 @@ class Bridge:
         self.loop = GLib.MainLoop()
         self.pipeline = None
         self.advertiser = None
-        self._advertised = False
+        self._advertised = False        # the advertise sequence has been ENTERED (one-shot on PLAYING)
+        self._advertise_retry_s = 5     # re-attempt cadence until the zenoh router accepts the token
         self._stopping = False
         self._h264_caps_str = None      # cached forced H.264 output caps (profile + derived level)
         # 16->8 preview normalize pump (CAM_WEBRTC_NORMALIZE; run.sh splits the pipeline at
@@ -333,9 +334,18 @@ class Bridge:
 
     def _on_message(self, _bus, msg):
         t = msg.type
-        if t == Gst.MessageType.STATE_CHANGED and not self._advertised and isinstance(msg.src, Gst.Pipeline):
+        if t == Gst.MessageType.STATE_CHANGED and not self._advertised:
             _old, new, _pending = msg.parse_state_changed()
-            if new == Gst.State.PLAYING:
+            # Trigger on the SOURCE element (cam_src) reaching PLAYING, NOT the pipeline's aggregate
+            # PLAYING. A CAM_WEBRTC_NORMALIZE split pipeline (the appsink->appsrc 16->8 bridge) is two
+            # state-change islands whose aggregate async transition never completes, so the pipeline
+            # NEVER posts a pipeline-level STATE_CHANGED to PLAYING -- the advert keyed on that never
+            # fired (the stream ran fine, but no discovery tile). The source element DOES reach PLAYING
+            # in every pipeline variant once capture is live. Verified in cam-dev: for the split
+            # pipeline the pipeline-level PLAYING msg is never seen while the cam_src one reliably is.
+            # cam_src is the run.sh source name (shmsrc on JP6 / unixfdsrc on JP7); single-chain
+            # cameras post it too, so this is universal.
+            if new == Gst.State.PLAYING and msg.src is not None and msg.src.get_name() == "cam_src":
                 self._advertise()
         elif t == Gst.MessageType.EOS:
             log.info("EOS; stopping")
@@ -347,7 +357,7 @@ class Bridge:
         return True
 
     def _advertise(self):
-        self._advertised = True                              # one-shot, even if advertising fails
+        self._advertised = True                              # enter once (on the PLAYING transition)
         if not _truthy(_env("CAM_ADVERTISE", "1")):
             log.info("CAM_ADVERTISE=0; discovery disabled")
             return
@@ -355,10 +365,36 @@ class Bridge:
             d = fill_dims_from_caps(base_descriptor(), self.pipeline.get_by_name("cam_src"))
             key = "fleet/{}/media/{}".format(vehicle_id(), sensor_id())
             self.advertiser = StreamAdvertiser(key, d, connect=zenoh_connect(), enabled=True)
-            self.advertiser.advertise()
             log.info("descriptor: %s", json.dumps(d))
         except Exception as e:                               # discovery must never take down the video path
-            log.warning("advertise step failed (%s); streaming continues", e)
+            log.warning("advertise setup failed (%s); streaming continues", e)
+            return
+        # The zenoh router (infra) can come up AFTER this bridge reaches PLAYING -- compose depends_on
+        # doesn't wait for readiness, and a cold rack boot brings everything up together. advertise()
+        # was one-shot, so a router-not-ready-yet race left the stream PERMANENTLY undiscovered (token
+        # never declared -> the dashboard's history-backed subscriber has nothing to replay). Retry on
+        # a timer until the token lands -- mirrors run.sh's existing wait-loop for the core's socket.
+        if not self._try_advertise():
+            log.info("advertise: zenoh not reachable yet; retrying every %ds until the token lands",
+                     self._advertise_retry_s)
+            GLib.timeout_add_seconds(self._advertise_retry_s, self._retry_advertise)
+
+    def _try_advertise(self) -> bool:
+        """One attempt to declare the liveliness token + queryable. StreamAdvertiser.advertise() is
+        idempotent and self-closes a failed session, so calling it again on the next tick cleanly
+        re-opens. Never raises (discovery must not take down the video path)."""
+        try:
+            return bool(self.advertiser and self.advertiser.advertise())
+        except Exception as e:                               # noqa: BLE001
+            log.debug("advertise attempt failed: %s", e)
+            return False
+
+    def _retry_advertise(self) -> bool:
+        if self._stopping or self._try_advertise():
+            if self.advertiser and self.advertiser.active:
+                log.info("advertise: token declared on retry; stream now discoverable")
+            return False                                     # stop the timer
+        return True                                          # keep retrying
 
     def _encode_geometry(self):
         """(w, h, fps, source) actually fed to webrtcsink's encoder. Prefer webrtcsink's negotiated
