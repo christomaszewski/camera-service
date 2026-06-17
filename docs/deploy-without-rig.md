@@ -80,7 +80,9 @@ export CAM_REGISTRY=registry.lan:5000        # cam-up points every image at the 
 
 # a fake-camera smoke: copy the demo config over once (from the build host):
 #   scp <build-host>:camera-service/core-driver/config/sensors/cam_a.yaml <vehicle>:~/cam_a.yaml
-# a real camera: same file with  gige.fake: false  +  gige.camera_id: <serial>
+# a real camera: start from the matching template instead (all under config/sensors/):
+#   cam_gige.yaml (GigE/PTP) · cam_rtsp.yaml (RTSP) · cam_usb.yaml (UVC) · cam_thermal.yaml (16-bit thermal)
+#   -- e.g. cam_gige.yaml with  gige.fake: false  +  gige.camera_id: <serial>
 
 ./cam-up ~/cam_a.yaml pull                   # REQUIRED: fetch images (the bundle has no build context to fall back on)
 ./cam-up --zenohd ~/cam_a.yaml up -d         # --zenohd also ensures the shared host router is up (drop it if rig runs it)

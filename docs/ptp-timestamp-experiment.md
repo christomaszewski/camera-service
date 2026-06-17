@@ -38,7 +38,8 @@ The three candidates (all logged every frame — see "Data" below):
 
 ## Run + capture
 
-Record ~30–60 s at your target frame rate (adapt `config/camera.yaml`). The startup
+Record ~30–60 s at your target frame rate (start from `config/sensors/cam_gige.yaml` — the
+purpose-built PTP-experiment config: chunk mode + `ptp_chunk` + `SlaveOnly` already wired). The startup
 log prints the first 5 frames' breakdown for a quick eyeball; the **full per-frame
 data is in the sidecar `*.csv`** (columns `chunk_ns, camera_ns, system_ns`), which is
 what to analyze. The `*.json` header records the active source and tick frequency.
