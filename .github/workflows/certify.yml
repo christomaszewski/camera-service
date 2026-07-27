@@ -1,14 +1,57 @@
-name: launcher-contract
-# The rig launcher contract, as an executable gate: `rig certify` runs cam-up's `config` verb under a
-# poisoned fleet env and asserts the contract held (COMPOSE_PROJECT_NAME honored, images pulled from
-# RIG_IMAGE_REGISTRY as :RIG_IMAGE_TAG, fleet ROS env unmangled, deterministic + host-independent output,
-# identity derived from the config name). This is what caught the project-name override and the
-# tag/platform coupling — both shipped past review and unit tests, neither survived certify.
+name: ci
+# Two gates:
+#
+#   unit    — this repo's own test suites. They are the ONLY thing standing between a refactor and a
+#             silently-broken 36-byte wire format that is hand-mirrored into three C++ tables, and
+#             until now nothing ran them automatically: CI's only job was the external launcher
+#             contract below, so `pytest` was a thing you had to remember. They are hardware-free and
+#             take well under a second.
+#
+#   certify — the rig launcher contract, as an executable gate: `rig certify` runs cam-up's `config`
+#             verb under a poisoned fleet env and asserts the contract held (COMPOSE_PROJECT_NAME
+#             honored, images pulled from RIG_IMAGE_REGISTRY as :RIG_IMAGE_TAG, fleet ROS env
+#             unmangled, deterministic + host-independent output, identity derived from the config
+#             name). This is what caught the project-name override and the tag/platform coupling —
+#             both shipped past review and unit tests, neither survived certify.
 on:
   push: { branches: [main] }
   pull_request:
 
 jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Everything from apt against the system python3, so there is no PEP-668/venv dance and gi is
+      # importable. python3-gi matters: without it test_recorder.py self-SKIPS, which is how a
+      # missing >8-bit depth guard on the HW encoder could sit in main unnoticed. Only the gi
+      # bindings are needed, not a working GStreamer — every recorder test monkeypatches the element
+      # registry. numpy is a hard requirement for collection (test_thermal_preview imports it).
+      - name: install test deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3-pytest python3-yaml python3-numpy python3-gi gir1.2-gstreamer-1.0
+      # plugins/webrtc-bridge/tools is in scope deliberately: test_h264_level.py and
+      # test_thermal_preview.py live there and were referenced by no script, doc or workflow.
+      #
+      # A SKIP has to fail this job. Two suites self-skip when `gi` won't import (test_recorder,
+      # test_pipeline_pts), which is the correct behaviour on a bare dev laptop and exactly the wrong
+      # behaviour here: if a runner-image change ever breaks the bindings, those suites would quietly
+      # stop running and the job would go green in precisely the way it exists to prevent. Same
+      # "measured zero vs unmeasured" trap the service itself had. `-p no:randomly` is not needed;
+      # `-ra` just makes the reason visible in the log when this trips.
+      - name: unit tests (no skips allowed)
+        run: |
+          set -o pipefail
+          python3 -m pytest core-driver/tests plugins/webrtc-bridge/tools -q -ra | tee /tmp/pytest.out
+          if grep -qE '[0-9]+ skipped' /tmp/pytest.out; then
+            echo "::error::tests were SKIPPED in CI -- the gi bindings are probably missing, so the"
+            echo "::error::recorder and PTS suites did not actually run. See the short summary above."
+            exit 1
+          fi
+
+
   certify:
     runs-on: ubuntu-latest
     steps:
