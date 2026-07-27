@@ -34,8 +34,20 @@ log = logging.getLogger("supervisor")
 RESTART_BACKOFF_S = 2.0
 RESTART_MAX = 5          # give up after this many rapid restarts ...
 RESTART_RESET_S = 30.0   # ... unless the plugin stayed up at least this long
-STOP_GRACE_S = 10.0
 STARTUP_STAGGER_S = 2.0  # let the core bring up its endpoints before plugins attach
+
+# Stop budgets, PER SERVICE CLASS. The core's clean-stop chain is a stack of timers -- up to 5 s for
+# the EOS drain (pipeline._force_quit), then the NULL transition, then the device release (GigE
+# control privilege), then up to 5 s joining the sidecar writer -- so a single 10 s budget shared
+# across every child could not cover it, and `kill()` landed mid-finalization: a truncated .mkv AND
+# an unreleased control privilege the camera then holds until its heartbeat timeout. That is the
+# exact incident docker-compose.yml's `stop_grace_period: 25s` was raised for, and it was
+# unreachable because THIS deadline is the tighter one.
+#
+# CORE_STOP_GRACE_S must stay comfortably inside that 25 s -- Docker SIGKILLs the whole container
+# there, and the supervisor still needs time to reap and log afterwards. Keep the two in step.
+CORE_STOP_GRACE_S = 20.0
+PLUGIN_STOP_GRACE_S = 10.0
 
 
 def _ros2_bridge_command(params: dict) -> list:
@@ -76,6 +88,7 @@ class Supervisor:
         self.cfg = load_config(config_path)
         self.services: list[Service] = []
         self._stopping = False
+        self._exit_rc = 0        # the sensor's exit status; a dead core propagates its own
 
     def _build_services(self) -> None:
         self.services.append(Service(
@@ -128,7 +141,7 @@ class Supervisor:
                 time.sleep(STARTUP_STAGGER_S)  # core first, then plugins attach to its endpoint
         log.info("supervising %d service(s)", len(self.services))
         self._monitor()
-        return 0
+        return self._exit_rc
 
     def _on_signal(self, signum, _frame) -> None:
         log.info("signal %s received; stopping sensor", signal.Signals(signum).name)
@@ -141,7 +154,15 @@ class Supervisor:
                     continue
                 rc = s.proc.returncode
                 if s.critical:
-                    log.error("core exited (rc=%s); tearing down sensor", rc)
+                    # Propagate the core's status instead of reporting a clean exit for a hard
+                    # failure: rc=2 is a config / pipeline-build error and rc=1 a bus ERROR, and with
+                    # `restart: unless-stopped` a swallowed 2 turned a misconfiguration into an
+                    # unbounded restart loop rendered as `Exited (0)` in `docker ps` / `rig status`.
+                    # `rc or 1` because an unexpected clean core exit still means the sensor is dead.
+                    # Only reachable inside `while not self._stopping`, so an operator `docker stop`
+                    # can't produce a false non-zero here.
+                    self._exit_rc = rc or 1
+                    log.error("core exited (rc=%s); tearing down sensor (exiting %d)", rc, self._exit_rc)
                     self._teardown()
                     return
                 self._handle_plugin_exit(s, rc)
@@ -174,6 +195,10 @@ class Supervisor:
             s.started_at = time.monotonic()
             log.error("plugin %s respawn failed: %s (%d/%d)", s.name, e, s.restarts, RESTART_MAX)
 
+    @staticmethod
+    def _stop_grace(s: Service) -> float:
+        return CORE_STOP_GRACE_S if s.critical else PLUGIN_STOP_GRACE_S
+
     def _teardown(self) -> None:
         self._stopping = True
         for s in self.services:           # SIGINT = clean stop (core finalizes its recording)
@@ -183,14 +208,20 @@ class Supervisor:
                     s.proc.send_signal(signal.SIGINT)
                 except ProcessLookupError:
                     pass
-        deadline = time.monotonic() + STOP_GRACE_S
-        for s in self.services:
+        # Every child was signalled at the same instant, so each budget is absolute FROM HERE and
+        # they run concurrently -- a single shared countdown let a slow plugin spend the core's
+        # budget before the core was even waited on. Shortest-first so a short wait never sits
+        # behind a long one (the core is last, and gets its full grace regardless).
+        signalled_at = time.monotonic()
+        for s in sorted(self.services, key=self._stop_grace):
             if s.proc is None:
                 continue
+            grace = self._stop_grace(s)
             try:
-                s.proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+                s.proc.wait(timeout=max(0.0, signalled_at + grace - time.monotonic()))
             except subprocess.TimeoutExpired:
-                log.warning("%s did not exit in time; killing", s.name)
+                log.warning("%s did not exit within %.0fs; killing (its recording may be truncated)",
+                            s.name, grace)
                 s.proc.kill()
         log.info("sensor stopped")
 
