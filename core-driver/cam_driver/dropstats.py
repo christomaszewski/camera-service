@@ -21,6 +21,7 @@ class DropStats:
         self.frames_missing = 0     # total frames skipped across those gaps
         self.enqueue_failures = 0   # received but the RECORDING feed could not accept (queue full / push != OK)
         self.publish_drops = 0      # best-effort transport publishes skipped (consumer stalled, queue full)
+        self.pts_rebases = 0        # timestamp discontinuities absorbed to keep the recorded PTS monotonic
         self._last_fid = None
 
     def observe_frame(self, frame_id: int) -> int:
@@ -42,6 +43,13 @@ class DropStats:
     def note_publish_drop(self) -> None:
         self.publish_drops += 1
 
+    def note_pts_rebase(self) -> None:
+        """A source timestamp discontinuity (clock reset / epoch change) was absorbed so the muxer
+        kept a monotonic PTS. Counted into the sidecar summary because it means the recording's PTS
+        timeline no longer maps onto absolute time by the header's base alone -- the per-frame
+        `timestamp_ns` column is authoritative from that point on."""
+        self.pts_rebases += 1
+
     def summary(self) -> dict:
         return {
             "frames": self.frames,
@@ -49,4 +57,5 @@ class DropStats:
             "frames_missing": self.frames_missing,
             "enqueue_failures": self.enqueue_failures,
             "publish_drops": self.publish_drops,
+            "pts_rebases": self.pts_rebases,
         }

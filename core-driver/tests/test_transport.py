@@ -68,6 +68,57 @@ def test_every_source_raw_format_is_carriable():
         assert out.pixfmt == fmt
 
 
+def _bridge_src(*parts):
+    """Read a C++ bridge source, or None when plugins/ isn't reachable -- a vendored launch surface
+    doesn't ship it, and the dev container mounts core-driver/ alone. Returning None (rather than
+    calling pytest.skip) keeps these runnable by the standalone `python3 tests/test_transport.py`
+    path too, which has no pytest."""
+    import os
+    p = os.path.join(os.path.dirname(__file__), "..", "..", "plugins", *parts)
+    if not os.path.exists(p):
+        return None
+    with open(p) as f:
+        return f.read()
+
+
+def test_header_bridges_cover_every_pixfmt_code():
+    # The 36-byte header's pixfmt table is hand-mirrored into TWO C++ switch statements. Nothing
+    # links them, so this asserts every code has a `case N:` in both -- an unhandled code makes the
+    # bridge drop 100% of frames behind a throttled warning, with no ERROR to trip the restart policy.
+    from cam_driver.transport import _CODE_TO_GST
+    for parts in (("ros2-bridge", "src", "cam_header_bridge.cpp"),
+                  ("ros1-bridge", "src", "cam_ros1_bridge.cpp")):
+        src = _bridge_src(*parts)
+        if src is None:
+            continue
+        missing = [c for c in sorted(_CODE_TO_GST) if f"case {c}:" not in src]
+        assert not missing, f"{parts[0]} pixfmt_info is missing wire code(s) {missing}"
+
+
+def test_unixfd_bridge_covers_every_raw_format():
+    # The JP7 transport is self-describing, so the unixfd bridge matches on the CAPS FORMAT STRING
+    # rather than a wire code -- same duplication, different spelling. It shipped covering only 8 of
+    # the 15 formats formats._GST_RAW admits, so UYVY/YV12/NV24/RGBA/BGRA/RGBx/BGRx published nothing
+    # on JP7 while working on JP6. Bayer is not here: it rides as video/x-bayer, checked below.
+    from cam_driver.formats import _GST_RAW
+    src = _bridge_src("ros2-bridge", "src", "cam_unixfd_bridge.cpp")
+    if src is None:
+        return
+    missing = [f for f in sorted(_GST_RAW) if f'"{f}"' not in src]
+    assert not missing, f"cam_unixfd_bridge caps_to_meta is missing format(s) {missing}"
+
+
+def test_unixfd_bridge_covers_every_bayer_pattern():
+    # 8-bit Bayer rides the unixfd transport as video/x-bayer,<pattern> (pipeline.py), so the four
+    # patterns formats._BAYER_MAP can emit must all be recognized too.
+    from cam_driver.formats import _BAYER_MAP
+    src = _bridge_src("ros2-bridge", "src", "cam_unixfd_bridge.cpp")
+    if src is None:
+        return
+    missing = [p for p in sorted(set(_BAYER_MAP.values())) if f'"{p}"' not in src]
+    assert not missing, f"cam_unixfd_bridge caps_to_meta is missing Bayer pattern(s) {missing}"
+
+
 def test_ts_source_codes_stable():
     # additive provenance rungs; 0-2 must NOT shift (the C++ bridges hard-code them)
     assert TS_SOURCE_CODE == {"ptp_chunk": 0, "camera": 1, "system": 2, "sof": 3, "rtp_ntp": 4}
