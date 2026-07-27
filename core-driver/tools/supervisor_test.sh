@@ -35,7 +35,10 @@ grep -q "frame_id=" "$LOG" \
   || fail "probe plugin read no frames off the transport endpoint"
 
 echo "== docker stop -> clean teardown =="
-docker stop -t 15 cam_sensor >/dev/null
+# -t must exceed supervisor.CORE_STOP_GRACE_S (20s), or Docker SIGKILLs the container BEFORE the
+# budget this test exists to validate has expired -- manufacturing the truncated-recording failure
+# instead of detecting it. tests/test_supervisor.py asserts the two stay ordered.
+docker stop -t 30 cam_sensor >/dev/null
 snapshot
 grep -iE "signal|stopping|EOS|sensor stopped" "$LOG" | tail -8 || true
 grep -q "stop requested: stopping acquisition" "$LOG" \

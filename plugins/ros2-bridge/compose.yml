@@ -13,6 +13,13 @@ services:
       context: ../..
       dockerfile: plugins/ros2-bridge/Dockerfile
     init: true
+    # PID 1 here is `ros2 launch`, which does NOT act on SIGTERM -- measured: the container is still
+    # running 20s after SIGTERM and Docker then SIGKILLs it, so EVERY `compose down` hard-killed the
+    # bridge and no destructor (hence no clean GStreamer teardown, no component shutdown) ever ran.
+    # On SIGINT the same container exits 0 in ~1s. Verified identically against pre-change main, so
+    # this is long-standing, not new -- but it is what makes the teardown ordering in
+    # CamBridgeBase::stop_pipeline actually reachable on a normal stop.
+    stop_signal: SIGINT
     network_mode: ${CAM_NETWORK:-host}     # host = join the host ROS2 graph
     ipc: host                               # share /dev/shm with the core (JP6 shm transport; harmless for unixfd)
     # Sized in lockstep with the zenoh SHM pool: sensor_env derives CAM_ROS2_SHM_SIZE (= pool + 64 MiB
