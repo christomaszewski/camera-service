@@ -103,16 +103,22 @@ CamBridgeBase::CamBridgeBase(const std::string& node_name, const rclcpp::NodeOpt
 void CamBridgeBase::stop_pipeline() {
   if (stopped_) return;
   stopped_ = true;
-  // Order matters. Disconnect first, so no NEW sample can enter on_new_sample(). Then NULL, which
-  // joins the streaming threads -- so by the time set_state returns, any IN-FLIGHT callback has also
-  // returned and no further virtual dispatch through this object is possible. Only then stop the bus
-  // watcher: it is the slow part (up to one 500 ms poll tick) and nothing depends on it being first.
+  // Raise the flag FIRST. It is free, and it makes the bus watcher ignore everything that follows:
+  // the NULL transition below tears the graph down while the producer may be going away in the same
+  // `compose down`, so shmsrc/unixfdsrc legitimately posts ERROR/EOS mid-teardown. With the flag
+  // still false the watcher treats that as a producer restart and `_exit(EXIT_FAILURE)`s -- a CLEAN
+  // stop reported as `Exited (1)`, intermittently, which is a ghost to debug.
+  stopping_ = true;
+  // Then order the rest by what it protects. Disconnect, so no NEW sample can enter on_new_sample().
+  // Then NULL, which joins the streaming threads -- so by the time set_state returns, any IN-FLIGHT
+  // callback has also returned and no further virtual dispatch through this object is possible. The
+  // bus JOIN goes last because it is the slow part (up to one 500 ms poll tick); only the join has
+  // to be last, which is why the flag is hoisted above it.
   if (sink_ && sample_handler_) {
     g_signal_handler_disconnect(sink_, sample_handler_);
     sample_handler_ = 0;
   }
   if (pipeline_) gst_element_set_state(pipeline_, GST_STATE_NULL);
-  stopping_ = true;   // the watcher polls with a finite timeout, so join returns within one tick
   if (bus_thread_.joinable()) bus_thread_.join();
 }
 

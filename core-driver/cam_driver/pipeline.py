@@ -729,5 +729,9 @@ class CapturePipeline:
         log.info("drop summary: frames=%(frames)d source_gaps=%(source_gaps)d "
                  "frames_missing=%(frames_missing)d enqueue_failures=%(enqueue_failures)d "
                  "publish_drops=%(publish_drops)d pts_rebases=%(pts_rebases)d", s)
-        self.sidecar.write_summary(s)
+        # stop() BEFORE write_summary: stop() joins the CSV writer, which is where the final flush
+        # happens -- so a failure in that last flush sets the writer's failed flag in time for the
+        # summary to attest it. The other order wrote the JSON while the CSV was still open, and a
+        # final-flush ENOSPC then went unrecorded in the very field added to make it self-describing.
         self.sidecar.stop()
+        self.sidecar.write_summary(s)

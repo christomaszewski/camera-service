@@ -115,6 +115,22 @@ def test_core_stop_budget_fits_inside_the_compose_stop_grace_period():
         "kills the container before the supervisor's own deadline can fire")
 
 
+def test_supervisor_smoke_test_waits_longer_than_the_core_budget():
+    # Third file in the same invariant. supervisor_test.sh is what VALIDATES the clean-stop chain, so
+    # a `docker stop -t` at or below CORE_STOP_GRACE_S makes it SIGKILL the container before the
+    # budget expires -- manufacturing the truncated-recording failure it is supposed to detect.
+    script = os.path.join(os.path.dirname(__file__), "..", "tools", "supervisor_test.sh")
+    if not os.path.exists(script):
+        return
+    with open(script) as f:
+        m = re.search(r"docker stop -t\s*(\d+)", f.read())
+    assert m, "supervisor_test.sh no longer stops the container with an explicit -t timeout"
+    stop_t = int(m.group(1))
+    assert stop_t > CORE_STOP_GRACE_S, (
+        f"supervisor_test.sh uses `docker stop -t {stop_t}` but CORE_STOP_GRACE_S={CORE_STOP_GRACE_S}; "
+        "the smoke test would kill the core mid-finalization rather than observe a clean stop")
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

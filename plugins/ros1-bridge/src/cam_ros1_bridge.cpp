@@ -158,18 +158,22 @@ class CamRos1Bridge {
   }
 
   ~CamRos1Bridge() {
-    // Stop the dataflow FIRST. on_sample() -> publish() reads frame_id_, encoding_ and pub_, which
-    // are destroyed the instant this body returns, so a sample still in flight on the GStreamer
-    // streaming thread is a use-after-free. Disconnect, then NULL (which joins the streaming
-    // threads, so any in-flight callback has returned by the time it comes back), then the bus
-    // watcher -- previously the bus join (up to one 500 ms poll tick) ran FIRST and widened the
-    // window it was standing in. Mirrors CamBridgeBase::stop_pipeline in the ros2 bridge.
+    // Flag first: the NULL transition below can race a producer going away in the same
+    // `compose down`, and shmsrc legitimately posts ERROR/EOS then -- with the flag still false the
+    // watcher reads that as a producer restart and `_exit(EXIT_FAILURE)`s, turning a clean stop into
+    // an intermittent `Exited (1)`.
+    stopping_ = true;
+    // Then stop the dataflow, before the members go. on_sample() -> publish() reads frame_id_,
+    // encoding_ and pub_, which are destroyed the instant this body returns, so a sample still in
+    // flight on the GStreamer streaming thread is a use-after-free. Disconnect, then NULL (which
+    // joins the streaming threads, so any in-flight callback has returned by the time it comes
+    // back), then the bus join last -- previously that join ran FIRST and widened the window it was
+    // standing in. Mirrors CamBridgeBase::stop_pipeline in the ros2 bridge.
     if (sink_ && sample_handler_) {
       g_signal_handler_disconnect(sink_, sample_handler_);
       sample_handler_ = 0;
     }
     if (pipeline_) gst_element_set_state(pipeline_, GST_STATE_NULL);
-    stopping_ = true;   // the watcher polls with a finite timeout, so join returns within one tick
     if (bus_thread_.joinable()) bus_thread_.join();
     if (sink_) gst_object_unref(sink_);
     if (bus_) gst_object_unref(bus_);
