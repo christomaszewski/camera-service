@@ -35,6 +35,7 @@ import logging
 import os
 import threading
 import time
+from collections import OrderedDict
 from typing import Optional
 
 import gi
@@ -44,7 +45,7 @@ from gi.repository import GLib, Gst
 from . import recorder as rec
 from . import transport
 from .dropstats import DropStats
-from .formats import bytes_per_frame, parse_pixel_format, select_encoder
+from .formats import bytes_per_frame, parse_pixel_format
 from .sidecar import SidecarHeader, SidecarWriter
 from .sources.base import SourceConfigChanged
 from .timestamps import FrameStamp
@@ -57,6 +58,19 @@ log = logging.getLogger(__name__)
 # instead of growing RAM at sensor bandwidth until the OOM killer takes the recording with it.
 _REC_QUEUE_FRAMES = 32   # recording feeds (camsrc/recsrc/encsrc): ride out brief stalls before dropping
 _PUB_QUEUE_FRAMES = 8    # best-effort publish feeds (transport/unixfd): drop early, stay lean
+
+# A forward PTS step larger than this is a CLOCK-SOURCE change, not a capture gap -- e.g. an RTSP
+# reopen drops the NTP anchor, so frames carry host arrival time until the first RTCP SR and then
+# jump to the camera's wall-clock (the two clocks are minutes-to-hours apart). Left alone, that step
+# lands in the muxer: splitmuxsink's max-size-time is exceeded by every subsequent buffer, so it cuts
+# a file per keyframe until the disk fills. Absorbed, the recording timeline stays continuous and the
+# TRUE per-frame timestamp is still in the sidecar CSV, so absolute time is recoverable either way.
+# A genuine outage shorter than this (a reconnect) stays visible as a real gap in the recording.
+_MAX_PTS_JUMP_NS = 60 * 1_000_000_000
+
+# Per-frame PTS memo depth. Only needs to span the lag between the two callbacks of a stream-copy
+# source (decode branch vs encoded branch); 256 frames is seconds of slack at any real frame rate.
+_PTS_MEMO_FRAMES = 256
 
 
 class CapturePipeline:
@@ -74,6 +88,9 @@ class CapturePipeline:
         self._last_pub_ts: Optional[int] = None
         self._pub_err_last: float = 0.0             # monotonic s of the last logged publish error
         self._last_pts: Optional[int] = None        # for the monotonic-PTS guard
+        self._pts_skew = 0                          # accumulated discontinuity correction (see _pts_for)
+        self._pts_warn_last: float = 0.0            # monotonic s of the last logged PTS rebase
+        self._pts_memo: "OrderedDict[int, int]" = OrderedDict()   # frame_id -> pts (bounded)
         self._frame_interval_ns = 1_000_000         # set in build() from frame_rate
         self._reconnecting = False
         self._stop_event = threading.Event()         # wakes the reconnect backoff on shutdown
@@ -141,10 +158,16 @@ class CapturePipeline:
         rec_desc = None
         if self.cfg.recording.enabled:
             loc = f"{self.cfg.recording.output_dir.rstrip('/')}/{self.cfg.recording.name_prefix}"
-            rec_desc = rec.build_recorder_description(self.cfg.recording, self._bits, loc, fps,
-                                                      self._is_color, enc_parser)
-            self._stream_copy = (select_encoder(self.cfg.recording.encoder, self._bits,
-                                                 self._is_color, encoded=is_encoded) == "stream-copy")
+            # The recorder resolves the encoder through every degrade (auto/explicit selection, the
+            # stream-copy-needs-a-parser fallback, the >8-bit depth guard, the element-availability
+            # probe) and hands the answer back, so the wiring decision below has ONE owner. Deriving
+            # it here from select_encoder alone used to disagree with the recorder for
+            # `encoder: stream-copy` on a RAW source: this said stream-copy (dropping the tee branch)
+            # while the recorder had already fallen back to ffv1, leaving the ffv1 fragment hung off
+            # an appsrc no raw source ever feeds -- a pipeline that built cleanly and recorded nothing.
+            rec_desc, rec_enc = rec.build_recorder_description(self.cfg.recording, self._bits, loc,
+                                                              fps, self._is_color, enc_parser)
+            self._stream_copy = (rec_enc == "stream-copy")
             if self._stream_copy:
                 # Encoded source: the recorder stream-copies the delivered bitstream via a SEPARATE
                 # encoded appsrc (encsrc, appended below) -- NOT a tee branch. The decoded frames still
@@ -270,7 +293,14 @@ class CapturePipeline:
         if rate <= 0:
             return True
         min_interval = 1_000_000_000.0 / rate
-        if self._last_pub_ts is None or (ts_ns - self._last_pub_ts) >= min_interval:
+        # `ts_ns < _last_pub_ts` resets the window instead of waiting it out: the source clock CAN
+        # step backward (camera clock reset across a reconnect, RTSP epoch change -- the same event
+        # _pts_for corrects downstream), and without this the window never reopens again, so the
+        # plugin endpoint stops publishing for the REST OF THE RUN. Silently: a skip here happens
+        # before the drop accounting, so publish_drops stays 0 and the health line reads "no drops"
+        # while both bridges see nothing.
+        if (self._last_pub_ts is None or ts_ns < self._last_pub_ts
+                or (ts_ns - self._last_pub_ts) >= min_interval):
             self._last_pub_ts = ts_ns
             return True
         return False
@@ -304,14 +334,64 @@ class CapturePipeline:
             return False
         return True
 
-    def _ensure_base(self, stamp: FrameStamp) -> None:
-        """Set the PTS base + write the sidecar header once, on the first frame from EITHER the raw
-        (on_frame) or encoded (on_encoded) callback. They share the per-frame stamp, so the base is
-        the same regardless of which fires first; locked because the two run on separate threads."""
+    def _pts_for(self, stamp: FrameStamp) -> int:
+        """The buffer PTS for `stamp`: computed ONCE per frame, shared by every branch that carries
+        it, and the ONLY writer of the time base.
+
+        Both callbacks of a stream-copy source are handed the SAME FrameStamp for a frame (the
+        source correlates them on a pre-tee probe, see sources.gstbase), so memoizing on frame_id
+        makes the recording (_on_encoded) and the consumer path (_on_frame) agree by construction --
+        and, critically, stops the BEST-EFFORT decode branch from moving the time base the RECORDING
+        rides on. That was a real defect: a decode-branch parser re-times buffers (jpegparse does
+        this to MJPEG), so _stamp_for misses and reuses the newest stamp; two such frames in a row
+        look like a backward step, the old code rebased _base_ts, and every subsequent recorded
+        frame's PTS was permanently one frame interval too large -- cumulatively, while nothing was
+        wrong with the recording branch at all.
+
+        Discontinuities are absorbed into a skew rather than the base, and the check is TWO-SIDED:
+        backward/repeated stamps (a camera clock reset across a reconnect) and forward clock-SOURCE
+        changes (_MAX_PTS_JUMP_NS) both have to be corrected, or the muxer gets a PTS it can't use.
+        The lock is what makes the shared state safe across the two feeder threads -- _base_ts was
+        previously mutated outside it, which is exactly what _base_lock existed to prevent."""
         with self._base_lock:
+            memo = self._pts_memo.get(stamp.frame_id)
+            if memo is not None:
+                return memo
             if self._base_ts is None:
                 self._base_ts = stamp.timestamp_ns
                 self._write_header()
+            pts = stamp.timestamp_ns - self._base_ts + self._pts_skew
+            if self._last_pts is not None:
+                delta = pts - self._last_pts
+                if delta <= 0 or delta > _MAX_PTS_JUMP_NS:
+                    # Absorb the step into the skew, NOT a per-frame clamp: clamping stacks every
+                    # affected frame at the same PTS (matroskamux then drops or reorders them), while
+                    # a skew keeps all LATER frames continuous too.
+                    target = self._last_pts + self._frame_interval_ns
+                    self._pts_skew += target - pts
+                    self._note_pts_rebase(delta)
+                    pts = target
+            if pts < 0:
+                pts = 0
+            self._last_pts = pts
+            self._pts_memo[stamp.frame_id] = pts
+            while len(self._pts_memo) > _PTS_MEMO_FRAMES:
+                self._pts_memo.popitem(last=False)   # bounded; evict oldest
+            return pts
+
+    def _note_pts_rebase(self, delta_ns: int) -> None:
+        """Count + (throttled) log a PTS rebase. Counted so the sidecar's drop summary attests that
+        the recorded timeline was corrected -- an operator reading pts_ns back as absolute time needs
+        to know. Throttled because a discontinuity usually arrives as a BURST (a decoder queue
+        draining with duplicate stamps), which at frame rate would bury the rest of the run."""
+        self.drops.note_pts_rebase()
+        now = time.monotonic()
+        if now - self._pts_warn_last >= 5.0:
+            self._pts_warn_last = now
+            log.warning("timestamp discontinuity (%s %.3fs); rebased PTS to stay monotonic -- the true "
+                        "per-frame timestamp is still recorded in the sidecar CSV (%d rebase(s) so far)",
+                        "backward/repeated" if delta_ns <= 0 else "forward jump",
+                        abs(delta_ns) / 1e9, self.drops.pts_rebases)
 
     def _account(self, stamp: FrameStamp, pts: int, recorded: bool = True) -> None:
         """Per-RECORDED-frame accounting: frame-id drop detection + the sidecar timestamp row
@@ -346,18 +426,7 @@ class CapturePipeline:
         for stream-copy it lives in _on_encoded, so leaky decode drops never desync the sidecar."""
         if self._stopping:
             return   # draining for EOS; stop feeding the pipeline
-        self._ensure_base(stamp)
-        pts = stamp.timestamp_ns - self._base_ts
-        if self._last_pts is not None and pts <= self._last_pts:
-            # Non-monotonic timestamp (e.g. the camera clock reset across a reconnect).
-            # Rebase so the muxer keeps a strictly-increasing PTS; the true timestamp is
-            # still recorded per-frame in the sidecar CSV, so absolute time is recoverable.
-            self._base_ts = stamp.timestamp_ns - (self._last_pts + self._frame_interval_ns)
-            pts = self._last_pts + self._frame_interval_ns
-            log.warning("timestamp discontinuity (ts went backward); rebased PTS to stay monotonic")
-        if pts < 0:
-            pts = 0
-        self._last_pts = pts
+        pts = self._pts_for(stamp)
 
         rec_ok = not self._queue_full(self.appsrc, len(frame_bytes), "camsrc")
         if rec_ok:
@@ -444,10 +513,7 @@ class CapturePipeline:
         if caps_str and not self._enc_caps_applied:
             self.enc_src.set_property("caps", Gst.Caps.from_string(caps_str))
             self._enc_caps_applied = True
-        self._ensure_base(stamp)
-        pts = stamp.timestamp_ns - self._base_ts
-        if pts < 0:
-            pts = 0
+        pts = self._pts_for(stamp)   # shared with _on_frame; see _pts_for for why that matters here
         rec_ok = not self._queue_full(self.enc_src, len(enc_bytes), "encsrc")
         if rec_ok:
             ebuf = Gst.Buffer.new_wrapped(enc_bytes)
@@ -529,10 +595,10 @@ class CapturePipeline:
         if self._stopping:
             return False
         s = self.drops.summary()
-        if s["source_gaps"] or s["enqueue_failures"] or s["publish_drops"]:
+        if s["source_gaps"] or s["enqueue_failures"] or s["publish_drops"] or s["pts_rebases"]:
             log.warning("health: frames=%(frames)d source_gaps=%(source_gaps)d "
                         "frames_missing=%(frames_missing)d enqueue_failures=%(enqueue_failures)d "
-                        "publish_drops=%(publish_drops)d", s)
+                        "publish_drops=%(publish_drops)d pts_rebases=%(pts_rebases)d", s)
         else:
             log.info("health: frames=%(frames)d, no drops", s)
         return True
@@ -577,6 +643,9 @@ class CapturePipeline:
                     break            # stop requested mid-backoff
                 backoff = min(backoff * 2, self.cfg.camera.reconnect_backoff_max_s)
                 continue
+            # The reopened source restarts its own timeline; drop the publish-rate window so a
+            # backward step across the reconnect can't hold the plugin endpoint shut (_should_publish).
+            self._last_pub_ts = None
             self.source.start(self._on_frame, self._on_encoded)
             log.info("source reconnected after %d attempt(s); resuming capture", attempt)
             self._reconnecting = False
@@ -608,6 +677,6 @@ class CapturePipeline:
         s = self.drops.summary()
         log.info("drop summary: frames=%(frames)d source_gaps=%(source_gaps)d "
                  "frames_missing=%(frames_missing)d enqueue_failures=%(enqueue_failures)d "
-                 "publish_drops=%(publish_drops)d", s)
+                 "publish_drops=%(publish_drops)d pts_rebases=%(pts_rebases)d", s)
         self.sidecar.write_summary(s)
         self.sidecar.stop()
