@@ -643,9 +643,18 @@ class CapturePipeline:
                     break            # stop requested mid-backoff
                 backoff = min(backoff * 2, self.cfg.camera.reconnect_backoff_max_s)
                 continue
-            # The reopened source restarts its own timeline; drop the publish-rate window so a
-            # backward step across the reconnect can't hold the plugin endpoint shut (_should_publish).
+            # The reopened source restarts its own timeline, so drop both pieces of per-frame state
+            # that are keyed to the OLD one:
+            #  - the publish-rate window, or a backward step across the reconnect holds the plugin
+            #    endpoint shut for the rest of the run (_should_publish);
+            #  - the PTS memo, because a rebuilt GigE stream restarts the GVSP block id at 1. A flap
+            #    inside the memo's ~256-frame window would then HIT on a recycled frame_id and return
+            #    that OLD frame's pts -- and the memo hit returns BEFORE the monotonicity guard, so a
+            #    backward PTS would go straight into the muxer. (usb/rtsp are immune: gstbase's
+            #    frame_id is a host counter that deliberately survives reopen for drop accounting.)
             self._last_pub_ts = None
+            with self._base_lock:
+                self._pts_memo.clear()
             self.source.start(self._on_frame, self._on_encoded)
             log.info("source reconnected after %d attempt(s); resuming capture", attempt)
             self._reconnecting = False
