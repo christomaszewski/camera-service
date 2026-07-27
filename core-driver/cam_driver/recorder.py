@@ -99,10 +99,16 @@ def _gop_frames(cfg, fps: float) -> int:
 
 
 def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps: float = 0.0,
-                               is_color: bool = False, encoded_parser: str = None) -> str:
-    """Return a gst-launch fragment beginning with a sink pad (linkable from `tee.` or an appsrc).
-    encoded_parser set => the source is already-encoded: STREAM-COPY through that parser (no
-    decode/re-encode) -- the faithful path for MJPEG/H.264/H.265 delivery."""
+                               is_color: bool = False, encoded_parser: str = None):
+    """Return `(gst-launch fragment, resolved encoder)`. The fragment begins with a sink pad
+    (linkable from `tee.` or an appsrc); encoded_parser set => the source is already-encoded:
+    STREAM-COPY through that parser (no decode/re-encode) -- the faithful path for MJPEG/H.264/H.265.
+
+    The encoder is returned because the CALLER has to wire the recorder differently for stream-copy
+    (its own encoded appsrc) than for a re-encode (a tee branch), and re-deriving that from
+    select_encoder alone misses every degrade below. pipeline.build() used to do exactly that, so
+    `encoder: stream-copy` on a RAW source detached the recorder from the tee and hung ffv1 off an
+    appsrc nothing ever fed -- a config that recorded nothing at all, silently."""
     enc = select_encoder(cfg.encoder, bits_per_pixel, is_color, encoded=bool(encoded_parser))
     sink = _splitmux(location_base, cfg.segment_seconds)
 
@@ -114,14 +120,17 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
             log.info("recorder: stream-copy (%s) -> %s-*.mkv (delivered bitstream, no re-encode)",
                      encoded_parser, location_base)
             sc_sink = _splitmux(location_base, cfg.segment_seconds, keyframe_requests=False)
-            return f"queue max-size-buffers=12 name=rec_q ! {encoded_parser} ! " + sc_sink
+            return f"queue max-size-buffers=12 name=rec_q ! {encoded_parser} ! " + sc_sink, enc
 
-    if enc == "x265-lossless" and bits_per_pixel > 8:
-        # >8-bit rides in a GRAY16 container and x265's input formats top out at 12-bit: there is
-        # no depth-preserving format to pin, so videoconvert would silently shift real sensor bits
-        # away and the "lossless" encode isn't. FFV1 keeps the 16-bit container bit-exact.
-        log.warning("recorder: x265-lossless cannot preserve >8-bit (GRAY16) input; "
-                    "falling back to ffv1")
+    if enc in ("x265-lossless", "hw-hevc-lossless") and bits_per_pixel > 8:
+        # >8-bit rides in a GRAY16 container and NEITHER lossless path can carry it: x265's input
+        # formats top out at 12-bit, and the Orin's HW lossless is 8-bit only (there is no 10/12-bit
+        # NVENC lossless) -- videoconvert happily negotiates GRAY16_LE -> NV24 and keeps only the
+        # HIGH byte, so a pinned `hw-hevc-lossless` on a 16-bit radiometric camera would throw away
+        # the sensor's low 8 bits while the sidecar still attests bits_per_pixel: 16. FFV1 keeps the
+        # 16-bit container bit-exact. The guard covers both encoders because they share the
+        # constraint; it previously covered only x265.
+        log.warning("recorder: %s cannot preserve >8-bit (GRAY16) input; falling back to ffv1", enc)
         enc = "ffv1"
     enc = _resolve_available(enc)
 
@@ -154,7 +163,7 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
             f"{vconv} ! video/x-raw,format=NV24 ! "
             "nvvidconv ! video/x-raw(memory:NVMM),format=NV24 ! "
             f"nvv4l2h265enc enable-lossless=1{opts} ! h265parse ! " + sink
-        )
+        ), enc
 
     if enc == "x265-lossless":
         # CPU lossless + temporal; 8-bit only (>8-bit fell back to ffv1 above). Throughput-limited
@@ -169,7 +178,7 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
         return (
             f"queue max-size-buffers=12 name=rec_q ! {vconv} ! {pin}"
             f'x265enc option-string="{opts}" speed-preset=ultrafast ! h265parse ! ' + sink
-        )
+        ), enc
 
     # ffv1 (default for >8-bit): truly lossless, high-bit-depth, but INTRA-only -> the temporal knobs
     # (keyframe_interval_s / bframes) don't apply.
@@ -183,4 +192,4 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
     return (
         f"queue max-size-buffers=12 name=rec_q ! {vconv} ! "
         "avenc_ffv1 coder=1 context=1 threads=0 slices=4 slicecrc=1 ! " + sink
-    )
+    ), enc

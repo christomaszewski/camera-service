@@ -44,10 +44,16 @@ _DEV = {"x265enc", "avenc_ffv1"}          # x86 / container without the L4T stac
 _BARE = set()                             # no optional codec packages at all
 
 
-def _desc(present, encoder="auto", bits=8, is_color=False, parser=None):
+def _build(present, encoder="auto", bits=8, is_color=False, parser=None):
+    """-> (launch fragment, RESOLVED encoder). The resolved encoder is what pipeline.build() wires
+    the recorder from, so it is part of the contract, not an implementation detail."""
     rec.Gst = _FakeGst(present)
     return rec.build_recorder_description(
         RecordingConfig(encoder=encoder), bits, "/data/recordings/t", 25.0, is_color, parser)
+
+
+def _desc(present, encoder="auto", bits=8, is_color=False, parser=None):
+    return _build(present, encoder, bits, is_color, parser)[0]
 
 
 def test_auto_8bit_uses_nvenc_when_present():
@@ -89,6 +95,17 @@ def test_x265_gray16_depth_guard():
     assert "avenc_ffv1" in d and "x265enc" not in d
 
 
+def test_hw_hevc_gray16_depth_guard():
+    # Same constraint, other encoder: the Orin has NO 10/12-bit HW lossless, and
+    # `videoconvert ! NV24` happily negotiates from GRAY16_LE while keeping only the HIGH byte -- so
+    # a pinned hw-hevc-lossless on a 16-bit radiometric camera silently threw away the low 8 bits
+    # while the sidecar still attested bits_per_pixel: 16. _JETSON has the NVENC elements, so the
+    # availability probe cannot be what makes this pass.
+    d, enc = _build(_JETSON, encoder="hw-hevc-lossless", bits=16)
+    assert enc == "ffv1"
+    assert "avenc_ffv1" in d and "nvv4l2h265enc" not in d and "NV24" not in d
+
+
 def test_ffv1_encodes_threaded():
     # avenc_ffv1 defaults to ONE thread, which caps 16-bit 640x512 at ~26-29 fps on an Orin core --
     # a 60 fps thermal camera stalled the recorder in the field (tee blocked, consumers starved).
@@ -108,8 +125,28 @@ def test_no_lossless_encoder_at_all_raises():
 
 def test_stream_copy_needs_no_encoder_elements():
     # stream-copy is parser + mux only; the probe must not block it on a bare host
-    d = _desc(_BARE, parser="h264parse")
+    d, enc = _build(_BARE, parser="h264parse")
+    assert enc == "stream-copy"
     assert "h264parse" in d and "rec_q" in d
+
+
+def test_stream_copy_on_a_raw_source_resolves_to_ffv1():
+    # The one cell of the encoder x source-kind matrix that had no coverage, and it recorded NOTHING:
+    # pipeline.build() used to re-derive "is this stream-copy?" from select_encoder alone, which
+    # honors an explicit `stream-copy` regardless of the source, while the recorder had already
+    # fallen back to ffv1 here. The pipeline then dropped the tee branch and hung the ffv1 fragment
+    # off an encoded appsrc that a raw source never feeds. The RESOLVED encoder is what breaks the
+    # tie, so it has to say ffv1 -- and the fragment must be a tee-linkable re-encode, not a copy.
+    d, enc = _build(_DEV, encoder="stream-copy", parser=None)
+    assert enc == "ffv1"
+    assert "avenc_ffv1" in d and "videoconvert" in d
+
+
+def test_resolved_encoder_reflects_availability_fallback():
+    # The resolved encoder must survive the availability probe too -- pipeline.build() wires from
+    # this value, so a hw request degraded to ffv1 on a non-Jetson must report ffv1, not the request.
+    _d, enc = _build(_DEV, encoder="hw-hevc-lossless")
+    assert enc == "ffv1"
 
 
 def _main():
