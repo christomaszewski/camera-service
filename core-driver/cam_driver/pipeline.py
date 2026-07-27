@@ -77,6 +77,10 @@ _PTS_MEMO_FRAMES = 256
 # stop_grace_period -- keep all three in step.
 _RECONNECT_JOIN_S = 5.0
 
+# Health-tick period. Also the window the stall check reasons over: no frames for this long, with no
+# reconnect in progress, is a stall rather than an idle.
+_HEALTH_INTERVAL_S = 30
+
 
 class CapturePipeline:
     def __init__(self, cfg, source, sidecar: SidecarWriter):
@@ -98,6 +102,7 @@ class CapturePipeline:
         self._pts_memo: "OrderedDict[int, int]" = OrderedDict()   # frame_id -> pts (bounded)
         self._frame_interval_ns = 1_000_000         # set in build() from frame_rate
         self._reconnecting = False
+        self._last_health_frames = 0   # frames at the previous health tick (stall detection)
         self._reconnect_thread: Optional[threading.Thread] = None   # owned so shutdown can join it
         self._stop_event = threading.Event()         # wakes the reconnect backoff on shutdown
         self._n_pushed = 0
@@ -589,7 +594,7 @@ class CapturePipeline:
         self.source.start(self._on_frame, self._on_encoded)
         if self.source.reconnect_enabled:
             GLib.timeout_add_seconds(1, self._watchdog)
-        GLib.timeout_add_seconds(30, self._log_health)
+        GLib.timeout_add_seconds(_HEALTH_INTERVAL_S, self._log_health)
         log.info("running")
         try:
             self.loop.run()
@@ -597,10 +602,22 @@ class CapturePipeline:
             self.shutdown()
 
     def _log_health(self) -> bool:
-        """~every 30s: surface drop accounting as a first-class live signal (not just at shutdown)."""
+        """~every _HEALTH_INTERVAL_S: surface drop accounting as a first-class live signal (not just
+        at shutdown), and -- first -- whether frames are arriving AT ALL.
+
+        The frame count not MOVING is the signal that matters most, and it was the one thing this
+        never said. Every counter below is cumulative, so a pipeline sitting in PLAYING with a dead
+        source prints a frozen line that reads exactly like a healthy idle one; the operator only
+        finds out when the data turns out to be missing. Assert flow, not existence."""
         if self._stopping:
             return False
         s = self.drops.summary()
+        # An active reconnect is a KNOWN gap, already logged by the watchdog -- don't double-report.
+        if self._n_pushed == self._last_health_frames and not self._reconnecting:
+            log.error("health: NO frames in the last %ds (total=%d) -- the pipeline is still PLAYING "
+                      "but capture is stalled, not idle", _HEALTH_INTERVAL_S, self._n_pushed)
+            return True
+        self._last_health_frames = self._n_pushed
         if s["source_gaps"] or s["enqueue_failures"] or s["publish_drops"] or s["pts_rebases"]:
             log.warning("health: frames=%(frames)d source_gaps=%(source_gaps)d "
                         "frames_missing=%(frames_missing)d enqueue_failures=%(enqueue_failures)d "
@@ -625,6 +642,19 @@ class CapturePipeline:
         return True
 
     def _reconnect(self) -> None:
+        """Thread target. The loop is separate so `_reconnecting` is released NO MATTER HOW it ends.
+
+        That flag is what the watchdog gates on (`if self._reconnecting: return True`), so losing it
+        is not a degraded state, it is a terminal one: no further reconnect is ever attempted, the
+        pipeline sits in PLAYING with a dead source, the recording is never finalized, and the health
+        line goes on printing frozen counters that read as healthy. A `finally` is the only way to
+        make that invariant hold against a raise nobody predicted."""
+        try:
+            self._reconnect_loop()
+        finally:
+            self._reconnecting = False
+
+    def _reconnect_loop(self) -> None:
         """Backoff loop (own thread): re-open the source until it returns, then re-arm the
         feeder. The GStreamer pipeline stays PLAYING throughout -- the appsrc just idles, so
         the recording isn't finalized and consumers keep their shm connection."""
@@ -635,6 +665,40 @@ class CapturePipeline:
             attempt += 1
             try:
                 self.source.reopen()
+                if self._stopping:
+                    # A stop landed INSIDE the reopen window, which is multi-second by construction
+                    # (open + configure + up to ptp_lock_timeout_s waiting for PTP). Re-arming here
+                    # would take a FRESH device control privilege after shutdown() already released
+                    # it, and this daemon thread would then die at interpreter exit still holding it
+                    # -- exactly the non-deterministic GigE release #41 removed. Hand it straight back.
+                    log.info("stop requested during reopen; releasing the reacquired source")
+                    try:
+                        self.source.stop()
+                        self.source.close()
+                    except Exception as e:   # noqa: BLE001 -- teardown must finish regardless
+                        log.warning("releasing the source after an aborted reconnect: %s", e)
+                    return
+                # The reopened source restarts its own timeline, so drop both pieces of per-frame
+                # state that are keyed to the OLD one:
+                #  - the publish-rate window, or a backward step across the reconnect holds the
+                #    plugin endpoint shut for the rest of the run (_should_publish);
+                #  - the PTS memo, because a rebuilt GigE stream restarts the GVSP block id at 1. A
+                #    flap inside the memo's ~256-frame window would then HIT on a recycled frame_id
+                #    and return that OLD frame's pts -- and the memo hit returns BEFORE the
+                #    monotonicity guard, so a backward PTS would go straight into the muxer.
+                #    (usb/rtsp are immune: gstbase's frame_id is a host counter that deliberately
+                #    survives reopen for drop accounting.)
+                self._last_pub_ts = None
+                with self._base_lock:
+                    self._pts_memo.clear()
+                # start() is INSIDE the try deliberately. For GigE it issues Aravis CONTROL writes
+                # (set_acquisition_mode, start_acquisition) which raise GLib.Error if the camera
+                # drops again between reopen and AcquisitionStart -- an ordinary sequence while a
+                # camera reboots: the link comes up, reopen() succeeds, it drops before acquisition
+                # starts. Left outside, that exception escaped the thread with `_reconnecting` stuck
+                # True and the watchdog gated shut, so capture stopped PERMANENTLY and silently. In
+                # here it is just a failed attempt: log it, back off, try again.
+                self.source.start(self._on_frame, self._on_encoded)
             except SourceConfigChanged as e:
                 # The stream came back DIFFERENT (codec/geometry). The appsrc caps are fixed at
                 # build(), so no in-process reopen can carry on: finalize the recording cleanly and
@@ -642,46 +706,16 @@ class CapturePipeline:
                 # format.
                 log.error("%s -- finalizing recording and exiting for a clean rebuild", e)
                 self._fatal = True
-                self._reconnecting = False
                 GLib.idle_add(self._request_stop_idle)
                 return
             except Exception as e:   # noqa: BLE001 - never let the reconnect thread die
                 log.warning("reconnect attempt %d failed: %s (retry in %.1fs)", attempt, e, backoff)
                 if self._stop_event.wait(backoff):
-                    break            # stop requested mid-backoff
+                    return           # stop requested mid-backoff
                 backoff = min(backoff * 2, self.cfg.camera.reconnect_backoff_max_s)
                 continue
-            if self._stopping:
-                # A stop landed INSIDE the reopen window, which is multi-second by construction
-                # (open + configure + up to ptp_lock_timeout_s waiting for PTP). Re-arming here would
-                # take a FRESH device control privilege after shutdown() already released it, and
-                # this daemon thread would then die at interpreter exit still holding it -- exactly
-                # the non-deterministic GigE release #41 removed. Hand the device straight back.
-                log.info("stop requested during reopen; releasing the reacquired source")
-                self.source.stop()
-                try:
-                    self.source.close()
-                except Exception as e:   # noqa: BLE001 -- teardown must finish regardless
-                    log.warning("source close after aborted reconnect: %s", e)
-                self._reconnecting = False
-                return
-            # The reopened source restarts its own timeline, so drop both pieces of per-frame state
-            # that are keyed to the OLD one:
-            #  - the publish-rate window, or a backward step across the reconnect holds the plugin
-            #    endpoint shut for the rest of the run (_should_publish);
-            #  - the PTS memo, because a rebuilt GigE stream restarts the GVSP block id at 1. A flap
-            #    inside the memo's ~256-frame window would then HIT on a recycled frame_id and return
-            #    that OLD frame's pts -- and the memo hit returns BEFORE the monotonicity guard, so a
-            #    backward PTS would go straight into the muxer. (usb/rtsp are immune: gstbase's
-            #    frame_id is a host counter that deliberately survives reopen for drop accounting.)
-            self._last_pub_ts = None
-            with self._base_lock:
-                self._pts_memo.clear()
-            self.source.start(self._on_frame, self._on_encoded)
             log.info("source reconnected after %d attempt(s); resuming capture", attempt)
-            self._reconnecting = False
             return
-        self._reconnecting = False
 
     def _on_bus(self, _bus, msg) -> None:
         if msg.type == Gst.MessageType.ERROR:
