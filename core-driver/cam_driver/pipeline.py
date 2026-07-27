@@ -111,6 +111,36 @@ class CapturePipeline:
         if d:
             os.makedirs(d, exist_ok=True)
 
+    @staticmethod
+    def _clear_stale_socket(path: str, what: str) -> None:
+        """Remove a leftover AF_UNIX socket file before a sink tries to bind it.
+
+        An unclean exit -- SIGKILL, OOM, power loss on a vehicle -- leaves the socket FILE behind;
+        the kernel does not reap it. The transport volume is external and per-sensor
+        (cam_<name>_sock), so it outlives the container, and the next start finds the corpse.
+
+        Both sinks are broken by that, differently, and the SHM one is worse because it is silent:
+
+          unixfdsink  refuses to rebind and the element fails to start -- loud, and already handled
+                      here since June.
+          shmsink     does NOT fail. GStreamer's shmpipe answers bind() EADDRINUSE by retrying with
+                      a numeric suffix, so it quietly binds `<path>.0`, reports a successful state
+                      change, and serves frames there -- while every consumer keeps dialling the
+                      CONFIGURED `<path>`, a stale file with no listener. The core runs, records and
+                      reports healthy; the bridges simply never receive another frame until someone
+                      deletes the file by hand. Measured: configured /tmp/cam/frames, actually bound
+                      /tmp/cam/frames.0, state change OK, no warning of any kind.
+
+        Safe here because each sensor owns its own socket volume and the core is the sole writer of
+        these paths. Do not copy this to a path something else might legitimately be serving."""
+        try:
+            if os.path.exists(path):
+                log.warning("removing a stale %s socket at %s (left by an unclean exit)", what, path)
+                os.unlink(path)
+        except OSError as e:
+            log.warning("could not remove stale %s socket %s: %s -- a consumer may end up dialling "
+                        "a dead path", what, path, e)
+
     def build(self) -> str:
         Gst.init(None)
         _x, _y, width, height = self.source.geometry()
@@ -170,6 +200,7 @@ class CapturePipeline:
         raw = self.cfg.transport.raw_endpoint
         if raw.enabled:
             self._ensure_socket_dir(raw.socket_path)
+            self._clear_stale_socket(raw.socket_path, "raw video")
             shm = self._shm_size(raw, frame_bytes)
             branches.append(
                 f"t. ! queue leaky=downstream max-size-buffers=4 ! "
@@ -220,15 +251,7 @@ class CapturePipeline:
             self._fd_alloc = GstAllocators.FdAllocator.new()
             self._unixfd_path = os.path.join(os.path.dirname(pe.socket_path) or "/tmp/cam", "unixfd")
             self._ensure_socket_dir(self._unixfd_path)
-            # unixfdsink binds a fresh AF_UNIX socket and will NOT rebind over a stale one. A hard
-            # restart (crash / container restart with a persistent socket volume) leaves the socket
-            # file behind -> unixfdsink "Failed to start". Unlink any stale socket first. (shmsink
-            # manages its own file, so the legacy endpoint doesn't need this.)
-            try:
-                if os.path.exists(self._unixfd_path):
-                    os.unlink(self._unixfd_path)
-            except OSError as e:
-                log.warning("could not remove stale unixfd socket %s: %s", self._unixfd_path, e)
+            self._clear_stale_socket(self._unixfd_path, "unixfd transport")
             if self._bayer and self._bits <= 8:
                 ucaps = (f"video/x-bayer,format={self._bayer},width={self._width},"
                          f"height={self._height},framerate={framerate}")
@@ -242,6 +265,7 @@ class CapturePipeline:
                      ucaps.split(",", 1)[0] + (f",{self._bayer}" if (self._bayer and self._bits <= 8) else ""))
         elif pe.enabled:
             self._ensure_socket_dir(pe.socket_path)
+            self._clear_stale_socket(pe.socket_path, "plugin transport")
             shm = self._shm_size(pe, frame_bytes + transport.HEADER_SIZE)
             chains.append(
                 f'appsrc name=transport_src is-live=true do-timestamp=false format=time '
