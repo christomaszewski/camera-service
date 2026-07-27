@@ -34,8 +34,22 @@ jobs:
             python3-pytest python3-yaml python3-numpy python3-gi gir1.2-gstreamer-1.0
       # plugins/webrtc-bridge/tools is in scope deliberately: test_h264_level.py and
       # test_thermal_preview.py live there and were referenced by no script, doc or workflow.
-      - name: unit tests
-        run: python3 -m pytest core-driver/tests plugins/webrtc-bridge/tools -q
+      #
+      # A SKIP has to fail this job. Two suites self-skip when `gi` won't import (test_recorder,
+      # test_pipeline_pts), which is the correct behaviour on a bare dev laptop and exactly the wrong
+      # behaviour here: if a runner-image change ever breaks the bindings, those suites would quietly
+      # stop running and the job would go green in precisely the way it exists to prevent. Same
+      # "measured zero vs unmeasured" trap the service itself had. `-p no:randomly` is not needed;
+      # `-ra` just makes the reason visible in the log when this trips.
+      - name: unit tests (no skips allowed)
+        run: |
+          set -o pipefail
+          python3 -m pytest core-driver/tests plugins/webrtc-bridge/tools -q -ra | tee /tmp/pytest.out
+          if grep -qE '[0-9]+ skipped' /tmp/pytest.out; then
+            echo "::error::tests were SKIPPED in CI -- the gi bindings are probably missing, so the"
+            echo "::error::recorder and PTS suites did not actually run. See the short summary above."
+            exit 1
+          fi
 
 
   certify:
