@@ -60,6 +60,7 @@ class SidecarWriter:
         self._thread = threading.Thread(target=self._run, name="sidecar-writer", daemon=True)
         self._started = False
         self._dropped = 0
+        self._failed = False    # writer thread died on an I/O error (see _run)
 
     def write_header(self, header: SidecarHeader) -> None:
         os.makedirs(os.path.dirname(self._json_path) or ".", exist_ok=True)
@@ -76,6 +77,10 @@ class SidecarWriter:
                 with open(self._json_path) as f:
                     data = json.load(f)
             data["drops"] = summary
+            if self._failed:
+                # Self-attesting: the CSV is truncated, so a consumer must not read a missing
+                # frame_id as "this frame was never captured".
+                data["sidecar_csv_failed"] = True
             with open(self._json_path, "w") as f:
                 json.dump(data, f, indent=2)
             log.info("wrote sidecar drop summary: %s", summary)
@@ -89,8 +94,8 @@ class SidecarWriter:
         log.info("sidecar CSV -> %s", self._csv_path)
 
     def add(self, stamp: FrameStamp, pts_ns: int) -> None:
-        if not self._started:
-            return
+        if not self._started or self._failed:
+            return   # no consumer left; enqueueing would just fill the queue and stall stop()
         row = (stamp.frame_id, pts_ns, stamp.timestamp_ns, stamp.source.value,
                "" if stamp.chunk_ns is None else stamp.chunk_ns, stamp.camera_ns, stamp.system_ns)
         try:
@@ -101,23 +106,52 @@ class SidecarWriter:
                 log.warning("sidecar queue full; dropped %d CSV row(s) so far", self._dropped)
 
     def _run(self) -> None:
-        with open(self._csv_path, "w", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(CSV_FIELDS)
-            n = 0
-            while True:
-                row = self._q.get()
-                if row is _SENTINEL:
-                    break
-                w.writerow(row)
-                n += 1
-                if n % 100 == 0:
-                    f.flush()
-            f.flush()
+        n = 0
+        try:
+            with open(self._csv_path, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(CSV_FIELDS)
+                while True:
+                    row = self._q.get()
+                    if row is _SENTINEL:
+                        break
+                    w.writerow(row)
+                    n += 1
+                    if n % 100 == 0:
+                        f.flush()
+                f.flush()
+        except OSError as e:
+            # Disk full, read-only mount, device gone. This thread used to have no handler at all:
+            # it died silently, the bounded queue filled, and stop()'s untimed put() then blocked the
+            # MAIN thread forever against a consumer that no longer existed -- the container hung
+            # until SIGKILL. With recording disabled there isn't even a GStreamer bus ERROR to fail
+            # the run fast instead. Mark failed BEFORE draining so add() stops enqueueing, then drain
+            # so nothing already past that check can wait on us.
+            self._failed = True
+            log.error("sidecar CSV writer failed after %d row(s): %s -- per-frame timestamps for the "
+                      "rest of this run are lost (capture and recording continue)", n, e)
+            self._drain()
+            return
         log.info("sidecar CSV writer stopped (%d rows, %d dropped)", n, self._dropped)
 
+    def _drain(self) -> None:
+        while True:
+            try:
+                self._q.get_nowait()
+            except queue.Empty:
+                return
+
     def stop(self) -> None:
-        if self._started:
-            self._q.put(_SENTINEL)
-            self._thread.join(timeout=5)
-            self._started = False
+        if not self._started:
+            return
+        try:
+            # Bounded: if the writer is gone the queue may be full, and an untimed put() here is a
+            # deadlock on the shutdown path.
+            self._q.put(_SENTINEL, timeout=1.0)
+        except queue.Full:
+            pass
+        self._thread.join(timeout=5)
+        if self._thread.is_alive():
+            log.warning("sidecar writer did not stop within 5s; ~%d row(s) may be missing from %s",
+                        self._q.qsize(), self._csv_path)
+        self._started = False

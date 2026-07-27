@@ -76,6 +76,18 @@ class GigeSource(Source):
         self.camera.start()
 
     def stop(self) -> None:
+        # Silence the stream BEFORE acquisition stops and the ArvStream can be finalized. Aravis
+        # warns about this explicitly ("Stream finalized with 'new-buffer' signal enabled / Please
+        # call arv_stream_set_emit_signals (stream, FALSE)"), and the reason it warns is the real
+        # point: the handler can still fire on the Aravis receive thread while we tear the stream
+        # down underneath it. reopen() builds a fresh stream and start() re-arms the signal, so
+        # this is safe on the reconnect path too.
+        stream = getattr(self.camera, "stream", None)
+        if stream is not None:
+            try:
+                stream.set_emit_signals(False)
+            except Exception as e:   # noqa: BLE001 -- stop() is best-effort and must finish
+                log.debug("set_emit_signals(False): %s", e)
         self.camera.stop()
 
     def close(self) -> None:

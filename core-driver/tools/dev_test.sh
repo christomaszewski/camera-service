@@ -21,6 +21,8 @@ docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
   python3 tests/test_formats.py
   python3 tests/test_recorder.py
   python3 tests/test_pipeline_pts.py
+  python3 tests/test_sidecar.py
+  python3 tests/test_supervisor.py
 
   echo "=== fake-camera producer + shm probe (starting over a STALE socket) ==="
   # Simulate what a SIGKILL/OOM/power-loss leaves in the persistent socket volume: a bound AF_UNIX

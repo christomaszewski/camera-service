@@ -78,6 +78,11 @@ _MAX_PTS_JUMP_NS = 60 * 1_000_000_000
 # source (decode branch vs encoded branch); 256 frames is seconds of slack at any real frame rate.
 _PTS_MEMO_FRAMES = 256
 
+# How long shutdown waits for an in-flight reconnect before giving up on a deterministic device
+# release. Sits inside the supervisor's CORE_STOP_GRACE_S, which sits inside compose's
+# stop_grace_period -- keep all three in step.
+_RECONNECT_JOIN_S = 5.0
+
 
 class CapturePipeline:
     def __init__(self, cfg, source, sidecar: SidecarWriter):
@@ -99,6 +104,7 @@ class CapturePipeline:
         self._pts_memo: "OrderedDict[tuple, int]" = OrderedDict()   # (frame_id, timestamp_ns) -> pts (bounded)
         self._frame_interval_ns = 1_000_000         # set in build() from frame_rate
         self._reconnecting = False
+        self._reconnect_thread: Optional[threading.Thread] = None   # owned so shutdown can join it
         self._stop_event = threading.Event()         # wakes the reconnect backoff on shutdown
         self._n_pushed = 0
         self._gst_format = "GRAY8"
@@ -672,7 +678,9 @@ class CapturePipeline:
         if self.source.is_disconnected():
             log.warning("source reports disconnect -> reconnecting")
             self._reconnecting = True
-            threading.Thread(target=self._reconnect, name="reconnect", daemon=True).start()
+            self._reconnect_thread = threading.Thread(target=self._reconnect, name="reconnect",
+                                                      daemon=True)
+            self._reconnect_thread.start()
         return True
 
     def _reconnect(self) -> None:
@@ -702,6 +710,20 @@ class CapturePipeline:
                     break            # stop requested mid-backoff
                 backoff = min(backoff * 2, self.cfg.camera.reconnect_backoff_max_s)
                 continue
+            if self._stopping:
+                # A stop landed INSIDE the reopen window, which is multi-second by construction
+                # (open + configure + up to ptp_lock_timeout_s waiting for PTP). Re-arming here would
+                # take a FRESH device control privilege after shutdown() already released it, and
+                # this daemon thread would then die at interpreter exit still holding it -- exactly
+                # the non-deterministic GigE release #41 removed. Hand the device straight back.
+                log.info("stop requested during reopen; releasing the reacquired source")
+                self.source.stop()
+                try:
+                    self.source.close()
+                except Exception as e:   # noqa: BLE001 -- teardown must finish regardless
+                    log.warning("source close after aborted reconnect: %s", e)
+                self._reconnecting = False
+                return
             # The reopened source restarts its own timeline, so drop both pieces of per-frame state
             # that are keyed to the OLD one:
             #  - the publish-rate window, or a backward step across the reconnect holds the plugin
@@ -732,12 +754,32 @@ class CapturePipeline:
             if self.loop:
                 self.loop.quit()
 
+    def _join_reconnect(self) -> None:
+        """Wait for an in-flight reconnect before releasing the device. Without this the worker is
+        unowned: it can finish a reopen() AFTER close() ran, re-acquiring the camera, and then die at
+        interpreter exit still holding the control privilege -- which the camera keeps reserved until
+        its heartbeat timeout expires. _stop_event has already been set, so the backoff wait returns
+        immediately; the remaining wait is one in-flight reopen (bounded in practice by the source's
+        own timeouts). Best-effort: we log rather than block shutdown indefinitely."""
+        t = self._reconnect_thread
+        if t is None or not t.is_alive():
+            return
+        log.info("waiting up to %.0fs for the in-flight reconnect to finish", _RECONNECT_JOIN_S)
+        t.join(timeout=_RECONNECT_JOIN_S)
+        if t.is_alive():
+            log.warning("reconnect thread still running after %.0fs; the device may be released late "
+                        "(a GigE camera can hold its control privilege until the heartbeat timeout)",
+                        _RECONNECT_JOIN_S)
+
     def shutdown(self) -> None:
         log.info("shutting down (pushed %d frames)", self._n_pushed)
         if not self._stopping:   # error/EOS path that didn't go through request_stop
+            self._stopping = True
             self.source.stop()
+        self._stop_event.set()   # wake a reconnect backoff so the worker can exit and be joined
         if self.pipeline:
             self.pipeline.set_state(Gst.State.NULL)
+        self._join_reconnect()   # must precede close(): a late reopen would re-take the device
         try:
             self.source.close()   # surrender the device (GigE: control privilege) deterministically
         except Exception as e:    # noqa: BLE001 -- shutdown must finish regardless

@@ -78,6 +78,11 @@ class CamUnixfdBridge : public CamBridgeBase {
     start_pipeline();
   }
 
+  // MUST be the first thing this destructor does: stop the dataflow while `this` is still a
+  // CamUnixfdBridge. Once the base destructor runs, extract() is pure virtual again and a sample
+  // still in flight aborts the process. See CamBridgeBase::stop_pipeline.
+  ~CamUnixfdBridge() override { stop_pipeline(); }
+
  protected:
   std::string pipeline_desc() const override {
     // Debayer in-pipeline only for a CFA camera (the CAM_ROS_ENCODING hint is bayer_* there). bayer2rgb
