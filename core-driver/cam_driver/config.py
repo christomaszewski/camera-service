@@ -16,11 +16,14 @@ core pipeline; the `plugins` list is for the per-sensor supervisor / cam-up (spa
 from __future__ import annotations
 
 import functools
+import logging
 import os
 import time
 import typing
 from dataclasses import dataclass, field, fields
 from typing import Optional
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -314,11 +317,35 @@ def resolve_recording_dir(output_dir: str, rig_data_dir: str = "", instance: str
     so rooting the recording dir there keeps recordings OFF the repo, and a `rig bake` leaves the absolute
     path literal instead of pulling it into the deployment artifact. cam-up exports CAM_INSTANCE, which
     namespaces a per-sensor subdir so cameras sharing one data dir don't collide. Only the DEFAULT
-    ('/data/recordings') is transformed; an explicitly-pinned output_dir is returned untouched."""
+    ('/data/recordings') is transformed; an explicitly-pinned output_dir is returned untouched.
+
+    Run registry (rig ROADMAP 3c): when the data root carries one -- a `current` symlink marking the
+    open run, with a RELATIVE target `runs/<id>` so it resolves in-container because the WHOLE root is
+    bind-mounted -- recordings land inside it: `<root>/runs/<id>/recordings[/<instance>]`. Resolved
+    ONCE, here, at process start: pinning the run means a rotation can never move a live recorder's
+    next segment out from under it (rig's side of the deal: it refuses to rotate while our stack
+    runs). A restarted container re-resolves and lands in the NEW open run. Flat `<root>/recordings`
+    when no registry exists -- the same convention as rig-infra's bag loggers. A registry we cannot
+    trust (a dangling `current`, or a target escaping the root -- which in-container may not even be a
+    mounted path) is warned about and recorded FLAT: real host storage beats layout fidelity."""
     if output_dir != "/data/recordings":
         return output_dir                                  # explicit pin -> respect it as-is
     rdd = (rig_data_dir or "").strip().rstrip("/")
-    base = f"{rdd}/recordings" if rdd else "/data/recordings"
+    root = rdd
+    if rdd:
+        current = os.path.join(rdd, "current")
+        if os.path.exists(current):
+            run = os.path.realpath(current)
+            if run.startswith(os.path.realpath(rdd) + os.sep):
+                root = run
+            else:
+                log.warning("run registry ignored: %s resolves outside the data root (%s) -- an "
+                            "unmounted path in-container would swallow recordings; recording flat "
+                            "under %s", current, run, rdd)
+        elif os.path.islink(current):
+            log.warning("run registry ignored: %s is a dangling symlink -- recording flat under %s",
+                        current, rdd)
+    base = f"{root}/recordings" if rdd else "/data/recordings"
     inst = (instance or "").strip()
     return f"{base}/{inst}" if inst else base
 

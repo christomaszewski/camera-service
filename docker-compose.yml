@@ -43,6 +43,9 @@ services:
       # source+target both become $RIG_DATA_DIR so the path is identical host<->container AND `rig bake`
       # leaves it literal (an absolute path isn't relativized into the artifact). Dev (unset): ./recordings
       # -> /data/recordings. main.py roots the recording dir here + adds a per-sensor <CAM_INSTANCE> subdir.
+      # The WHOLE root is mounted (not recordings/) so rig's run registry resolves in-container: main.py
+      # pins the open run at start (`current` -> runs/<id>, a relative link that stays inside the mount)
+      # and records to <root>/runs/<id>/recordings/<instance>; flat <root>/recordings without a registry.
       - ${RIG_DATA_DIR:-./recordings}:${RIG_DATA_DIR:-/data/recordings}
       - cam_sock:/tmp/cam
     environment:

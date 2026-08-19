@@ -217,6 +217,32 @@ def test_resolve_recording_dir():
     assert R("/mnt/custom/rec", "/data", "cam_usb") == "/mnt/custom/rec"     # explicit pin -> untouched
 
 
+def test_resolve_recording_dir_run_registry():
+    # rig's run registry (ROADMAP 3c): the data root carries runs/<id>/ + a RELATIVE `current`
+    # symlink marking the open run. Recordings must land INSIDE the open run, pinned at resolve
+    # time -- and an untrustworthy registry must degrade to the flat layout, never to a path
+    # outside the root (in-container that can be an unmounted path = recordings lost with the
+    # container's writable layer).
+    import tempfile
+    R = resolve_recording_dir
+    with tempfile.TemporaryDirectory() as d:
+        run_id = "20260819T120000Z_test"
+        os.makedirs(os.path.join(d, "runs", run_id))
+        os.symlink(os.path.join("runs", run_id), os.path.join(d, "current"))
+        run = os.path.realpath(os.path.join(d, "runs", run_id))
+        assert R("/data/recordings", d, "cam_a") == f"{run}/recordings/cam_a"  # open run -> inside it
+        assert R("/data/recordings", d, "") == f"{run}/recordings"             # instance still optional
+        assert R("/mnt/custom/rec", d, "cam_a") == "/mnt/custom/rec"           # explicit pin still wins
+    with tempfile.TemporaryDirectory() as d:
+        assert R("/data/recordings", d, "cam_a") == f"{d}/recordings/cam_a"    # no registry -> flat
+    with tempfile.TemporaryDirectory() as d:
+        os.symlink(os.path.join("runs", "gone"), os.path.join(d, "current"))   # dangling link -> flat
+        assert R("/data/recordings", d, "cam_a") == f"{d}/recordings/cam_a"
+    with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as outside:
+        os.symlink(outside, os.path.join(d, "current"))                        # escapes the root -> flat
+        assert R("/data/recordings", d, "cam_a") == f"{d}/recordings/cam_a"
+
+
 def test_unique_run_prefix():
     # a restart must yield a fresh prefix (same-second restarts get a .N suffix, not a collision)
     import tempfile

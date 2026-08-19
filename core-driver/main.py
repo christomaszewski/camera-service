@@ -52,6 +52,8 @@ def main(argv=None) -> int:
         return 2
     # Recording dir from the deploy env: rig sets RIG_DATA_DIR (absolute host data root, bind-mounted at
     # the same path) to keep recordings OFF the repo; cam-up sets CAM_INSTANCE to namespace per sensor.
+    # When the root carries rig's run registry, this also PINS the open run (current -> runs/<id>) --
+    # resolved once, here at process start, so a registry rotation can never move a live recorder.
     # A bare run / a pinned output_dir is unaffected (see docker-compose.yml's `recordings` bind).
     cfg.recording.output_dir = resolve_recording_dir(
         cfg.recording.output_dir, os.environ.get("RIG_DATA_DIR", ""), os.environ.get("CAM_INSTANCE", ""))
