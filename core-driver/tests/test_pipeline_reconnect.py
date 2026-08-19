@@ -130,6 +130,47 @@ def test_stop_during_reopen_hands_the_device_back():
     assert p._reconnecting is False
 
 
+def test_pipeline_parks_its_stop_event_on_the_source():
+    # The seam long reopen() waits poll (the GigE PTP lock poll rides it down to camera.enable_ptp).
+    # Identity, not equality: a copy would never see shutdown's set().
+    src = _FlakySource()
+    p = _pipe(src)
+    assert src.stop_event is p._stop_event
+
+
+def test_stop_interrupts_a_reopen_blocked_on_a_long_wait():
+    # The GigE PTP lock poll inside reopen() can run ptp_lock_timeout_s (10s by default) -- LONGER
+    # than shutdown's join budget (_RECONNECT_JOIN_S = 5s). The join stays honest only because that
+    # wait polls source.stop_event. This pins the contract end-to-end with a fake whose reopen
+    # blocks on the event exactly the way camera.enable_ptp does: if the pipeline stops parking the
+    # event, or a reopen wait stops polling it, the worker outlives the join and the device is
+    # released late -- the control-privilege leak all over again.
+    class _BlocksInReopen(_FlakySource):
+        def __init__(self):
+            super().__init__()
+            self.entered_reopen = threading.Event()
+            self.wait_interrupted = None
+
+        def reopen(self):
+            super().reopen()
+            self.entered_reopen.set()
+            self.wait_interrupted = self.stop_event.wait(30)   # the stand-in PTP lock poll
+
+    src = _BlocksInReopen()
+    p = _pipe(src)
+    worker = threading.Thread(target=p._reconnect, daemon=True)
+    worker.start()
+    assert src.entered_reopen.wait(5), "worker never reached reopen()"
+    p._stopping = True       # what request_stop does, in the order it does it
+    p._stop_event.set()
+    worker.join(5)           # the real budget: _RECONNECT_JOIN_S
+    assert not worker.is_alive(), "a stop must interrupt a reopen's long wait, not sit it out"
+    assert src.wait_interrupted is True, "the wait must end via the stop event, not its own timeout"
+    assert src.close_calls == 1, "the reacquired device must be handed straight back"
+    assert src.start_calls == 0, "must not re-arm a source we are dropping"
+    assert p._reconnecting is False
+
+
 def test_source_config_change_is_fatal_and_still_releases_the_flag():
     class _Changed(_FlakySource):
         def reopen(self):

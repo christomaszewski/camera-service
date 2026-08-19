@@ -147,6 +147,8 @@ class GigeSource(Source):
 
     def reopen(self) -> None:
         """Full re-setup after a disconnect (raises CameraError/GLib.Error if not back yet);
-        refresh the extractor's chunk parser to the new device. Caller re-arms via start()."""
-        self.camera.reopen(self.cfg.n_stream_buffers)
+        refresh the extractor's chunk parser to the new device. Caller re-arms via start().
+        stop_event (parked by the pipeline) rides along so the PTP lock wait -- which can outlast
+        shutdown's join budget -- is abandoned promptly when a stop lands mid-reopen."""
+        self.camera.reopen(self.cfg.n_stream_buffers, stop=self.stop_event)
         self.extractor.set_chunk_parser(self.camera.chunk_parser, self.camera.tick_frequency_hz)

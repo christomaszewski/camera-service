@@ -10,6 +10,7 @@ Camera-quirk facts this handles generically (FLIR cited as a common example):
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Optional
 
@@ -116,11 +117,13 @@ class GigECamera:
         it); close() is the end-of-life counterpart."""
         self._release()
 
-    def reopen(self, n_buffers: int) -> None:
+    def reopen(self, n_buffers: int, stop: Optional[threading.Event] = None) -> None:
         """Full re-setup after a disconnect: release the dead stream, then open + configure +
         chunks/PTP + a new stream (NOT started -- the caller attaches the new-buffer handler,
         then starts). Raises CameraError/GLib.Error if the camera isn't back yet, so the
-        caller can back off and retry."""
+        caller can back off and retry. `stop` aborts the PTP lock wait -- the one leg that can
+        outlast the reconnect worker's join budget; the control-I/O legs are short and left
+        uninterrupted."""
         self._release()
         self.open()
         self.configure()
@@ -128,7 +131,7 @@ class GigECamera:
         if want_ptp:
             self.enable_chunks()
         if want_ptp and self.cfg.ptp_enable:
-            self.enable_ptp(self.cfg.ptp_lock_timeout_s)
+            self.enable_ptp(self.cfg.ptp_lock_timeout_s, stop=stop)
         self.create_stream(n_buffers)
 
     def configure(self) -> None:
@@ -187,8 +190,14 @@ class GigECamera:
             self.chunks_enabled = False
         return self.chunks_enabled
 
-    def enable_ptp(self, timeout_s: float = 10.0) -> bool:
-        """Enable IEEE-1588 and wait for the camera to slave to the grandmaster."""
+    def enable_ptp(self, timeout_s: float = 10.0, stop: Optional[threading.Event] = None) -> bool:
+        """Enable IEEE-1588 and wait for the camera to slave to the grandmaster.
+
+        `stop` (the pipeline's shutdown event, threaded through reopen()) aborts the wait early,
+        reporting unlocked. This wait is the longest leg of a reopen -- longer than the reconnect
+        worker's join budget (_RECONNECT_JOIN_S) -- so on the reconnect path it MUST be
+        interruptible, or a stop landing mid-reopen leaves the worker holding a fresh control
+        privilege past the join and it dies with the interpreter still holding it."""
         enable_feature = next((f for f in ("GevIEEE1588", "PtpEnable") if self._has(f)), None)
         if not enable_feature:
             log.warning("no PTP feature found on this camera")
@@ -218,7 +227,11 @@ class GigECamera:
             if status in locked:
                 self.ptp_locked = True
                 return True
-            time.sleep(0.25)
+            if stop is None:
+                time.sleep(0.25)
+            elif stop.wait(0.25):
+                log.info("PTP lock wait abandoned: stop requested (last %s=%s)", status_feature, last)
+                return False
         log.warning("PTP did not lock within %.1fs (last %s=%s)", timeout_s, status_feature, last)
         return False
 

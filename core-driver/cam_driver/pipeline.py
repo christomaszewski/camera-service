@@ -74,7 +74,13 @@ _PTS_MEMO_FRAMES = 256
 
 # How long shutdown waits for an in-flight reconnect before giving up on a deterministic device
 # release. Sits inside the supervisor's CORE_STOP_GRACE_S, which sits inside compose's
-# stop_grace_period -- keep all three in step.
+# stop_grace_period -- keep all three in step. This is deliberately SHORTER than a full reopen
+# (open + configure + up to ptp_lock_timeout_s of PTP wait, 10s by default): that only works
+# because the PTP wait polls the stop event (source.stop_event -> camera.enable_ptp), so once
+# shutdown() sets it the residual is a handful of Aravis control round-trips. If a join timeout
+# warning shows up here, make the offending wait interruptible -- do NOT raise this constant, or
+# the whole stop chain stops fitting inside CORE_STOP_GRACE_S and the supervisor's kill() lands
+# mid-finalization again (truncated .mkv, unreleased control privilege).
 _RECONNECT_JOIN_S = 5.0
 
 # Health-tick period. Also the window the stall check reasons over: no frames for this long, with no
@@ -105,6 +111,9 @@ class CapturePipeline:
         self._last_health_frames = 0   # frames at the previous health tick (stall detection)
         self._reconnect_thread: Optional[threading.Thread] = None   # owned so shutdown can join it
         self._stop_event = threading.Event()         # wakes the reconnect backoff on shutdown
+        # Parked on the source so the long waits INSIDE reopen() (the GigE PTP lock poll) see the
+        # stop too -- the join budget below is shorter than those waits by design.
+        source.stop_event = self._stop_event
         self._n_pushed = 0
         self._gst_format = "GRAY8"
         self._bits = 8
@@ -734,8 +743,9 @@ class CapturePipeline:
         unowned: it can finish a reopen() AFTER close() ran, re-acquiring the camera, and then die at
         interpreter exit still holding the control privilege -- which the camera keeps reserved until
         its heartbeat timeout expires. _stop_event has already been set, so the backoff wait returns
-        immediately; the remaining wait is one in-flight reopen (bounded in practice by the source's
-        own timeouts). Best-effort: we log rather than block shutdown indefinitely."""
+        immediately AND the PTP lock wait inside a reopen bails out (it polls the same event via
+        source.stop_event); the remaining wait is the non-waiting tail of one reopen -- Aravis
+        control I/O. Best-effort: we log rather than block shutdown indefinitely."""
         t = self._reconnect_thread
         if t is None or not t.is_alive():
             return

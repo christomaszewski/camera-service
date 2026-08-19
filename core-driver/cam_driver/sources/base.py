@@ -12,6 +12,7 @@ per-frame timestamp-provenance handling downstream stays single-sourced.
 """
 from __future__ import annotations
 
+import threading
 from abc import ABC, abstractmethod
 from typing import Callable, Optional, Tuple
 
@@ -99,6 +100,14 @@ class Source(ABC):
         GC. Default: nothing to release beyond stop()."""
 
     # ---- reconnect (optional; default = unsupported) -----------------------
+    # The pipeline parks its shutdown event here (CapturePipeline.__init__). Any long wait inside
+    # reopen() MUST poll it and bail out early: shutdown() joins the reconnect worker for only
+    # _RECONNECT_JOIN_S (5s), so an uninterruptible wait longer than that -- the GigE PTP lock poll
+    # is up to ptp_lock_timeout_s, 10s by default -- means the worker outlives the join and dies at
+    # interpreter exit still holding whatever it reacquired (GigE: the control privilege, reserved
+    # until the camera's heartbeat timeout). Sources whose reopen has no long wait ignore it.
+    stop_event: Optional[threading.Event] = None
+
     @property
     def reconnect_enabled(self) -> bool:
         return False
