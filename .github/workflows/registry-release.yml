@@ -1,0 +1,133 @@
+# On every published GitHub release (tag vX.Y.Z) update this service's entry in the public rig
+# registry: rewrite services/<name>/manifest.yaml (version + source.rev), regenerate index.json
+# with the registry's own tooling, push. The manifest is OWNED by this workflow — it rewrites the
+# file wholesale, so registry-side hand edits to it do not survive the next release. Pattern
+# mirrors ouster's / sbg_driver's registry-release.yml (the fleet convention).
+#
+# The package name is read from rigging.yaml's `service:` — that one name keys the launcher
+# descriptor and the registry's services/<name>/ dir, so they must never diverge. If `service:`
+# is ever renamed, this workflow starts publishing under the new name and the old
+# services/<oldname>/ dir must be removed from the registry by hand.
+#
+# The registry also hosts PROFILES under this service (profiles/camera-service/<short>/, e.g.
+# siyi-zr30) whose `requires.service: camera-service@^1.0` must be satisfied by the version
+# released here. ./tools/validate enforces that, so a MAJOR-version release fails this workflow
+# until the profiles are bumped alongside it — that failure is the point: a v2 tag must not
+# strand every profile consumer on an unresolvable pin.
+#
+# One-time setup: a RIG_REGISTRY_TOKEN Actions secret in THIS repo — fine-grained PAT scoped to
+# christomaszewski/rig-registry-public with Contents read/write, nothing else. The same PAT the
+# other fleet services use works here (it is scoped to the registry repo, not the caller).
+#
+# workflow_dispatch exists to (re)seed or repair the entry without cutting a release: it publishes
+# the current commit of the chosen ref under the version you type.
+name: registry-release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Registry manifest version (X.Y.Z, no leading v)'
+        required: true
+
+permissions:
+  contents: read
+
+# Serialize releases — two concurrent runs would race the registry push.
+concurrency:
+  group: registry-release
+
+jobs:
+  update-registry:
+    runs-on: ubuntu-latest
+    steps:
+      - name: derive version
+        id: meta
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            ver='${{ inputs.version }}'
+          else
+            echo "${GITHUB_REF_NAME}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || {
+              echo "::error::release tag '${GITHUB_REF_NAME}' is not vX.Y.Z — registry versions are exact X.Y.Z"
+              exit 1
+            }
+            ver="${GITHUB_REF_NAME#v}"
+          fi
+          echo "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || {
+            echo "::error::version '$ver' is not X.Y.Z"
+            exit 1
+          }
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      # This repo, at the released commit — rigging.yaml is the naming authority.
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: christomaszewski/rig-registry-public
+          token: ${{ secrets.RIG_REGISTRY_TOKEN }}
+          path: registry
+
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+
+      - name: install rig (registry validate/index tooling)
+        run: pip install git+https://github.com/christomaszewski/rig
+
+      - name: derive service name from rigging.yaml
+        id: svc
+        run: |
+          name=$(python3 -c 'import yaml; print(yaml.safe_load(open("rigging.yaml"))["service"])')
+          echo "$name" | grep -Eq '^[a-z][a-z0-9-]*$' || {
+            echo "::error::rigging.yaml service: '$name' is not a valid registry package name ([a-z][a-z0-9-]*)"
+            exit 1
+          }
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      # GITHUB_SHA on a release event is the tagged commit; on dispatch it is the head of the
+      # chosen ref — exactly the rev consumers should pin in both cases.
+      - name: rewrite manifest
+        env:
+          NAME: ${{ steps.svc.outputs.name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          mkdir -p "registry/services/${NAME}"
+          cat > "registry/services/${NAME}/manifest.yaml" <<EOF
+          # AUTO-UPDATED on every camera-service release by that repo's registry-release workflow
+          # (rewrites this file wholesale + regenerates index.json; name comes from rigging.yaml
+          # \`service:\`). Hand-edits will be clobbered by the next release — change rigging.yaml
+          # or the workflow in the camera-service repo instead.
+          kind: service
+          name: ${NAME}
+          version: ${VERSION}
+          platforms: [linux/arm64]
+          ros_distro: lyrical
+          instantiable: true            # template service — a profile (or hand-authored config) instantiates it
+          source:
+            repo: https://github.com/christomaszewski/camera-service.git
+            rev: ${GITHUB_SHA}
+          EOF
+
+      - name: regenerate index + validate
+        working-directory: registry
+        run: |
+          ./tools/gen-index
+          ./tools/validate
+
+      - name: commit + push
+        working-directory: registry
+        env:
+          NAME: ${{ steps.svc.outputs.name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "services/${NAME}/manifest.yaml" index.json
+          if git diff --staged --quiet; then
+            echo "registry already current for ${NAME} ${VERSION}"
+            exit 0
+          fi
+          git commit -m "${NAME} ${VERSION} (auto: ${GITHUB_EVENT_NAME} ${GITHUB_REF_NAME})"
+          git push
