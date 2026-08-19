@@ -76,6 +76,11 @@ class CamHeaderBridge : public CamBridgeBase {
     start_pipeline();
   }
 
+  // MUST be the first thing this destructor does: stop the dataflow while `this` is still a
+  // CamHeaderBridge. Once the base destructor runs, extract() is pure virtual again and a sample
+  // still in flight aborts the process. See CamBridgeBase::stop_pipeline.
+  ~CamHeaderBridge() override { stop_pipeline(); }
+
  protected:
   std::string pipeline_desc() const override {
     return "shmsrc socket-path=" + socket_path_ + " is-live=true ! "

@@ -76,6 +76,18 @@ class GigeSource(Source):
         self.camera.start()
 
     def stop(self) -> None:
+        # Silence the stream BEFORE acquisition stops and the ArvStream can be finalized. Aravis
+        # warns about this explicitly ("Stream finalized with 'new-buffer' signal enabled / Please
+        # call arv_stream_set_emit_signals (stream, FALSE)"), and the reason it warns is the real
+        # point: the handler can still fire on the Aravis receive thread while we tear the stream
+        # down underneath it. reopen() builds a fresh stream and start() re-arms the signal, so
+        # this is safe on the reconnect path too.
+        stream = getattr(self.camera, "stream", None)
+        if stream is not None:
+            try:
+                stream.set_emit_signals(False)
+            except Exception as e:   # noqa: BLE001 -- stop() is best-effort and must finish
+                log.debug("set_emit_signals(False): %s", e)
         self.camera.stop()
 
     def close(self) -> None:
@@ -135,6 +147,8 @@ class GigeSource(Source):
 
     def reopen(self) -> None:
         """Full re-setup after a disconnect (raises CameraError/GLib.Error if not back yet);
-        refresh the extractor's chunk parser to the new device. Caller re-arms via start()."""
-        self.camera.reopen(self.cfg.n_stream_buffers)
+        refresh the extractor's chunk parser to the new device. Caller re-arms via start().
+        stop_event (parked by the pipeline) rides along so the PTP lock wait -- which can outlast
+        shutdown's join budget -- is abandoned promptly when a stop lands mid-reopen."""
+        self.camera.reopen(self.cfg.n_stream_buffers, stop=self.stop_event)
         self.extractor.set_chunk_parser(self.camera.chunk_parser, self.camera.tick_frequency_hz)
