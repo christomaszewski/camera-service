@@ -88,19 +88,29 @@ if [ "$VERB" != config ] && [ -n "${CAM_ZENOH_SHM_POOL_SIZE:-}" ] && [ -d /dev/s
   fi
 fi
 
-# Resolve auto -> the target platform (drives BOTH the image tag cam-core:<platform> AND the runtime
-# overlay docker-compose.<platform>.yml). rig's DECLARED target wins over host detection: RIG_IMAGE_TAG
-# (= vehicle.yaml images.tag, e.g. jp7) is authoritative because rig bakes on a dev box that often isn't a
-# Jetson -- host-detecting THERE picks the wrong platform (jp6 on a Mac), pinning the wrong image tag AND
-# omitting the target's NVENC/CDI overlay. Standalone (RIG_IMAGE_TAG unset): fall back to the L4T release
-# line (R36 = JP6; R38+ = JP7). Skipped under --dev; a missing release file -> jp6 (conservative).
+# Resolve auto -> the target platform (drives BOTH the image tag selection AND the runtime overlay
+# docker-compose.<platform>.yml). Precedence: CAM_PLATFORM/--jp6/--jp7 > RIG_TARGET_PLATFORM (rig's
+# standard per-host platform var, from vehicle.yaml `platform:`) > a legacy platform-VALUED
+# RIG_IMAGE_TAG (images.tag: jp7 -- deprecated on the rig side) > /etc/nv_tegra_release detection.
+# rig's DECLARED target wins over host detection because rig bakes on a dev box that often isn't a
+# Jetson -- host-detecting THERE picks the wrong platform (jp6 on a Mac), pinning the wrong image tag
+# AND omitting the target's NVENC/CDI overlay. Standalone (no rig env): the L4T release line
+# (R36 = JP6; R38+ = JP7). Skipped under --dev; a missing release file -> jp6 (conservative).
 if [ "$DEV" = 0 ] && [ "$PLATFORM" = auto ]; then
-  if [ -n "${RIG_IMAGE_TAG:-}" ]; then
+  if [ -n "${RIG_TARGET_PLATFORM:-}" ]; then
+    case "$RIG_TARGET_PLATFORM" in
+      jp6|jp7) PLATFORM="$RIG_TARGET_PLATFORM";;
+      *) echo "cam-up: RIG_TARGET_PLATFORM='$RIG_TARGET_PLATFORM' is not a platform (jp6|jp7); ignoring it" >&2;;
+    esac
+  fi
+  if [ "$PLATFORM" = auto ] && [ -n "${RIG_IMAGE_TAG:-}" ]; then
     case "$RIG_IMAGE_TAG" in
-      jp6|jp7) PLATFORM="$RIG_IMAGE_TAG";;
+      jp6|jp7) PLATFORM="$RIG_IMAGE_TAG";;   # legacy: platform-valued images.tag
       # A fleet tag that isn't a platform (e.g. v2.1) must NOT silently pick the wrong runtime
       # overlay/transport (all containers "up", no frames). Warn and fall through to detection.
-      *) echo "cam-up: RIG_IMAGE_TAG='$RIG_IMAGE_TAG' is not a platform (jp6|jp7); ignoring it for platform selection" >&2;;
+      # (With RIG_TARGET_PLATFORM or CAM_PLATFORM set this branch never runs -- a version-valued
+      # images.tag is then the NORMAL fleet shape, not a mistake.)
+      *) echo "cam-up: RIG_IMAGE_TAG='$RIG_IMAGE_TAG' is not a platform (jp6|jp7) and no RIG_TARGET_PLATFORM/CAM_PLATFORM is set; ignoring it for platform selection" >&2;;
     esac
   fi
   if [ "$PLATFORM" = auto ] && [ "$VERB" != config ]; then
@@ -144,11 +154,19 @@ fi
 # come out right -- the raw ${RIG_IMAGE_REGISTRY}/cam-core prefix in the composes would resolve :latest.
 CAM_REGISTRY="${CAM_REGISTRY:-${RIG_IMAGE_REGISTRY:-}}"
 if [ "$DEV" = 0 ] && [ -n "${CAM_REGISTRY:-}" ]; then
-  # The PULL TAG and the runtime PLATFORM are separate concerns. The tag follows the fleet tag VERBATIM
-  # (build/pull agreement: `rig build` pushes <image>:<images.tag>, whatever that string is); only the
-  # overlay/runtime selection above validates jp6|jp7. Platform is the standalone fallback when no fleet
-  # tag is set; CAM_IMAGE_TAG pins a release over both.
+  # The PULL TAG and the runtime PLATFORM are separate concerns. Platform is the standalone fallback
+  # when no fleet tag is set; CAM_IMAGE_TAG pins an EXACT tag over everything (never suffixed).
   IMG_TAG="${CAM_IMAGE_TAG:-${RIG_IMAGE_TAG:-$PLATFORM}}"
+  # Fleet contract: a VERSION-valued RIG_IMAGE_TAG (images.tag: v1.4.0) pairs with the per-host
+  # platform to select from the published matrix -- compose <version>-<platform> to match what
+  # build-images.sh pushes (rig invokes it once per platform with the composed tag). A bare-platform
+  # tag (legacy) or an already-suffixed tag passes verbatim; so does an explicit CAM_IMAGE_TAG.
+  if [ -z "${CAM_IMAGE_TAG:-}" ] && [ -n "${RIG_IMAGE_TAG:-}" ]; then
+    case "$IMG_TAG" in
+      jp6|jp7|*-jp6|*-jp7) ;;
+      *) IMG_TAG="${IMG_TAG}-${PLATFORM}";;
+    esac
+  fi
   export CAM_CORE_IMAGE="${CAM_CORE_IMAGE:-$CAM_REGISTRY/cam-core:$IMG_TAG}"
   export CAM_ROS2_IMAGE="${CAM_ROS2_IMAGE:-$CAM_REGISTRY/ros2-bridge:$IMG_TAG}"
   export CAM_ROS1_IMAGE="${CAM_ROS1_IMAGE:-$CAM_REGISTRY/ros1-bridge:$IMG_TAG}"   # Noetic; ros1-bridge is jp6-class
