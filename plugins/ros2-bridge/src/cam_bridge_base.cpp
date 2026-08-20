@@ -2,6 +2,7 @@
 
 #include <unistd.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <stdexcept>
 
@@ -94,6 +95,10 @@ CamBridgeBase::CamBridgeBase(const std::string& node_name, const rclcpp::NodeOpt
   frame_id_ = declare_parameter<std::string>("frame_id", "camera");
   encoding_ = declare_parameter<std::string>("encoding", env_or("CAM_ROS_ENCODING", ""));
   debayer_ = declare_parameter<bool>("debayer", std::string(env_or("CAM_DEBAYER", "false")) == "true");
+  // Optional outbound throttle: cap the publish rate by dropping frames (the core keeps its native
+  // frame_rate for recording/preview; only the ROS graph sees fewer frames). 0 = every frame.
+  publish_rate_ = declare_parameter<double>("publish_rate", std::atof(env_or("CAM_ROS_PUBLISH_RATE", "0")));
+  if (publish_rate_ > 0.0) min_period_ns_ = static_cast<int64_t>(1e9 / publish_rate_);
 
   // image_transport gives the raw topic + a lazy `<topic>/compressed` (JPEG/PNG via
   // compressed_image_transport) that only costs CPU when something subscribes.
@@ -160,8 +165,9 @@ void CamBridgeBase::start_pipeline() {
       ::_exit(EXIT_FAILURE);
     }
   });
-  RCLCPP_INFO(get_logger(), "consuming %s -> publishing '%s' (frame_id=%s, debayer=%s)",
-              socket_path_.c_str(), topic_.c_str(), frame_id_.c_str(), debayer_ ? "true" : "false");
+  RCLCPP_INFO(get_logger(), "consuming %s -> publishing '%s' (frame_id=%s, debayer=%s, publish_rate=%.3g%s)",
+              socket_path_.c_str(), topic_.c_str(), frame_id_.c_str(), debayer_ ? "true" : "false",
+              publish_rate_, min_period_ns_ ? " Hz" : " [unthrottled]");
 }
 
 GstFlowReturn CamBridgeBase::on_new_sample_static(GstAppSink* sink, gpointer self) {
@@ -171,6 +177,10 @@ GstFlowReturn CamBridgeBase::on_new_sample_static(GstAppSink* sink, gpointer sel
 GstFlowReturn CamBridgeBase::on_new_sample(GstAppSink* sink) {
   GstSample* sample = gst_app_sink_pull_sample(sink);
   if (!sample) return GST_FLOW_OK;
+  if (throttle_drop()) {   // before map/extract: a dropped frame costs no conversion and no copy
+    gst_sample_unref(sample);
+    return GST_FLOW_OK;
+  }
   GstBuffer* buf = gst_sample_get_buffer(sample);
   GstMapInfo map;
   if (buf && gst_buffer_map(buf, &map, GST_MAP_READ)) {
@@ -182,6 +192,22 @@ GstFlowReturn CamBridgeBase::on_new_sample(GstAppSink* sink) {
   }
   gst_sample_unref(sample);
   return GST_FLOW_OK;
+}
+
+bool CamBridgeBase::throttle_drop() {
+  if (min_period_ns_ == 0) return false;
+  // Single caller thread (the appsink streaming thread) -> plain int64 state, no lock.
+  const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+  if (now < next_pub_ns_) return true;
+  // Steady state advances the deadline by the period (not `now + period`): with a quantized source
+  // (e.g. 25 fps capped to 10 Hz) the publishes alternate around the deadline and the AVERAGE rate
+  // holds publish_rate, instead of locking onto the next slower frame multiple. A full period past
+  // the deadline (first frame, source slower than the cap, producer stall) re-anchors at
+  // `now + period` -- so a stall never yields a back-to-back publish when frames resume.
+  next_pub_ns_ = (now - next_pub_ns_ >= min_period_ns_) ? now + min_period_ns_
+                                                        : next_pub_ns_ + min_period_ns_;
+  return false;
 }
 
 void CamBridgeBase::publish(const FrameMeta& m) {

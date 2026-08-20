@@ -29,6 +29,44 @@ reach it at the default `tcp/localhost:7447` — no extra config.
 > though data is flowing. Add **`--no-daemon`** (`ros2 topic echo --no-daemon …`), or just subscribe with a
 > real node — typed subscribers receive normally. This is a known rmw_zenoh ↔ ros2 daemon interaction.
 
+### Tuning zenoh for large images
+
+All zenoh tuning goes through **`ZENOH_CONFIG_OVERRIDE`** (`path/to/key=value;…`), which rmw_zenoh
+applies **on top of** its built-in default session config — every default we don't name survives.
+Deliberately **not** `ZENOH_SESSION_CONFIG_URI`: a config URI *replaces* the whole default config, so
+anything it doesn't restate is silently dropped. The bridge exposes the knobs three ways, all from the
+sensor YAML (`plugins: → ros2-bridge → params:`):
+
+```yaml
+params:
+  # Friendly knobs (lowercase) -- the launch file folds these into ZENOH_CONFIG_OVERRIDE:
+  zenoh_shm: true                  # transport/shared_memory/{,transport_optimization/}enabled
+  zenoh_shm_pool_size: 268435456   # SHM segment bytes (rmw_zenoh default 48 MiB); implies zenoh_shm: true
+  zenoh_shm_msg_threshold: 4096    # min bytes routed via SHM (default 512; power of two); implies shm too
+  # rmw_zenoh env knobs (UPPERCASE params pass straight through as env vars):
+  RMW_ZENOH_BUFFER_POOL_MAX_SIZE_BYTES: 67108864   # serialization buffer pool cap (default 8 MiB)
+  # Raw escape hatch for ANY other zenoh key -- appended last, so it wins over the friendly knobs:
+  ZENOH_CONFIG_OVERRIDE: "transport/link/tx/batch_size=65535"
+```
+
+- **SHM is end-to-end opt-in:** the *subscriber's* session must also enable it
+  (`export ZENOH_CONFIG_OVERRIDE='transport/shared_memory/enabled=true;transport/shared_memory/transport_optimization/enabled=true'`
+  before launching it), and both endpoints must share `/dev/shm` — the bridge container already runs
+  `ipc: host`. Mismatched peers fall back to the network path automatically, so enabling SHM here is
+  safe even when some subscribers don't.
+- **The pool must fit `/dev/shm`:** the pool is one POSIX segment in the bridge's `/dev/shm`. Under
+  `ipc: host` that's the **host's** tmpfs (docker's `shm_size` doesn't apply) — `cam-up` warns at
+  up-time when the host tmpfs is smaller than `zenoh_shm_pool_size`. The compose service also carries
+  `shm_size: ${CAM_ROS2_SHM_SIZE}` (auto-derived as pool + 64 MiB headroom) so a non-host-IPC variant
+  of the stack isn't capped at docker's 64 MiB default. Too small either way isn't fatal: zenoh logs a
+  `ShmProvider` error and delivers over the network path instead.
+- **Buffer pool:** `RMW_ZENOH_BUFFER_POOL_MAX_SIZE_BYTES` caps rmw_zenoh's pool of serialization
+  buffers; once a publish exceeds what's left, buffers come from the system allocator each time. Size
+  it to a few in-flight frames (e.g. a 5 MP `rgb8` frame is ~15 MB serialized).
+- **Router:** with the default peer mesh the router only does discovery, so it normally needs no
+  tuning. When traffic *is* routed (client mode / remote hub), `tools/zenohd.sh` forwards a
+  `ZENOH_CONFIG_OVERRIDE` from its environment to the router the same way.
+
 ## Parameters
 
 | param | default | meaning |
@@ -38,6 +76,7 @@ reach it at the default `tcp/localhost:7447` — no extra config.
 | `frame_id` | `camera` | `header.frame_id` (TF frame) |
 | `encoding` | `""` (`$CAM_ROS_ENCODING`) | Bayer label / hint. **Auto-set by `cam-up`** from `camera.pixel_format` (e.g. `BayerRG8` → `bayer_rggb8`); empty = mono. On JP7 the format also comes off the caps. |
 | `debayer` | `false` (`$CAM_DEBAYER`) | turn an 8-bit Bayer mosaic into color. Set via the plugin's `params.debayer`. |
+| `publish_rate` | `0` (`$CAM_ROS_PUBLISH_RATE`) | max publish rate in **Hz**; frames above it are dropped *before* conversion/copy, so the throttle also saves the bridge CPU. `0` = publish every frame. The core keeps its native `frame_rate` for recording/preview — only the ROS graph sees fewer frames. Set via `params.publish_rate`. |
 
 ## Color (Bayer cameras)
 
