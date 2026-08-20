@@ -38,7 +38,10 @@ services:
     runtime: nvidia
     command: ["supervisor.py"]          # reads CAM_CONFIG; spawns core + in-image (process) plugins
     volumes:
-      - ./core-driver/config:/app/config:ro
+      # No config bind here: the sensor config arrives as ONE file via docker-compose.external-config.yml
+      # (cam-up applies it for every config and points CAM_CONFIG at the mount). The image's baked
+      # /app/config covers a bare `docker compose up` with the default CAM_CONFIG. (A directory bind
+      # into the repo would be frozen into a `rig bake` artifact -- certify flags exactly that.)
       # Recordings live OFF the repo when rig sets RIG_DATA_DIR (an absolute host data root, e.g. /data):
       # source+target both become $RIG_DATA_DIR so the path is identical host<->container AND `rig bake`
       # leaves it literal (an absolute path isn't relativized into the artifact). Dev (unset): ./recordings

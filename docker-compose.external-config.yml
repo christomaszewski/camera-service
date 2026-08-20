@@ -1,8 +1,8 @@
-# Overlay added automatically by cam-up when the sensor config lives OUTSIDE this repo's
-# core-driver/config/sensors/ (e.g. a vehicle-level config inventory managed by `rig`). It
-# bind-mounts that single external file at CAM_CONFIG -- an absolute in-container path that is
-# deliberately OUTSIDE the read-only /app/config mount (Docker can't create a nested mount point
-# inside a :ro mount), so the core/supervisor loads it via that absolute path.
+# Overlay added by cam-up for EVERY sensor config (in-repo or external, e.g. a vehicle-level
+# config inventory managed by `rig`): it bind-mounts the single config file at CAM_CONFIG -- an
+# absolute in-container path deliberately OUTSIDE the image's /app tree -- and the core/supervisor
+# loads it via that absolute path. One file bind is the whole config surface of the artifact:
+# no directory binds into the repo (`rig certify` flags those -- bake would freeze the repo path).
 #
 # One file is enough because a sensor config is self-contained -- config.load_config() reads a
 # single YAML and fills the rest from dataclass defaults (it does NOT merge camera.yaml). If
