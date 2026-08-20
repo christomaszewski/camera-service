@@ -29,7 +29,6 @@ gige:                          # GVSP/Aravis source specifics
 recording:
   enabled: true
   encoder: auto                # auto | hw-hevc-lossless | ffv1 | x265-lossless
-  output_dir: /data/recordings
   name_prefix: cam
   segment_seconds: 60
   bayer_pattern: null          # set when recording raw Bayer (e.g. rggb) for post-debayer

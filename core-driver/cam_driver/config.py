@@ -123,7 +123,11 @@ class RtspConfig:
 class RecordingConfig:
     enabled: bool = True
     encoder: str = "auto"
-    output_dir: str = "/data/recordings"
+    # Where recordings land, by SHAPE (resolve_recording_dir; no magic values):
+    #   "" (default) -> the managed layout: <data root>[/runs/<id>]/recordings/<instance>
+    #   relative     -> a subdir under that managed recordings root, REPLACING <instance>
+    #   absolute     -> a verbatim pin (no data-root rooting, no run registry, no instance subdir)
+    output_dir: str = ""
     name_prefix: str = "cam"
     segment_seconds: int = 60
     bayer_pattern: Optional[str] = None
@@ -313,11 +317,20 @@ def parse_config(raw: dict) -> AppConfig:
 def resolve_recording_dir(output_dir: str, rig_data_dir: str = "", instance: str = "") -> str:
     """Resolve the recording dir for a deploy (cam-up/rig set the env; a bare run passes nothing).
 
+    Semantics follow the SHAPE of output_dir -- no magic values:
+      ""        -> the managed default: <root>[/runs/<id>]/recordings[/<instance>]
+      relative  -> a subdir under that managed recordings root, REPLACING the <instance> segment:
+                   <root>[/runs/<id>]/recordings/<output_dir>  ('.' = the recordings root itself;
+                   a path that escapes the root is warned about and the default layout is used)
+      absolute  -> a VERBATIM pin: no data-root rooting, no run registry, no instance subdir. It
+                   must live under a bind-mounted path (in a rig deploy: under RIG_DATA_DIR) or the
+                   recordings die with the container's writable layer.
+
     rig exports RIG_DATA_DIR -- an ABSOLUTE host data root, bind-mounted into the core at the same path --
     so rooting the recording dir there keeps recordings OFF the repo, and a `rig bake` leaves the absolute
     path literal instead of pulling it into the deployment artifact. cam-up exports CAM_INSTANCE, which
-    namespaces a per-sensor subdir so cameras sharing one data dir don't collide. Only the DEFAULT
-    ('/data/recordings') is transformed; an explicitly-pinned output_dir is returned untouched.
+    namespaces a per-sensor subdir so cameras sharing one data dir don't collide. Without a data root
+    the recordings root falls back to /data/recordings (the dev bind).
 
     Run registry (rig ROADMAP 3c): when the data root carries one -- a `current` symlink marking the
     open run, with a RELATIVE target `runs/<id>` so it resolves in-container because the WHOLE root is
@@ -328,8 +341,17 @@ def resolve_recording_dir(output_dir: str, rig_data_dir: str = "", instance: str
     when no registry exists -- the same convention as rig-infra's bag loggers. A registry we cannot
     trust (a dangling `current`, or a target escaping the root -- which in-container may not even be a
     mounted path) is warned about and recorded FLAT: real host storage beats layout fidelity."""
-    if output_dir != "/data/recordings":
-        return output_dir                                  # explicit pin -> respect it as-is
+    out = (output_dir or "").strip()
+    if out.startswith("/"):
+        if out.rstrip("/") == "/data/recordings":
+            # The pre-v1.6 sentinel: this exact path used to MEAN "the managed default" and was
+            # transformed (data root, run registry, <instance> subdir). Now it pins verbatim like
+            # any other absolute path -- flag it so an un-migrated config doesn't silently lose
+            # run-registry placement and per-sensor namespacing.
+            log.warning("output_dir '/data/recordings' now pins that exact path (no data root, run "
+                        "registry, or per-instance subdir); leave output_dir unset for the managed "
+                        "default, or use a relative path for a subdir under it")
+        return out
     rdd = (rig_data_dir or "").strip().rstrip("/")
     root = rdd
     if rdd:
@@ -346,6 +368,12 @@ def resolve_recording_dir(output_dir: str, rig_data_dir: str = "", instance: str
             log.warning("run registry ignored: %s is a dangling symlink -- recording flat under %s",
                         current, rdd)
     base = f"{root}/recordings" if rdd else "/data/recordings"
+    if out:   # relative: a subdir under the managed recordings root, replacing <instance>
+        joined = os.path.normpath(os.path.join(base, out))
+        if joined == base or joined.startswith(base + os.sep):
+            return joined
+        log.warning("relative output_dir %r escapes the recordings root (%s); using the default "
+                    "layout instead", output_dir, base)
     inst = (instance or "").strip()
     return f"{base}/{inst}" if inst else base
 

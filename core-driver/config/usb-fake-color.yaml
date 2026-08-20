@@ -16,7 +16,6 @@ usb:
 recording:
   enabled: true
   encoder: auto                 # color -> ffv1 (lossless, native subsampling)
-  output_dir: /data/recordings
   name_prefix: usbcolor
   segment_seconds: 30
 

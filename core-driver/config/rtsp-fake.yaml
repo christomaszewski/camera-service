@@ -15,7 +15,6 @@ rtsp:
 recording:
   enabled: true
   encoder: auto                 # encoded -> stream-copy
-  output_dir: /data/recordings
   name_prefix: rtspmjpeg
   segment_seconds: 30
 

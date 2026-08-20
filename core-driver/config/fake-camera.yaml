@@ -23,7 +23,6 @@ recording:
                                  # cam-dev container, x86) the build-time probe logs a warning and
                                  # falls back to ffv1 -- so this config exercises the capability
                                  # fallback. On a Jetson it validates the real NVENC path.
-  output_dir: /data/recordings
   name_prefix: fake
   segment_seconds: 30
 
