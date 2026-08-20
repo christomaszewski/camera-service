@@ -31,6 +31,18 @@ build:                                   # rig's BUILD phase: how to (re)build +
   images: [cam-core, ros2-bridge, ros1-bridge, webrtc-bridge]   # produced as <registry>/<image>:<platform>
                                          #   (ros1-bridge is Noetic / jp6-class; built into the jp6 set)
 
+examples:                                # repo-relative example configs. [0] is special: `rig pkg add`
+  #                                        seeds a bare (profile-less) instance's editable config from it,
+  #                                        and `rig certify --repo` uses it as the default --config. It is
+  #                                        NAMELESS (rig's instance row supplies `name`) and carries the
+  #                                        full config surface with the alternatives commented. The rest
+  #                                        ride along as reference material (real-hardware variants).
+  - core-driver/config/sensors/camera.example.yaml
+  - core-driver/config/sensors/cam_gige.yaml
+  - core-driver/config/sensors/cam_usb.yaml
+  - core-driver/config/sensors/cam_rtsp.yaml
+  - core-driver/config/sensors/cam_thermal.yaml
+
 launch_surface:                          # the files rig copies to the vehicle (NOT the source/build context)
   - cam-up
   - tools/sensor_env.py
