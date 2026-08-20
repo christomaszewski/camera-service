@@ -45,10 +45,6 @@ if [ ! -f "$CONFIG" ] && [ -f "$REPO/core-driver/$CONFIG" ]; then
 fi
 [ -f "$CONFIG" ] || { echo "cam-up: config not found: $CONFIG" >&2; exit 1; }
 CONFIG_ABS="$(cd "$(dirname "$CONFIG")" && pwd)/$(basename "$CONFIG")"
-# Tolerate a missing sensors dir: a VENDORED launch surface (rig deploy) doesn't ship it, so this
-# cd would die under `set -e`. Empty SENSORS_DIR => every config is treated as external (correct --
-# rig always supplies the config from outside the repo), so the external-config overlay kicks in.
-SENSORS_DIR="$(cd "$REPO/core-driver/config/sensors" 2>/dev/null && pwd || true)"
 
 # The docker compose subcommand (default `up`). `config` -- which `rig bake` runs to RENDER the merged
 # compose for the target -- must be HOST-INDEPENDENT: a pure function of (this config + rig's env) with NO
@@ -64,7 +60,13 @@ fi
 # config -> env (selection + parameterization). sensor_env shell-quotes every value (config data
 # must never split or execute here) and refuses reserved keys, so the eval is safe by construction.
 eval "$("$PYTHON" "$REPO/tools/sensor_env.py" "$CONFIG" | sed 's/^/export /')"
-export CAM_CONFIG="config/sensors/$(basename "$CONFIG")"   # in-container path (config dir is mounted)
+# EVERY config -- in-repo or external -- reaches the container as ONE bind-mounted FILE (the
+# external-config overlay, added to FILES below unconditionally). One mechanism, no in-repo special
+# case, and the compose artifact carries a single file bind instead of a directory bind into the
+# repo (`rig certify` flags dir binds: bake freezes the repo path into the artifact). The image's
+# baked /app/config still serves a bare `docker compose up` with the default CAM_CONFIG.
+export CAM_CONFIG_HOST="$CONFIG_ABS"
+export CAM_CONFIG="/run/cam-sensor.yaml"   # absolute in-container path, outside the /app tree
 export CAM_NETWORK="${CAM_NETWORK:-host}"
 [ "$DEV" = 1 ] && export CAM_NETWORK=bridge
 # ROS 2 middleware: rmw_zenoh_cpp is the default across the stack (discovers via a shared host
@@ -177,16 +179,11 @@ fi
 if [ "$ZENOHD" = 1 ]; then CAM_ROS2_IMAGE="${CAM_ROS2_IMAGE:-ros2-bridge}" "$REPO/tools/zenohd.sh" up; fi
 # --roscore: same, for the ROS 1 master (ros1-bridge consumers; mirrors --zenohd). One per host, idempotent.
 if [ "$ROSCORE" = 1 ]; then CAM_ROS1_IMAGE="${CAM_ROS1_IMAGE:-ros1-bridge}" "$REPO/tools/roscore.sh" up; fi
-# Config from an arbitrary host path (e.g. a vehicle-level config managed by `rig`): bind-mount
-# that single file into the container so the core/supervisor loads it. In-repo configs (under
-# core-driver/config/sensors/) already live in the mounted config dir, so no overlay is needed.
-if [ "$(dirname "$CONFIG_ABS")" != "$SENSORS_DIR" ]; then
-  export CAM_CONFIG_HOST="$CONFIG_ABS"
-  export CAM_CONFIG="/run/cam-sensor.yaml"   # mount target OUTSIDE the read-only /app/config mount
-  FILES+=(-f "$REPO/docker-compose.external-config.yml")
-fi
+# The single-file config bind (CAM_CONFIG_HOST -> CAM_CONFIG, exported above) -- applied for every
+# config, wherever it lives.
+FILES+=(-f "$REPO/docker-compose.external-config.yml")
 
 ARGS=("$@"); [ ${#ARGS[@]} -eq 0 ] && ARGS=(up)
 PLAT_LABEL="$([ "$DEV" = 1 ] && echo dev || echo "$PLATFORM")"
-echo "cam-up: project=$COMPOSE_PROJECT_NAME platform=$PLAT_LABEL${CAM_REGISTRY:+ registry=$CAM_REGISTRY} profiles=[${COMPOSE_PROFILES:-<none>}] sock=$CAM_SOCK_VOLUME net=$CAM_NETWORK rmw=$RMW_IMPLEMENTATION config=$CAM_CONFIG${CAM_CONFIG_HOST:+ (external: $CAM_CONFIG_HOST)}" >&2
+echo "cam-up: project=$COMPOSE_PROJECT_NAME platform=$PLAT_LABEL${CAM_REGISTRY:+ registry=$CAM_REGISTRY} profiles=[${COMPOSE_PROFILES:-<none>}] sock=$CAM_SOCK_VOLUME net=$CAM_NETWORK rmw=$RMW_IMPLEMENTATION config=$CAM_CONFIG_HOST (-> $CAM_CONFIG)" >&2
 exec docker compose "${FILES[@]}" "${ARGS[@]}"

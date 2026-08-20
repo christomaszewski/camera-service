@@ -158,13 +158,13 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
   camera-specific (it only brings up camera stacks; it is not generalized to other services). The
   contract is four small things:
   (1) `cam-up <config> {up -d | down | ps | logs | config}` operates on ONE sensor config;
-  (2) the config may live at an **arbitrary host path** — cam-up auto-detects a config outside
-  `core-driver/config/sensors/`, and a small overlay (`docker-compose.external-config.yml`) bind-mounts
-  that single (self-contained) file at an absolute in-container path (`/run/cam-sensor.yaml`), pointing
-  `CAM_CONFIG` there. It mounts OUTSIDE the read-only `/app/config` mount on purpose: Docker can't
-  create a nested mount point inside a `:ro` mount. In-repo configs take no overlay and are byte-for-byte
-  unchanged. One file suffices because a sensor config is self-contained (`load_config` reads one YAML +
-  dataclass defaults; it doesn't merge `camera.yaml`);
+  (2) the config may live at an **arbitrary host path** — for EVERY config (in-repo or external) a
+  small overlay (`docker-compose.external-config.yml`) bind-mounts the single (self-contained) file at
+  an absolute in-container path (`/run/cam-sensor.yaml`), pointing `CAM_CONFIG` there — outside the
+  image's `/app` tree. One file bind is the artifact's whole config surface: no directory binds into
+  the repo (`rig certify` flags those — `rig bake` would freeze the repo path into the artifact). One
+  file suffices because a sensor config is self-contained (`load_config` reads one YAML + dataclass
+  defaults; it doesn't merge `camera.yaml`);
   (3) the ros2-bridge passes through **`ROS_DOMAIN_ID` / `RMW_IMPLEMENTATION`** so every stack shares one
   ROS 2 graph (rig exports them; the defaults — domain 0, **`rmw_zenoh_cpp`** discovering via a shared
   per-host `rmw_zenohd` router (`cam-up --zenohd` / `tools/zenohd.sh`; rig runs it in prod) — are correct
