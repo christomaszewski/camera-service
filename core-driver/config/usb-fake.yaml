@@ -17,7 +17,6 @@ usb:
 recording:
   enabled: true
   encoder: ffv1                  # CPU + robust for a smoke test (no NVENC dependency)
-  output_dir: /data/recordings
   name_prefix: usbfake
   segment_seconds: 30
 

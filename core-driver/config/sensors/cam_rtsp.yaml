@@ -33,7 +33,8 @@ rtsp:
 recording:
   enabled: true
   encoder: auto            # encoded source -> stream-copy the delivered bitstream (faithful, no re-encode)
-  output_dir: /data/recordings
+  # output_dir: unset = the managed layout (<data root>[/runs/<id>]/recordings/<instance>);
+  #   relative = a subdir under that root replacing <instance>; absolute = a verbatim pin.
   name_prefix: cam_rtsp
   segment_seconds: 60
 

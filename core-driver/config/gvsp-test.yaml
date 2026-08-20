@@ -19,7 +19,6 @@ gige:
 recording:
   enabled: true
   encoder: ffv1
-  output_dir: /data/recordings
   name_prefix: gvsp
 
 transport:

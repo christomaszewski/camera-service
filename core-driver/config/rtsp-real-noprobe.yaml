@@ -16,7 +16,6 @@ rtsp:
 recording:
   enabled: true
   encoder: auto
-  output_dir: /data/recordings
   name_prefix: rtsprec
   segment_seconds: 30
 

@@ -16,7 +16,6 @@ usb:
 recording:
   enabled: true
   encoder: auto                # encoded source -> stream-copy
-  output_dir: /data/recordings
   name_prefix: usbmjpeg
   segment_seconds: 30
 

@@ -15,7 +15,6 @@ usb:
 recording:
   enabled: true
   encoder: auto                 # raw color -> ffv1 (lossless, native subsampling)
-  output_dir: /data/recordings
   name_prefix: usbyuy2
   segment_seconds: 30
 

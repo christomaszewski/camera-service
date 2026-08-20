@@ -21,7 +21,8 @@ usb:
 recording:
   enabled: true
   encoder: auto            # encoded (MJPEG) -> stream-copy the delivered JPEG (no re-encode)
-  output_dir: /data/recordings
+  # output_dir: unset = the managed layout (<data root>[/runs/<id>]/recordings/<instance>);
+  #   relative = a subdir under that root replacing <instance>; absolute = a verbatim pin.
   name_prefix: cam_usb
   segment_seconds: 60
 

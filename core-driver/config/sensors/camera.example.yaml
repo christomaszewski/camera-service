@@ -73,8 +73,11 @@ recording:
   enabled: true
   encoder: auto            # auto: 8-bit raw -> HW HEVC lossless (NVENC); >8-bit -> FFV1 (intra-only);
   #                          encoded sources (MJPEG/H264/H265) -> stream-copy, no re-encode
-  output_dir: /data/recordings   # default is rig-aware: RIG_DATA_DIR + run registry + per-instance
-  #                                subdir. An explicitly different path is used verbatim.
+  # output_dir: front-cam  # where recordings land, by SHAPE (no magic values):
+  #                          unset (default) -> the managed layout: <data root>[/runs/<id>]/recordings/<instance>
+  #                          relative        -> a subdir under that recordings root, REPLACING <instance>
+  #                          absolute        -> a verbatim pin: no data root, run registry, or instance
+  #                                             subdir -- must live under RIG_DATA_DIR to reach host storage
   # name_prefix: cam       # output stem -> <prefix>-<UTCstamp>-00000.mkv + .csv/.json sidecars
   #                          (run-stamped: restarts start a NEW run beside the old, never overwrite)
   segment_seconds: 60      # one .mkv per minute

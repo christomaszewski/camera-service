@@ -208,13 +208,29 @@ def test_transport_endpoint_numeric_coerced():
 
 
 def test_resolve_recording_dir():
+    # Semantics by SHAPE (no magic values): "" = managed default, relative = subdir under the
+    # managed recordings root (replacing <instance>), absolute = verbatim pin.
     R = resolve_recording_dir
-    assert R("/data/recordings", "", "") == "/data/recordings"               # bare run -> default untouched
-    assert R("/data/recordings", "/data", "cam_usb") == "/data/recordings/cam_usb"   # rig: root off RDD + per-sensor
-    assert R("/data/recordings", "/mnt/store/", "cam_a") == "/mnt/store/recordings/cam_a"  # any RDD; trailing / trimmed
-    assert R("/data/recordings", "", "cam_b") == "/data/recordings/cam_b"    # cam-up standalone: instance, no RDD
-    assert R("/data/recordings", "/data", "") == "/data/recordings"          # RDD, no instance -> rooted, not namespaced
-    assert R("/mnt/custom/rec", "/data", "cam_usb") == "/mnt/custom/rec"     # explicit pin -> untouched
+    assert R("", "", "") == "/data/recordings"                     # bare run -> dev-bind default
+    assert R("", "/data", "cam_usb") == "/data/recordings/cam_usb"  # rig: root off RDD + per-sensor
+    assert R("", "/mnt/store/", "cam_a") == "/mnt/store/recordings/cam_a"  # any RDD; trailing / trimmed
+    assert R("", "", "cam_b") == "/data/recordings/cam_b"          # cam-up standalone: instance, no RDD
+    assert R("", "/data", "") == "/data/recordings"                # RDD, no instance -> rooted, not namespaced
+    assert R("/mnt/custom/rec", "/data", "cam_usb") == "/mnt/custom/rec"   # absolute pin -> untouched
+    # the pre-v1.6 sentinel is just another absolute pin now (warned about, but honored verbatim)
+    assert R("/data/recordings", "/mnt/store", "cam_a") == "/data/recordings"
+
+
+def test_resolve_recording_dir_relative():
+    R = resolve_recording_dir
+    # a relative path REPLACES the <instance> segment under the managed recordings root
+    assert R("thermal-bay-2", "/data", "cam_a") == "/data/recordings/thermal-bay-2"
+    assert R("bay2/thermal", "/data", "cam_a") == "/data/recordings/bay2/thermal"  # nesting ok
+    assert R("thermal", "", "cam_a") == "/data/recordings/thermal"  # standalone: same rule, dev root
+    assert R(".", "/data", "cam_a") == "/data/recordings"          # '.' = the recordings root itself
+    # an escaping relative path is refused -> the default layout (never outside the root)
+    assert R("../elsewhere", "/data", "cam_a") == "/data/recordings/cam_a"
+    assert R("a/../../..", "/data", "") == "/data/recordings"
 
 
 def test_resolve_recording_dir_run_registry():
@@ -230,17 +246,18 @@ def test_resolve_recording_dir_run_registry():
         os.makedirs(os.path.join(d, "runs", run_id))
         os.symlink(os.path.join("runs", run_id), os.path.join(d, "current"))
         run = os.path.realpath(os.path.join(d, "runs", run_id))
-        assert R("/data/recordings", d, "cam_a") == f"{run}/recordings/cam_a"  # open run -> inside it
-        assert R("/data/recordings", d, "") == f"{run}/recordings"             # instance still optional
-        assert R("/mnt/custom/rec", d, "cam_a") == "/mnt/custom/rec"           # explicit pin still wins
+        assert R("", d, "cam_a") == f"{run}/recordings/cam_a"                  # open run -> inside it
+        assert R("", d, "") == f"{run}/recordings"                             # instance still optional
+        assert R("front", d, "cam_a") == f"{run}/recordings/front"             # relative subdir: inside the run too
+        assert R("/mnt/custom/rec", d, "cam_a") == "/mnt/custom/rec"           # absolute pin still wins
     with tempfile.TemporaryDirectory() as d:
-        assert R("/data/recordings", d, "cam_a") == f"{d}/recordings/cam_a"    # no registry -> flat
+        assert R("", d, "cam_a") == f"{d}/recordings/cam_a"                    # no registry -> flat
     with tempfile.TemporaryDirectory() as d:
         os.symlink(os.path.join("runs", "gone"), os.path.join(d, "current"))   # dangling link -> flat
-        assert R("/data/recordings", d, "cam_a") == f"{d}/recordings/cam_a"
+        assert R("", d, "cam_a") == f"{d}/recordings/cam_a"
     with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as outside:
         os.symlink(outside, os.path.join(d, "current"))                        # escapes the root -> flat
-        assert R("/data/recordings", d, "cam_a") == f"{d}/recordings/cam_a"
+        assert R("", d, "cam_a") == f"{d}/recordings/cam_a"
 
 
 def test_unique_run_prefix():
