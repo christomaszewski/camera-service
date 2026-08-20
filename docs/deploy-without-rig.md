@@ -81,6 +81,7 @@ export CAM_REGISTRY=registry.lan:5000        # cam-up points every image at the 
 # a fake-camera smoke: copy the demo config over once (from the build host):
 #   scp <build-host>:camera-service/core-driver/config/sensors/cam_a.yaml <vehicle>:~/cam_a.yaml
 # a real camera: start from the matching template instead (all under config/sensors/):
+#   camera.example.yaml (the FULL config surface, nameless — the rig `pkg add` seed) ·
 #   cam_gige.yaml (GigE/PTP) · cam_rtsp.yaml (RTSP) · cam_usb.yaml (UVC) · cam_thermal.yaml (16-bit thermal)
 #   -- e.g. cam_gige.yaml with  gige.fake: false  +  gige.camera_id: <serial>
 

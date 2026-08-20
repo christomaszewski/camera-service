@@ -1,0 +1,153 @@
+# camera-service — the full config surface in one file. This is the example `rig pkg add
+# public/camera-service` materializes as a new instance's EDITABLE config (declared in rigging.yaml
+# `examples:`); it also runs standalone:  cam-up config/sensors/camera.example.yaml up -d
+#
+# Deliberately NAMELESS: rig's instance row (or cam-up's fallback "camera") supplies `name`, which
+# drives the compose project (cam_<name>), shm volume (cam_<name>_sock), ROS namespace (/<name>),
+# frame_id, and the per-instance recording subdir. Don't add a `name:` unless you want to pin it.
+#
+# Active defaults = a real GigE mono camera, recording + ros2-bridge on. Everything else is shown
+# commented with its default or a sensible value. Worked, real-hardware variants of this file:
+#   cam_gige.yaml     GigE + PTP chunk timestamps end-to-end (the timestamp spine, host prep)
+#   cam_usb.yaml      USB/UVC MJPEG webcam (stream-copy record + decode for consumers)
+#   cam_rtsp.yaml     RTSP gimbal camera at 4K (probe, software-decode rationale, webrtc tuning)
+#   cam_thermal.yaml  16-bit radiometric thermal (FFV1, mono16 ROS, percentile-stretched preview)
+service: camera-service
+
+# ---- general (shared by every source type) -------------------------------------------------------
+camera:
+  type: gige               # gige (GVSP/Aravis) | usb (v4l2) | rtsp — selects the matching block below
+  frame_rate: 25.0         # gige: requested on the camera; usb: SET TO WHAT THE DEVICE DELIVERS
+  #                          (advisory to v4l2 — mislabeling timing, not throttling); rtsp: informational
+  # Source watchdog: reopen a dropped/stalled source with backoff while the pipeline (and any open
+  # recording) stays up. On by default.
+  # reconnect: true
+  # reconnect_timeout_s: 5.0     # no data for this long => reopen (rtsp cams with session hiccups: ~10)
+  # reconnect_backoff_s: 1.0     # initial retry delay; doubles up to reconnect_backoff_max_s
+  # reconnect_backoff_max_s: 30.0
+
+# ---- the selected source (camera.type) -----------------------------------------------------------
+gige:
+  camera_id: null          # null = first camera found; pin a serial for multi-camera ("Vendor-12345678")
+  pixel_format: Mono8      # Mono8/Bayer*8 = full HW NVENC lossless path; Mono16/Bayer*16 -> FFV1.
+  #                          Packed formats (Mono10p/12Packed) unsupported. A Bayer format auto-labels
+  #                          the ROS topic (bayer_*8) and the webrtc preview debayers it.
+  packet_size: 9000        # GVSP packet size; host NIC MTU must be >= this (sudo ip link set <if> mtu 9000)
+  # packet_delay: 20000    # ns between packets — stagger cameras sharing one NIC
+  # n_stream_buffers: 20
+  # fake: true             # Aravis in-process fake camera (no hardware; dev/demo — pair with camera_id: Fake_1)
+  # roi: { x: 0, y: 0, width: 2448, height: 2048 }   # optional sensor crop; default full frame
+  # Timestamp policy: chunk-mode PTP capture time with a provenance-tracked fallback ladder
+  # (ptp_chunk -> camera clock -> host arrival). See cam_gige.yaml + docs/ptp-timestamp-experiment.md.
+  timestamp_source: ptp_chunk    # ptp_chunk | camera | system
+  ptp_enable: true
+  # ptp_mode: SlaveOnly
+  # ptp_lock_timeout_s: 10.0     # wait for GevIEEE1588Status=Slave this long before starting anyway
+  # chunk_selectors: Timestamp,FrameID
+  # chunk_timestamp_name: ChunkTimestamp   # vendor-specific node names (arv-tool-0.8 features)
+  # chunk_frame_id_name: ChunkFrameID
+
+# usb:                     # camera.type: usb (see cam_usb.yaml / cam_thermal.yaml for real setups)
+#   device: /dev/v4l/by-id/usb-<vendor>-video-index0   # stable by-id path — a bare /dev/videoN renumbers
+#   pixel_format: MJPEG    # raw (GRAY8/GRAY16_LE/YUY2/I420/...) or encoded (MJPEG/H264/H265);
+#   #                        encoded -> stream-copy record + decode for consumers
+#   width: 1920
+#   height: 1080
+#   sof_timestamps: true   # v4l2 driver per-frame stamp (closer to capture than host arrival; opt-in,
+#   #                        sanity-checked — falls back to arrival if the device reports zeros)
+#   # fake: true           # videotestsrc instead of v4l2src (CI/dev; no device needed)
+
+# rtsp:                    # camera.type: rtsp (see cam_rtsp.yaml for a worked 4K gimbal setup)
+#   url: rtsp://192.168.1.10:8554/main.264
+#   protocols: tcp         # "" = udp with tcp fallback; tcp = robust through NAT/firewalls/lossy nets
+#   latency_ms: 200        # rtspsrc jitter buffer
+#   # probe: true          # codec/geometry probed at open(); the values below are fallbacks only
+#   # codec: h264          # h264 | h265 | mjpeg
+#   # width: 1920
+#   # height: 1080
+#   # decoder: auto        # auto = HW NVDEC when present; software = force avdec (needed for
+#   #                        no-IDR/intra-refresh cameras — see cam_rtsp.yaml)
+
+# ---- lossless recording --------------------------------------------------------------------------
+recording:
+  enabled: true
+  encoder: auto            # auto: 8-bit raw -> HW HEVC lossless (NVENC); >8-bit -> FFV1 (intra-only);
+  #                          encoded sources (MJPEG/H264/H265) -> stream-copy, no re-encode
+  output_dir: /data/recordings   # default is rig-aware: RIG_DATA_DIR + run registry + per-instance
+  #                                subdir. An explicitly different path is used verbatim.
+  # name_prefix: cam       # output stem -> <prefix>-<UTCstamp>-00000.mkv + .csv/.json sidecars
+  #                          (run-stamped: restarts start a NEW run beside the old, never overwrite)
+  segment_seconds: 60      # one .mkv per minute
+  # keyframe_interval_s: 10  # temporal window (I-frame spacing), temporal codecs only: bigger =
+  #                            smaller files, coarser seek. 0 = encoder default. Ignored by FFV1.
+  # bayer_tile: plain      # Bayer cams, pre-encode CFA tiling: off | plain | green_diff | rct
+  #                          (recorder-only; playback untiles — mode is flagged in the sidecar)
+  # bframes: 0             # B-frames between references (HW support is Xavier-only on Tegra = no-op on Orin)
+  # nvenc_preset: ""       # NVENC search depth ultrafast|fast|medium|slow — must still hold real-time fps
+  # nvenc_maxperf: true    # high GPU clocks for encoder throughput
+  # videoconvert_threads: 4  # parallelize the recorder's CPU format convert (the 5MP bottleneck); 0 = all cores
+
+# ---- local debug preview (headless by default) ---------------------------------------------------
+# preview:
+#   enabled: false
+#   sink: fakesink sync=false    # e.g. autovideosink for a desktop window
+
+# ---- frame transport to plugins ------------------------------------------------------------------
+transport:
+  plugin_endpoint:         # JP7: unixfd (self-describing caps); JP6: shm + 36-byte header.
+    enabled: true          #   Both bridges consume this.
+    socket_path: /tmp/cam/frames
+    # shm_size: 0          # JP6 shm bytes; 0 = auto (frame_size * 8)
+    # max_rate_hz: 0       # core-side cap on frames offered to ALL plugins; 0 = every frame
+    #                        (per-plugin capping: prefer the ros2-bridge publish_rate param below)
+  raw_endpoint:            # optional clean video/x-raw shm for generic same-host tools (no metadata);
+    enabled: true          #   the webrtc-bridge's JP6 fallback path reads this
+    socket_path: /tmp/cam/raw
+
+# ---- plugins -------------------------------------------------------------------------------------
+# isolation: container = own image, run as a compose sibling (cam-up enables its profile);
+# isolation: process   = lightweight, spawned in-image by the supervisor (command/restart keys).
+plugins:
+  - name: ros2-bridge      # sensor_msgs/Image on /<name>/<topic>, header.stamp = capture time (PTP
+    enabled: true          #   when locked); a lazy <topic>/compressed rides along via image_transport
+    isolation: container
+    params:
+      topic: image_raw
+      # frame_id: my_frame   # TF frame; defaults to the instance name
+      # debayer: true        # Bayer cams: publish demosaiced color instead of the labeled mosaic
+      #                        (JP7: in-pipeline bayer2rgb -> rgb8; JP6: composed image_proc, zero-copy)
+      # -- large-image tuning (plugins/ros2-bridge/README.md "Tuning zenoh for large images") --
+      # publish_rate: 10     # cap the ROS publish rate (Hz), dropping BEFORE convert/copy; 0 = every frame
+      # zenoh_shm: true      # zenoh shared-memory transport (subscriber sessions must enable it too;
+      #                        mismatched peers fall back to the network path automatically)
+      # zenoh_shm_pool_size: 268435456   # SHM segment bytes (default 48 MiB); docker shm_size follows it
+      # zenoh_shm_msg_threshold: 4096    # min message bytes routed via SHM (default 512; power of two)
+      # RMW_ZENOH_BUFFER_POOL_MAX_SIZE_BYTES: 67108864   # rmw serialization pool cap (default 8 MiB)
+      # ZENOH_CONFIG_OVERRIDE: "transport/link/tx/batch_size=65535"   # raw zenoh keys, layered on the
+      #                        rmw_zenoh defaults (never a config URI — that would drop them)
+
+  - name: webrtc-bridge    # live browser preview over WebRTC. Enable per camera with a UNIQUE port —
+    enabled: false         #   host networking means signalling ports are shared vehicle-wide.
+    isolation: container
+    params:
+      port: 8443           # host-facing signalling port (unique per camera!)
+      width: 2448          # JP6 raw-shm caps are TRUSTED — must match the camera exactly (green/garbage
+      height: 2048         #   preview = a mismatch); on JP7/unixfd the stream self-describes, set anyway
+      format: GRAY8        # what the bridge consumes (GRAY8/GRAY16_LE/I420/...); Bayer debayers in-bridge
+      fps: 25
+      # role: front-left   # discovery role label (docs/DISCOVERY.md); defaults to the instance name
+      # Any UPPERCASE param passes straight through as an env var — the webrtc knobs in the wild:
+      # VIDEO_CAPS: video/x-h264               # pin H.264 (universal browser decode; else negotiated VP8/9)
+      # GST_PLUGIN_FEATURE_RANK: nvv4l2h264enc:MAX   # prefer HW NVENC over CPU x264 (no-op without NVENC)
+      # CAM_WEBRTC_MAX_BITRATE: 20000000       # lift webrtcsink's 8 Mbps ceiling for big streams
+      # CAM_WEBRTC_CONGESTION: disabled        # + CAM_WEBRTC_START_BITRATE: 6000000 — pin a fixed rate
+      #                                          when the image lacks rtpgccbwe (see cam_rtsp.yaml)
+      # CAM_WEBRTC_NORMALIZE: auto             # 16-bit preview: percentile-stretch GRAY16 -> GRAY8
+      #                                          ("auto" = 1–99% EMA window, or pin "lo:hi" e.g. "5:99.5")
+
+  # - name: ros1-bridge    # legacy ROS 1 (Noetic) publisher — JP6-class hosts; needs the shared
+  #   enabled: true        #   roscore (cam-up --roscore / tools/roscore.sh)
+  #   isolation: container
+  #   params:
+  #     topic: image_raw
+  #     # frame_id: my_frame

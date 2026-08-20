@@ -119,6 +119,7 @@ closest real-camera template under [core-driver/config/sensors/](core-driver/con
 
 | Camera | Template | Notes |
 |---|---|---|
+| **any** (config reference) | `camera.example.yaml` | the FULL config surface in one nameless file — every knob present, alternatives commented. This is also what `rig pkg add public/camera-service` seeds a new instance with (declared `examples:` in [rigging.yaml](rigging.yaml)) |
 | GigE Vision (PTP/chunk, mono or Bayer) | `cam_gige.yaml` | host MTU 9000 + `ptp4l`/`phc2sys`; the [PTP experiment](docs/ptp-timestamp-experiment.md) config |
 | RTSP (H.264/H.265, up to 4K) | `cam_rtsp.yaml` | self-probes codec/geometry; stream-copy record |
 | USB / UVC (MJPEG or raw) | `cam_usb.yaml` | map the v4l2 device in; MJPEG stream-copies to disk |
