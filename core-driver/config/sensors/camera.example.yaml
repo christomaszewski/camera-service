@@ -142,8 +142,9 @@ plugins:
       # VIDEO_CAPS: video/x-h264               # pin H.264 (universal browser decode; else negotiated VP8/9)
       # GST_PLUGIN_FEATURE_RANK: nvv4l2h264enc:MAX   # prefer HW NVENC over CPU x264 (no-op without NVENC)
       # CAM_WEBRTC_MAX_BITRATE: 20000000       # lift webrtcsink's 8 Mbps ceiling for big streams
-      # CAM_WEBRTC_CONGESTION: disabled        # + CAM_WEBRTC_START_BITRATE: 6000000 — pin a fixed rate
-      #                                          when the image lacks rtpgccbwe (see cam_rtsp.yaml)
+      # CAM_WEBRTC_START_BITRATE: 6000000      # where gcc congestion control starts adapting from
+      # CAM_WEBRTC_CONGESTION: gcc             # gcc (default; adapts per-viewer, prevents WiFi
+      #                                          bufferbloat) | disabled (fixed START rate)
       # CAM_WEBRTC_NORMALIZE: auto             # 16-bit preview: percentile-stretch GRAY16 -> GRAY8
       #                                          ("auto" = 1–99% EMA window, or pin "lo:hi" e.g. "5:99.5")
 
