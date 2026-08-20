@@ -103,6 +103,8 @@ transport:
   raw_endpoint:            # optional clean video/x-raw shm for generic same-host tools (no metadata);
     enabled: true          #   the webrtc-bridge's JP6 fallback path reads this
     socket_path: /tmp/cam/raw
+    # shm_size: 0          # shm bytes; 0 = auto (frame_size * 8). NB max_rate_hz is plugin-endpoint-
+    #                        only -- nothing rate-caps this raw branch (a value here parses but is ignored)
 
 # ---- plugins -------------------------------------------------------------------------------------
 # isolation: container = own image, run as a compose sibling (cam-up enables its profile);
