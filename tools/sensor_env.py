@@ -8,7 +8,8 @@ generate a compose file. It emits `KEY=value` lines:
   COMPOSE_PROFILES       <enabled container plugins, comma-separated>
   CAM_INSTANCE          <name>                 (ROS namespace, labels)
   CAM_SOCK_VOLUME       cam_<name>_sock       (stable shm volume name; other stacks attach to it)
-  + per-plugin env       (ros2 topic/frame_id/encoding/debayer, webrtc geometry/port), PLUS any
+  + per-plugin env       (ros2 topic/frame_id/encoding/debayer/publish_rate + zenoh shm knobs,
+                         webrtc geometry/port), PLUS any
                          UPPERCASE plugin param passed through VERBATIM as an env var (e.g.
                          CAM_WEBRTC_MAX_BITRATE) -- so any bridge knob is YAML-settable without editing this.
 
@@ -200,6 +201,37 @@ def main() -> int:
         env["CAM_ROS_ENCODING"] = ros_bayer_encoding(pixfmt)
         # B: optional in-bridge demosaic to rgb8.
         env["CAM_DEBAYER"] = "true" if ros.get("debayer", False) else "false"
+        # Optional publish throttle (Hz; the bridge drops frames above it). Only emitted when set, so
+        # an absent param keeps the bridge's own default (publish every frame).
+        if ros.get("publish_rate") is not None:
+            env["CAM_ROS_PUBLISH_RATE"] = str(ros.get("publish_rate"))
+
+    # rmw_zenoh large-message knobs (ros2-bridge only -- ros1 has no zenoh). The launch file folds
+    # these into ZENOH_CONFIG_OVERRIDE, layered on top of rmw_zenoh's defaults (deliberately NOT a
+    # ZENOH_SESSION_CONFIG_URI, which would replace the whole default config). Raw zenoh paths and
+    # RMW_ZENOH_* env knobs need no mapping here: set them as UPPERCASE params (passthrough below),
+    # e.g. ZENOH_CONFIG_OVERRIDE or RMW_ZENOH_BUFFER_POOL_MAX_SIZE_BYTES.
+    ros2 = by_name.get("ros2-bridge")
+    if ros2 is not None:
+        for param, key in (("zenoh_shm", "CAM_ZENOH_SHM"),
+                           ("zenoh_shm_pool_size", "CAM_ZENOH_SHM_POOL_SIZE"),
+                           ("zenoh_shm_msg_threshold", "CAM_ZENOH_SHM_MSG_THRESHOLD")):
+            v = ros2.get(param)
+            if v is not None:
+                env[key] = ("true" if v else "false") if isinstance(v, bool) else str(v)
+        # Keep docker's shm_size in lockstep with the zenoh pool: the pool is one POSIX segment in the
+        # bridge container's /dev/shm, so a too-small tmpfs silently downgrades zenoh to the network
+        # path. Under the stack's ipc:host model docker ignores shm_size (the HOST /dev/shm applies;
+        # cam-up warns when that is too small) -- the derived value covers any non-host-IPC variant.
+        # +64 MiB headroom (zenoh metadata segments; also docker's default floor). An explicit
+        # UPPERCASE CAM_ROS2_SHM_SIZE param still wins (the passthrough loop runs last).
+        pool = ros2.get("zenoh_shm_pool_size")
+        if pool is not None:
+            try:
+                env["CAM_ROS2_SHM_SIZE"] = str(int(pool) + (64 << 20))
+            except (TypeError, ValueError):
+                sys.stderr.write(f"sensor_env: zenoh_shm_pool_size {pool!r} is not a byte count; "
+                                 "not deriving CAM_ROS2_SHM_SIZE\n")
 
     web = by_name.get("webrtc-bridge")
     if web is not None:

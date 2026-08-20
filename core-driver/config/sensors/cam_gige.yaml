@@ -77,6 +77,12 @@ plugins:
       frame_id: cam_gige
       # A Bayer pixel_format is labeled automatically (bayer_*8 via sensor_env) so a downstream
       # image_proc can demosaic; set `debayer: true` to compose that demosaic into this bridge.
+      # Large-image tuning (see plugins/ros2-bridge/README.md "Tuning zenoh for large images"):
+      # publish_rate: 10                 # cap the ROS publish rate (Hz); frames above it are dropped
+      # zenoh_shm: true                  # zenoh shared-memory transport (subscribers must enable it too)
+      # zenoh_shm_pool_size: 268435456   # SHM segment bytes (default 48 MiB)
+      # RMW_ZENOH_BUFFER_POOL_MAX_SIZE_BYTES: 67108864   # rmw serialization pool cap (default 8 MiB)
+      # ZENOH_CONFIG_OVERRIDE: "transport/link/tx/batch_size=65535"   # raw zenoh keys, layered on defaults
   - name: webrtc-bridge
     enabled: true
     isolation: container

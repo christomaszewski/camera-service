@@ -80,13 +80,19 @@ class CamBridgeBase : public rclcpp::Node {
   std::string frame_id_;
   std::string encoding_;   // CAM_ROS_ENCODING hint: bayer_* for a CFA camera, "" for mono
   bool debayer_ = false;
+  double publish_rate_ = 0.0;   // max publish rate in Hz; 0 = publish every frame
   std::vector<uint8_t> convert_buf_;   // scratch for YUV->rgb8 (reused per frame; single stream thread)
 
  private:
   static GstFlowReturn on_new_sample_static(GstAppSink* sink, gpointer self);
   GstFlowReturn on_new_sample(GstAppSink* sink);
+  // True = drop this frame to hold `publish_rate`. Called on the (single) appsink streaming thread
+  // BEFORE map/extract, so a dropped frame skips the YUV conversion and the message copy entirely.
+  bool throttle_drop();
   void publish(const FrameMeta& m);
 
+  int64_t min_period_ns_ = 0;          // 1e9 / publish_rate; 0 = unthrottled
+  int64_t next_pub_ns_ = 0;            // steady-clock deadline for the next publish (0 = first frame)
   GstElement* pipeline_ = nullptr;
   GstBus* bus_ = nullptr;              // watched for ERROR/EOS (producer restart) by bus_thread_
   std::thread bus_thread_;

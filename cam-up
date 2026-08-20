@@ -76,6 +76,18 @@ export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
 # need the volume to exist, and `rig bake` may render on a box with no running daemon.
 [ "$VERB" = config ] || docker volume create "$CAM_SOCK_VOLUME" >/dev/null
 
+# zenoh SHM sanity: with ipc:host the bridge's zenoh pool is a POSIX segment in the HOST's /dev/shm
+# (docker's shm_size doesn't apply), and a too-small tmpfs doesn't fail the stack -- zenoh logs an
+# error and silently falls back to the network path, forfeiting the SHM speedup. Surface that at
+# up-time. Skip for `config` (pure render, no host probing) and hosts without /dev/shm (macOS dev:
+# the Docker VM's tmpfs is what applies, and it's sized with the VM).
+if [ "$VERB" != config ] && [ -n "${CAM_ZENOH_SHM_POOL_SIZE:-}" ] && [ -d /dev/shm ]; then
+  SHM_KB="$(df -Pk /dev/shm 2>/dev/null | awk 'NR==2{print $2}')"
+  if [ -n "${SHM_KB:-}" ] && [ "$((SHM_KB * 1024))" -lt "$CAM_ZENOH_SHM_POOL_SIZE" ] 2>/dev/null; then
+    echo "cam-up: WARNING: zenoh_shm_pool_size ($CAM_ZENOH_SHM_POOL_SIZE bytes) exceeds /dev/shm ($((SHM_KB / 1024)) MiB); zenoh will fall back to the network path -- enlarge /dev/shm (mount -o remount,size=...) or shrink the pool" >&2
+  fi
+fi
+
 # Resolve auto -> the target platform (drives BOTH the image tag cam-core:<platform> AND the runtime
 # overlay docker-compose.<platform>.yml). rig's DECLARED target wins over host detection: RIG_IMAGE_TAG
 # (= vehicle.yaml images.tag, e.g. jp7) is authoritative because rig bakes on a dev box that often isn't a

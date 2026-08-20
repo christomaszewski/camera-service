@@ -15,6 +15,9 @@
 #     CAM_ZENOHD_NAME  container name (default: cam-zenohd) -- the fixed name is what makes it singular
 #     CAM_ZENOH_NETWORK  docker network (default: host -- the production model; nodes reach localhost:7447)
 #     CAM_ZENOH_PORT   router port (default: 7447; only published when NETWORK != host)
+#     ZENOH_CONFIG_OVERRIDE  optional `path=value;...` zenoh config overrides for the ROUTER, applied
+#                      on top of its defaults (same mechanism the bridge session uses). Data normally
+#                      flows peer-to-peer, so router tuning only matters when traffic is routed.
 set -euo pipefail
 NAME="${CAM_ZENOHD_NAME:-cam-zenohd}"
 IMAGE="${CAM_ROS2_IMAGE:-ros2-bridge}"
@@ -30,9 +33,14 @@ case "$CMD" in
     docker rm -f "$NAME" >/dev/null 2>&1 || true
     net_args=(--network host)
     [ "$NET" != host ] && net_args=(--network "$NET" -p "$PORT:$PORT")
+    env_args=()
+    [ -n "${ZENOH_CONFIG_OVERRIDE:-}" ] && env_args=(-e "ZENOH_CONFIG_OVERRIDE=${ZENOH_CONFIG_OVERRIDE}")
     # Bypass the bridge entrypoint's socket-wait (no camera socket here); just source ROS and run the
     # router. The router is RMW-agnostic (it IS the zenoh hub), so no RMW_IMPLEMENTATION needed.
-    docker run -d --name "$NAME" --restart unless-stopped "${net_args[@]}" \
+    # --ipc host matches the rest of the stack: if the override enables SHM on the router, it must map
+    # the peers' segments from the shared host /dev/shm (private IPC would isolate -- and cap -- its own).
+    # (${env_args[@]+...}: expanding an EMPTY array trips `set -u` on bash 3.2 -- macOS dev hosts.)
+    docker run -d --name "$NAME" --restart unless-stopped --ipc host "${net_args[@]}" ${env_args[@]+"${env_args[@]}"} \
       --entrypoint bash "$IMAGE" -c \
       'source "/opt/ros/${ROS_DISTRO}/setup.bash"; exec ros2 run rmw_zenoh_cpp rmw_zenohd'
     echo "zenohd: started '$NAME' ($IMAGE) on '$NET'${NET:+ }${NET#host}${NET:+:}${PORT}" >&2
