@@ -37,8 +37,14 @@ RUN git clone --depth 1 --branch ${GST_RS_TAG} \
       https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git /tmp/gst-rs
 # LTO off + limited jobs to dodge the OOM-during-link the full/LTO build hits in Docker.
 ENV CARGO_PROFILE_RELEASE_LTO=off CARGO_BUILD_JOBS=2
+# gst-plugin-rtp rides along for `rtpgccbwe`: webrtcsink's Google Congestion Control needs that
+# element to scale each consumer's encoder bitrate to the link. Without it CC never engages --
+# every consumer parks at start-bitrate AND a pinned rate above a (WiFi) link's momentary capacity
+# bufferbloats the stream (latency grows without recovering). Same RUN -> shared cargo target dir,
+# so the common gstreamer-rs deps compile once.
 RUN cd /tmp/gst-rs \
     && cargo cinstall -p gst-plugin-webrtc --prefix=/usr/local --libdir=/usr/local/lib \
+    && cargo cinstall -p gst-plugin-rtp --prefix=/usr/local --libdir=/usr/local/lib \
     && cargo build --release --bin gst-webrtc-signalling-server \
     && install -m755 target/release/gst-webrtc-signalling-server /usr/local/bin/
 

@@ -61,14 +61,14 @@ plugins:
       height: 2160
       format: I420         # the decoded format the bridge consumes
       fps: 25
-      # 4K needs more than webrtcsink's 8 Mbps default ceiling -- raise it (generic UPPERCASE env passthrough):
+      # 4K needs more than webrtcsink's 8 Mbps default ceiling -- raise it (generic UPPERCASE env passthrough).
+      # Congestion control (gcc) runs by default -- the image ships rtpgccbwe -- and adapts each
+      # viewer's bitrate within [min, max], which also stops a too-high fixed rate from bufferbloating
+      # a WiFi dashboard. Start mid-range so quality ramps fast on a good link:
       CAM_WEBRTC_MAX_BITRATE: 20000000
-      # The deployed bridge image is MISSING the rtpgccbwe element (gst-plugins-rs "rtp" plugin), so
-      # webrtcsink's congestion control never runs and each consumer's encoder PARKS at start-bitrate
-      # (element default 2 Mbps -> visible re-encode artifacts). Until rtpgccbwe is added to the image,
-      # disable CC explicitly and pin a sane fixed rate for the LAN dashboard:
-      CAM_WEBRTC_CONGESTION: disabled
       CAM_WEBRTC_START_BITRATE: 6000000
+      # (On a pre-rtpgccbwe image CC can't run: pin CAM_WEBRTC_CONGESTION: disabled + the START rate
+      # as a fixed-bitrate fallback -- see the bridge README.)
       # HW NVENC H.264 for the Chrome operator dashboard: VIDEO_CAPS pins H.264 (universal browser decode);
       # GST_PLUGIN_FEATURE_RANK forces nvv4l2h264enc over CPU x264enc, freeing the CPU at 4K. The element
       # exists in the bridge container via the platform grant (JP7: CDI device in docker-compose.jp7.yml,

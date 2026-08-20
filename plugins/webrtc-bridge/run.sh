@@ -105,6 +105,9 @@ SINK="webrtcsink name=cam_webrtcsink signaller::uri=ws://127.0.0.1:${PORT}"
 
 # Force I420 after videoconvert: webrtcsink's encoders want a YUV format, not GRAY8/RGBx. The leaky
 # queue drops frames if the encoder/network falls behind (live preview: the newest frame wins).
+# Depth 2, not deeper: when the encoder hovers at its frame budget a leaky queue runs FULL, so its
+# depth is standing glass-to-glass latency (4 buffers @ 25 fps = +160 ms); 2 keeps the drop cushion
+# while halving that worst case.
 if [ -n "$NORM" ]; then
   # Split pipeline: the python launcher pumps norm_in (appsink) -> 16->8 stretch -> norm_out (appsrc).
   # The appsrc caps are set at runtime from the first frame's input caps, so this works on JP6
@@ -119,9 +122,9 @@ if [ -n "$NORM" ]; then
   # sync=false drop=true already says "hand me samples as they come, don't pace or block on me"), so the
   # pipeline reaches PLAYING, new-sample starts firing, and the pump feeds the sink. Verified in cam-dev:
   # baseline -> state=paused, 0 frames; +async=false -> state=playing, frames flow.
-  PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=4 ! appsink name=norm_in emit-signals=true max-buffers=2 drop=true sync=false async=false   appsrc name=norm_out is-live=true format=time ! queue leaky=downstream max-size-buffers=4 ! videoconvert ! video/x-raw,format=I420 ! ${SINK}"
+  PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=2 ! appsink name=norm_in emit-signals=true max-buffers=2 drop=true sync=false async=false   appsrc name=norm_out is-live=true format=time ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=I420 ! ${SINK}"
 else
-  PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=4 ! ${DEBAYER_EL}videoconvert ! video/x-raw,format=I420 ! ${SINK}"
+  PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=2 ! ${DEBAYER_EL}videoconvert ! video/x-raw,format=I420 ! ${SINK}"
 fi
 
 echo "webrtc-bridge: ${TRANSPORT} ${SOCK}${BAYER:+ bayer=${BAYER}}${DEBAYER_EL:+ (debayer->color)}${NORM:+ normalize=${NORM}} -> webrtcsink (signalling :${PORT})"
