@@ -35,8 +35,11 @@ build:
 
 Contract for `build.command`:
 - Reads the target registry from **`$RIG_IMAGE_REGISTRY`** (or positional `$1`).
-- Takes the **platform tag** as `$2` (one of `platforms`); builds + pushes `<registry>/<image>:<tag>` for
-  every image in `images`. `PUSH=0` builds without pushing (CI/dry-run).
+- Takes the tag as `$2` and pushes `<registry>/<image>:<tag>` **verbatim** for every image in `images`.
+  Two tag shapes: a bare **platform tag** (`jp7` — legacy) or a composed **`<version>-<platform>`**
+  (`v1.4.0-jp7` — the versioned matrix; rig invokes once per platform in `platforms`). The jp6/jp7
+  build variant comes from **`$RIG_TARGET_PLATFORM`** when rig sets it, else is derived from the tag
+  (bare value or `-jp6`/`-jp7` suffix). `PUSH=0` builds without pushing (CI/dry-run).
 - Exits non-zero on failure; safe to re-run (idempotent push).
 
 Single-platform stacks (the nav drivers) set `platforms: [default]` (or omit) and push `…/<image>:latest`.
@@ -60,9 +63,13 @@ for stack in deployed_stacks:                       # services.yaml ∩ vehicle 
 ## The platform-tag gotcha (why cam needed `cam-up` wiring)
 
 The compose prefix alone — `${RIG_IMAGE_REGISTRY}/cam-core` — resolves to `:latest`, but cam publishes
-`cam-core:jp7` / `:jp6`. So cam's launcher maps `RIG_IMAGE_REGISTRY` into its registry logic, which
-appends the **detected platform tag** (`…/cam-core:jp7`) via the per-image override that wins in compose.
-Single-`:latest` stacks don't hit this; any multi-platform stack must do the same.
+per-platform tags. So cam's launcher maps `RIG_IMAGE_REGISTRY` into its registry logic and composes the
+pull ref via the per-image override that wins in compose: with a **version-valued** `images.tag`
+(`v1.4.0`) it appends the resolved platform (`…/cam-core:v1.4.0-jp7`, matching what `build.command`
+pushed); a legacy **platform-valued** tag (`jp7`) or a bare-platform standalone deploy passes through as
+`…/cam-core:jp7`. The platform itself resolves `CAM_PLATFORM` > `RIG_TARGET_PLATFORM` (vehicle.yaml
+`platform:`) > legacy platform-valued tag > host detection. Single-`:latest` stacks don't hit this; any
+multi-platform stack must do the same.
 
 ## Prereqs / open items
 - **Registry reachable from both** the arm64 build host and every vehicle (the `docker-registry` repo;

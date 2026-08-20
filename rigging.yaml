@@ -14,12 +14,16 @@ ros_distro: lyrical
 platform:                                # JP6 vs JP7 is a HOST fact; cam-up auto-detects it per host
   auto_detect: /etc/nv_tegra_release     #   R36 -> jp6 (l4t + nvidia runtime); R38+ -> jp7 (runc + CDI)
   override_env: CAM_PLATFORM            #   rig may set this per host to {jp6|jp7} to pin instead of detect
+  #                                        (cam-up also honors rig's standard RIG_TARGET_PLATFORM, from
+  #                                         vehicle.yaml `platform:`; CAM_PLATFORM wins when both are set)
 
 images:                                  # pull-based deploy: cam-up points images at a registry (docs/deploy-without-rig.md)
   registry_env: CAM_REGISTRY            #   set -> <registry>/<name>:<platform> for every image; then `pull` + `up`
   rig_registry_env: RIG_IMAGE_REGISTRY   #   rig's fleet registry; cam-up honors it (applies the platform tag)
-  rig_tag_env: RIG_IMAGE_TAG             #   rig's fleet image tag (= vehicle.yaml images.tag, e.g. jp7); the
-  #                                          compose image refs default to <registry>/<name>:${RIG_IMAGE_TAG:-latest}
+  rig_tag_env: RIG_IMAGE_TAG             #   rig's fleet image tag (= vehicle.yaml images.tag). A VERSION tag
+  #                                          (v1.4.0) pairs with the per-host platform: cam-up composes
+  #                                          <version>-<platform> pull refs to match the published matrix.
+  #                                          Legacy platform-valued tags (jp7) still work verbatim.
   tag_env: CAM_IMAGE_TAG                #   default tag = detected platform (jp6/jp7); set to pin a release
   per_image_env: [CAM_CORE_IMAGE, CAM_ROS2_IMAGE, CAM_ROS1_IMAGE, CAM_WEBRTC_IMAGE]   # override a single image
 
