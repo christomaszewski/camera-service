@@ -100,6 +100,7 @@ session.liveliness().declare_subscriber("fleet/*/media/*", on_sample, history=Tr
 | Producer | Status | Notes |
 |---|---|---|
 | webrtc-bridge | **implemented** | advertises its WebRTC stream; see [plugins/webrtc-bridge/README.md](../plugins/webrtc-bridge/README.md). Reference implementation: a generic advertiser (`tools/zenoh_advertiser.py`) + a stack-specific descriptor builder (`tools/bridge_stream.py`). |
+| rtsp-bridge | **implemented** | `protocol: "rtsp"`, the `rtsp://` URL in `signalling`. Advertises on server **bind** (a server is connectable from bind, and its on-demand media has no PLAYING transition until a client arrives). When it shares a sensor with the webrtc-bridge, its `id` is auto-suffixed `<name>-rtsp` so the two streams get distinct keys. |
 | sensors / recordings / ros2-bridge | _future_ | each self-advertises at its own `fleet/<vehicle>/media/<id>` key, same shape. |
 
 The reference advertiser is intentionally split into a **generic** half (session + liveliness token +

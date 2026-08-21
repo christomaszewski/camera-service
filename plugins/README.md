@@ -37,6 +37,11 @@ A plugin consumes:
   with `header.stamp` derived from the PTP capture time. ROS 2 (Lyrical Luth).
 - **[webrtc-bridge](webrtc-bridge)** — *built.* Re-encodes lossy/low-latency and serves remote
   viewers via `webrtcsink`. A best-effort consumer (its own encode, allowed to drop frames).
+- **[rtsp-bridge](rtsp-bridge)** — *built.* Serves the frames as a standard RTSP stream
+  (GstRtspServer; H.264 default, H.265 knob) any player/recorder can consume — no WebRTC
+  signalling. One shared **on-demand** media: zero encode cost while nobody watches. Rides the
+  plugin endpoint on BOTH platforms (unixfd on JP7; shm+header on JP6 — real PTP timestamps,
+  unlike the raw endpoint).
 - **mqtt-telemetry** — *example / idea.* Grab select low-res frames and forward to the cloud.
 
 Each plugin is either a lightweight in-image process (`isolation: process`, spawned by the

@@ -1,0 +1,26 @@
+# Core config for the RTSP-bridge THERMAL round-trip test (no camera): a fake 16-bit mono source
+# (videotestsrc GRAY16_LE, the cam_thermal.yaml shape) on the header plugin endpoint, so
+# rtsp_test.sh can exercise the frame pump's normalize stage (GRAY16 -> percentile-stretched GRAY8)
+# end to end.
+camera:
+  type: usb
+  frame_rate: 25.0
+
+usb:
+  fake: true                      # videotestsrc instead of v4l2src
+  pixel_format: GRAY16_LE
+  width: 640
+  height: 512
+
+recording:
+  enabled: false
+
+preview:
+  enabled: false
+
+transport:
+  plugin_endpoint:
+    enabled: true
+    socket_path: /tmp/cam/frames
+  raw_endpoint:
+    enabled: false

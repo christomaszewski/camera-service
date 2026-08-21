@@ -86,7 +86,7 @@ core-driver/            # the producer service
   main.py               # entry point
   config/camera.yaml    # camera + recording + preview settings
   Dockerfile
-plugins/                # consumer apps: ros2-bridge, ros1-bridge, webrtc-bridge (mqtt-telemetry, ... as examples)
+plugins/                # consumer apps: ros2-bridge, ros1-bridge, webrtc-bridge, rtsp-bridge (mqtt-telemetry, ... as examples)
 docker-compose.yml
 ```
 
@@ -231,7 +231,7 @@ Docker Compose **profiles**, and brings up that sensor's stack:
 - **Two plugin homes:** lightweight plugins (`isolation: process`) run in-image, spawned by the
   **supervisor** ([supervisor.py](core-driver/supervisor.py)) — the core container's entrypoint, which also
   forwards shutdown so the core finalizes its recording. Heavy ones (`isolation: container` — ros2-bridge,
-  webrtc-bridge) are compose siblings.
+  webrtc-bridge, rtsp-bridge) are compose siblings.
 - **Multiple cameras** = the same files run as multiple projects. `cam-up cam_a` and `cam-up cam_b`
   coexist — each its own compose project, shm volume, ROS namespace, and WebRTC port, all derived from the
   per-sensor config (host networking is shared, so ports/topics are namespaced per camera).
@@ -287,6 +287,7 @@ chunk-parse path** via a patched chunk-emitting GV camera:
 - [tools/gvsp-chunk-emitter/gvsp_test.sh](tools/gvsp-chunk-emitter) — **real GVSP + chunk-timestamp extraction** (patched Aravis fake camera)
 - [tools/gvsp-chunk-emitter/roundtrip_test.sh](tools/gvsp-chunk-emitter) — **full input→output round-trip**: known frames+timestamps → GVSP → recording, compared **bit-exact against the exact transmitted bytes** (lossless + timestamp fidelity). Defaults to random noise; pass a video file (`roundtrip_test.sh clip.mkv`) to round-trip real footage instead.
 - [plugins/webrtc-bridge/tools/webrtc_test.sh](plugins/webrtc-bridge/tools/webrtc_test.sh) — **WebRTC egress**: raw shm → `webrtcsink` → `webrtcsrc` decode (headless, no browser)
+- [plugins/rtsp-bridge/tools/rtsp_test.sh](plugins/rtsp-bridge/tools/rtsp_test.sh) — **RTSP egress**: shm+header / unixfd → GstRtspServer → `rtspsrc` decode (headless; h264 + h265, thermal normalize, reconnect)
 - [tools/orchestration_test.sh](tools/orchestration_test.sh) — **config-driven multi-sensor deploy**: `cam-up` profile selection, two cameras side by side (isolated projects), cross-stack shm read
 - [tools/gvsp-chunk-emitter/reconnect_test.sh](tools/gvsp-chunk-emitter) — **camera reconnect/backoff**: kill the GVSP emitter mid-stream, restart it; the core detects, backs off, reconnects, resumes, and finalizes a valid recording
 

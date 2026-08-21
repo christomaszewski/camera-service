@@ -6,6 +6,13 @@
 services:
   webrtc-bridge:
     runtime: runc                       # no nvidia runtime on a laptop / CI; x264enc fallback
+  rtsp-bridge:
+    runtime: runc                       # no nvidia runtime on a laptop / CI; x264/x265 fallback
+    # --dev runs on the bridge network, so map the RTSP port to the host. Only the TCP control
+    # port is mapped -- play with TCP-interleaved media (ffplay -rtsp_transport tcp ...); UDP
+    # media ports aren't mapped. Ignored (with a compose warning) if CAM_NETWORK=host is forced.
+    ports:
+      - "${CAM_RTSP_PORT:-8554}:${CAM_RTSP_PORT:-8554}"
   core-driver:
     image: ${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}cam-dev:${RIG_IMAGE_TAG:-latest}
     build:

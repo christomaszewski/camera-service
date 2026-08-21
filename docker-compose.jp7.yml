@@ -19,3 +19,10 @@ services:
     runtime: runc
     devices:
       - nvidia.com/gpu=all
+  # And for the rtsp-bridge: the grant is what makes nvv4l2h264enc/nvv4l2h265enc exist in that
+  # container, so its auto-probe picks NVENC (it builds its own nvvidconv->NVMM hop). Without the
+  # grant it falls back to x264enc/x265enc.
+  rtsp-bridge:
+    runtime: runc
+    devices:
+      - nvidia.com/gpu=all

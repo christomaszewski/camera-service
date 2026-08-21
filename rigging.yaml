@@ -25,14 +25,14 @@ images:                                  # pull-based deploy: cam-up points imag
   #                                          <version>-<platform> pull refs to match the published matrix.
   #                                          Legacy platform-valued tags (jp7) still work verbatim.
   tag_env: CAM_IMAGE_TAG                #   default tag = detected platform (jp6/jp7); set to pin a release
-  per_image_env: [CAM_CORE_IMAGE, CAM_ROS2_IMAGE, CAM_ROS1_IMAGE, CAM_WEBRTC_IMAGE]   # override a single image
+  per_image_env: [CAM_CORE_IMAGE, CAM_ROS2_IMAGE, CAM_ROS1_IMAGE, CAM_WEBRTC_IMAGE, CAM_RTSP_IMAGE]   # override a single image
 
 build:                                   # rig's BUILD phase: how to (re)build + push this stack's images to the
                                          # fleet registry. See docs/fleet-build-contract.md for the rig loop.
   command: tools/build-images.sh         #   builds + pushes; reads $RIG_IMAGE_REGISTRY (or arg $1); tag = arg $2
   arch: arm64                            #   build NATIVELY on an arm64 host (Aravis + colcon compiles; no qemu)
   platforms: [jp7, jp6]                  #   platform tags this stack publishes -- rig builds the ones the fleet uses
-  images: [cam-core, ros2-bridge, ros1-bridge, webrtc-bridge]   # produced as <registry>/<image>:<platform>
+  images: [cam-core, ros2-bridge, ros1-bridge, webrtc-bridge, rtsp-bridge]   # produced as <registry>/<image>:<platform>
                                          #   (ros1-bridge is Noetic / jp6-class; built into the jp6 set)
 
 examples:                                # repo-relative example configs. [0] is special: `rig pkg add`
@@ -58,6 +58,7 @@ launch_surface:                          # the files rig copies to the vehicle (
   - plugins/ros2-bridge/compose.yml
   - plugins/ros1-bridge/compose.yml
   - plugins/webrtc-bridge/compose.yml
+  - plugins/rtsp-bridge/compose.yml
 
 external_volumes:                        # rig removes these only on FINAL teardown (`rig down --purge`),
   - "cam_{name}_sock"                   #   never on a restart; {name} is the instance name
@@ -66,3 +67,4 @@ host_ports:                              # host-facing ports `rig doctor` checks
   #   (host networking -> a port is shared vehicle-wide). The enabled=true selector is enabled-aware, so a
   #   DISABLED webrtc-bridge is not flagged.
   - "plugins[name=webrtc-bridge,enabled=true].params.port"
+  - "plugins[name=rtsp-bridge,enabled=true].params.port"

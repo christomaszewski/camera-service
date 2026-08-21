@@ -173,6 +173,7 @@ if [ "$DEV" = 0 ] && [ -n "${CAM_REGISTRY:-}" ]; then
   export CAM_ROS2_IMAGE="${CAM_ROS2_IMAGE:-$CAM_REGISTRY/ros2-bridge:$IMG_TAG}"
   export CAM_ROS1_IMAGE="${CAM_ROS1_IMAGE:-$CAM_REGISTRY/ros1-bridge:$IMG_TAG}"   # Noetic; ros1-bridge is jp6-class
   export CAM_WEBRTC_IMAGE="${CAM_WEBRTC_IMAGE:-$CAM_REGISTRY/webrtc-bridge:$IMG_TAG}"
+  export CAM_RTSP_IMAGE="${CAM_RTSP_IMAGE:-$CAM_REGISTRY/rtsp-bridge:$IMG_TAG}"
 fi
 # --zenohd: ensure the single shared host zenoh router is up before the stack (standalone convenience;
 # rig runs it per host in production). Idempotent + one-per-host; reuses the resolved ros2-bridge image.

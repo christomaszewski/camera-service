@@ -151,6 +151,28 @@ plugins:
       # CAM_WEBRTC_NORMALIZE: auto             # 16-bit preview: percentile-stretch GRAY16 -> GRAY8
       #                                          ("auto" = 1–99% EMA window, or pin "lo:hi" e.g. "5:99.5")
 
+  - name: rtsp-bridge      # standard RTSP server (GstRtspServer) — any player/recorder connects at
+    enabled: false         #   rtsp://<host>:<port>/<name>; no WebRTC signalling. ON-DEMAND: the
+    isolation: container   #   pipeline (and its encode cost) exists only while a client is connected.
+    params:
+      port: 8554           # host-facing RTSP port (unique per camera — host networking is vehicle-wide)
+      width: 2448          # JP6: cross-checked against the frame header (which is authoritative);
+      height: 2048         #   on JP7/unixfd the stream self-describes, set anyway for discovery
+      format: GRAY8
+      fps: 25
+      # path: /front       # mount path; defaults to /<name>
+      # bitrate: 4000000   # bit/s. FIXED — RTSP has no congestion control (unlike webrtc's gcc), so a
+      #                      rate above the link's capacity bufferbloats without recovering
+      # codec: h264        # h264 (default; universal clients) | h265 (better compression, spottier decoders)
+      # role: front-left   # discovery role label (docs/DISCOVERY.md); defaults to the instance name
+      # Any UPPERCASE param passes straight through as an env var — the rtsp knobs in the wild:
+      # CAM_RTSP_KEYINT: 30           # IDR interval (frames); joiners sync at IDRs
+      # CAM_RTSP_PROTOCOLS: tcp       # restrict RTP transports (default udp+tcp)
+      # CAM_RTSP_ENCODER: x264enc     # pin the encoder; default auto = NVENC when present, else CPU
+      # CAM_RTSP_NORMALIZE: auto      # 16-bit view: percentile-stretch GRAY16 -> GRAY8 ("auto" = 1–99%
+      #                                 EMA window, or "lo:hi" e.g. "5:99.5"); off = top-byte videoconvert
+      # CAM_RTSP_STREAM_ID: front-rtsp  # discovery id; auto-suffixed <name>-rtsp when webrtc coexists
+
   # - name: ros1-bridge    # legacy ROS 1 (Noetic) publisher — JP6-class hosts; needs the shared
   #   enabled: true        #   roscore (cam-up --roscore / tools/roscore.sh)
   #   isolation: container

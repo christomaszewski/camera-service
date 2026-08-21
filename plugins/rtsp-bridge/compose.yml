@@ -1,0 +1,94 @@
+# rtsp-bridge — serves the core's frames as a standard RTSP stream (GstRtspServer; H.264 default,
+# H.265 via codec). Own container, pulled into the per-sensor stack via the top-level `include:`,
+# activated only when the `rtsp-bridge` profile is enabled. Transport mirrors the ros2 bridge
+# (unixfd on JP7, shm+header on JP6); the port comes from the sensor config (host networking -> a
+# distinct port per sensor).
+services:
+  rtsp-bridge:
+    profiles: ["rtsp-bridge"]
+    image: ${CAM_RTSP_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}rtsp-bridge:${RIG_IMAGE_TAG:-latest}}  # rig: RIG_IMAGE_REGISTRY + RIG_IMAGE_TAG; standalone: cam-up sets CAM_RTSP_IMAGE from CAM_REGISTRY
+    build:
+      context: ../..
+      dockerfile: plugins/rtsp-bridge/Dockerfile
+    init: true
+    network_mode: ${CAM_NETWORK:-host}     # host = expose the RTSP port (and its UDP media ports) to clients
+    ipc: host                               # share /dev/shm with the core (JP6 header endpoint; harmless for unixfd)
+    # JP6 (the base compose IS the JP6 shape): the nvidia runtime CSV-mounts the host's BSP GStreamer
+    # plugins (nvv4l2h264enc & co) into the container; rtsp_server.py auto-probes them and falls back
+    # to x264enc/x265enc when absent. Not l4t-based, so the injection trigger env is set explicitly
+    # below. Same "UNVALIDATED on JP6 hardware" caveat as the webrtc-bridge (r36 CSV ships gst-1.20
+    # plugins into this 1.24 container; worst case they blacklist at scan -> CPU fallback). Overridden
+    # to runc by --dev and by the jp7 overlay (CDI device instead).
+    runtime: nvidia
+    volumes:
+      - cam_sock:/tmp/cam
+    environment:
+      # Transport selection (mirrors the ros2 bridge; must match the core): unixfd on JP7 (rides the
+      # core's plugin_endpoint /tmp/cam/unixfd -- shared with the other bridges, unixfdsink
+      # broadcasts), shm+header on JP6 (/tmp/cam/frames -- the same endpoint the ros bridges parse;
+      # needs transport.plugin_endpoint.enabled, which is the default). cam-up exports CAM_PLATFORM;
+      # CAM_TRANSPORT ({unixfd|shm}) overrides.
+      - CAM_PLATFORM=${CAM_PLATFORM:-jp6}
+      - CAM_TRANSPORT=${CAM_TRANSPORT:-}
+      - CAM_TRANSPORT_SOCKET=${CAM_TRANSPORT_SOCKET:-/tmp/cam/unixfd}
+      - CAM_SHM_SOCKET=${CAM_SHM_SOCKET:-/tmp/cam/frames}
+      # Bayer color: sensor_env derives the pattern from the camera pixel_format. Non-empty -> the
+      # bridge debayers to color (bayer2rgb); '' = mono. CAM_RTSP_DEBAYER=false serves the raw
+      # mosaic. On JP7 the unixfd caps carry the pattern; on JP6 the frame pump relabels the
+      # header's GRAY8 mosaic as video/x-bayer.
+      - CAM_BAYER=${CAM_BAYER:-}
+      - CAM_RTSP_DEBAYER=${CAM_RTSP_DEBAYER:-auto}
+      # 16-bit (thermal) operator view: percentile-stretch GRAY16 -> GRAY8 in the bridge BEFORE the
+      # 8-bit convert (`auto` or `lo:hi` percentiles). SERVE-ONLY -- recording/ROS keep raw 16-bit.
+      # off (default) = plain videoconvert, which keeps only the top byte (near-black for
+      # LSB-aligned radiometric cameras).
+      - CAM_RTSP_NORMALIZE=${CAM_RTSP_NORMALIZE:-off}
+      # JP6: the header carries the authoritative geometry/format per frame; these seed the caps
+      # framerate + a mismatch warning. On JP7/unixfd the stream self-describes (env is advisory).
+      - CAM_WIDTH=${CAM_WIDTH:-512}
+      - CAM_HEIGHT=${CAM_HEIGHT:-512}
+      - CAM_FORMAT=${CAM_FORMAT:-GRAY8}
+      - CAM_FPS=${CAM_FPS:-25}
+      # The RTSP surface. Host networking -> the port is vehicle-wide: give every camera a UNIQUE
+      # port (rigging.yaml host_ports flags clashes). Mount path defaults to /<CAM_INSTANCE>.
+      - CAM_RTSP_PORT=${CAM_RTSP_PORT:-8554}
+      - CAM_RTSP_PATH=${CAM_RTSP_PATH:-}
+      - CAM_RTSP_CODEC=${CAM_RTSP_CODEC:-h264}            # h264 (universal clients) | h265
+      - CAM_RTSP_BITRATE=${CAM_RTSP_BITRATE:-4000000}     # bit/s. FIXED rate -- RTSP has no congestion
+      #                                                     control (unlike webrtcsink's gcc); a rate
+      #                                                     above the link's capacity bufferbloats
+      #                                                     without recovering. Size it to the link.
+      - CAM_RTSP_KEYINT=${CAM_RTSP_KEYINT:-30}            # IDR interval (frames); joiners sync at IDRs
+      - CAM_RTSP_PROTOCOLS=${CAM_RTSP_PROTOCOLS:-}        # restrict transports, e.g. `tcp` (default udp+tcp)
+      - CAM_RTSP_ENCODER=${CAM_RTSP_ENCODER:-auto}        # auto = NVENC when present, else x264/x265; or pin an element
+      - CAM_RTSP_LATENCY=${CAM_RTSP_LATENCY:-200}         # server-side rtpbin latency (ms)
+      # Fleet discovery (docs/DISCOVERY.md): the bridge advertises this stream over Zenoh at
+      # fleet/<VEHICLE_ID>/media/<id> on server bind -- a liveliness token (presence) + a queryable
+      # (JSON descriptor with the rtsp:// URL in `signalling`). Best-effort + additive:
+      # CAM_ADVERTISE=0 turns it off and the video path is untouched.
+      - CAM_INSTANCE=${CAM_INSTANCE:-camera}
+      - VEHICLE_ID=${VEHICLE_ID:-}
+      - ZENOH_CONNECT=${ZENOH_CONNECT:-tcp/localhost:7447}   # the vehicle's local zenohd; set empty to scout
+      - CAM_ADVERTISE=${CAM_ADVERTISE:-1}
+      - CAM_RTSP_STREAM_ID=${CAM_RTSP_STREAM_ID:-}        # discovery id; default = CAM_INSTANCE. sensor_env
+      #                                                     auto-sets <name>-rtsp when webrtc-bridge shares
+      #                                                     the sensor (both would claim the same key).
+      - CAM_PRODUCER_ID=${CAM_PRODUCER_ID:-}              # default <vehicle>-<stream id>
+      - CAM_STREAM_ROLE=${CAM_STREAM_ROLE:-}              # human label; default = sensor id
+      - CAM_RTSP_HOST=${CAM_RTSP_HOST:-}                  # advertised URL host; default = hostname
+      - CAM_RTSP_URL=${CAM_RTSP_URL:-}                    # full advertised-URL override
+      - CAM_ROS_TOPIC=${CAM_ROS_TOPIC:-}                  # OPTIONAL linkage if a ros bridge coexists
+      - CAM_RECORDING_GLOB=${CAM_RECORDING_GLOB:-}        # OPTIONAL recording linkage
+      # JP6 CSV-injection triggers (l4t base images carry these in-image; this ubuntu base doesn't).
+      # Inert under --dev/runc and on JP7 (CDI grants by device, not env).
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+    command: ["bash", "run.sh"]
+    depends_on:
+      - core-driver
+    restart: unless-stopped
+
+volumes:
+  cam_sock:
+    external: true
+    name: ${CAM_SOCK_VOLUME:-cam_sock}

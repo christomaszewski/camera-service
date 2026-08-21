@@ -1,0 +1,27 @@
+# Core config for the RTSP-bridge round-trip test (no Jetson, no camera).
+# Fake camera -> the PLUGIN endpoint, which the rtsp-bridge consumes: shm+header at /tmp/cam/frames
+# on a gst-1.20 core (the JP6 shape, what cam-dev exercises); a gst >= 1.24 core publishes unixfd at
+# /tmp/cam/unixfd instead. (Contrast webrtc-fake.yaml, which uses the raw endpoint.)
+camera:
+  type: gige
+  frame_rate: 25.0
+
+gige:
+  fake: true
+  camera_id: Fake_1
+  pixel_format: Mono8
+  timestamp_source: ptp_chunk     # fake camera has no chunks -> falls back to camera/system (expected)
+  ptp_enable: false
+
+recording:
+  enabled: false
+
+preview:
+  enabled: false
+
+transport:
+  plugin_endpoint:
+    enabled: true
+    socket_path: /tmp/cam/frames  # rtsp-bridge parses the 36-byte header (or unixfd on gst >= 1.24)
+  raw_endpoint:
+    enabled: false

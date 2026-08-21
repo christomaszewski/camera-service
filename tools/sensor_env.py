@@ -248,6 +248,28 @@ def main() -> int:
         # run.sh applies it as video/x-bayer caps.
         env["CAM_BAYER"] = bayer_pattern(pixfmt)
 
+    rtspb = by_name.get("rtsp-bridge")
+    if rtspb is not None:
+        env["CAM_RTSP_PORT"] = str(rtspb.get("port", 8554))
+        for param, key in (("path", "CAM_RTSP_PATH"), ("bitrate", "CAM_RTSP_BITRATE"),
+                           ("codec", "CAM_RTSP_CODEC")):
+            v = rtspb.get(param)
+            if v is not None:
+                env[key] = str(v)
+        # Geometry/discovery env shared with the webrtc block (same camera -> same values); the
+        # setdefaults only matter when webrtc-bridge is disabled and didn't already set them.
+        env.setdefault("CAM_WIDTH", str(rtspb.get("width", 512)))
+        env.setdefault("CAM_HEIGHT", str(rtspb.get("height", 512)))
+        env.setdefault("CAM_FORMAT", str(rtspb.get("format", "GRAY8")))
+        env.setdefault("CAM_FPS", str(rtspb.get("fps", 25)))
+        env.setdefault("CAM_STREAM_ROLE", str(rtspb.get("role", name)))
+        env.setdefault("CAM_BAYER", bayer_pattern(pixfmt))
+        # Both media bridges on one sensor would claim the same discovery key
+        # (fleet/<vehicle>/media/<name>) -- suffix the RTSP stream's id so they coexist. The
+        # UPPERCASE passthrough below runs last, so an explicit CAM_RTSP_STREAM_ID param still wins.
+        if "webrtc-bridge" in by_name:
+            env["CAM_RTSP_STREAM_ID"] = f"{name}-rtsp"
+
     # Generic env passthrough: any UPPERCASE param key on an enabled plugin (e.g. CAM_WEBRTC_MAX_BITRATE,
     # VIDEO_CAPS, GST_PLUGIN_FEATURE_RANK) is emitted as an env var -- so ANY bridge env knob is
     # settable straight from the sensor YAML without teaching this file about it. Lowercase param keys keep

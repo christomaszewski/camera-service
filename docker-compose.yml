@@ -16,6 +16,7 @@ include:
   - plugins/ros2-bridge/compose.yml
   - plugins/ros1-bridge/compose.yml
   - plugins/webrtc-bridge/compose.yml
+  - plugins/rtsp-bridge/compose.yml
 
 services:
   core-driver:

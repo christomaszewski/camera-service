@@ -13,7 +13,7 @@
 #                (bare platform or its -jp6/-jp7 suffix).
 #
 #   env knobs:
-#     IMAGES="cam-core ros2-bridge webrtc-bridge"   subset to build (default: all three)
+#     IMAGES="cam-core ros2-bridge webrtc-bridge"   subset to build (default: all for the variant)
 #     BASE_IMAGE=...                 cam-core base; defaults from the tag (jp6 -> l4t-base, else ubuntu:24.04)
 #     ROS_DISTRO=lyrical             ros2-bridge ROS 2 distro
 #     PUSH=1                         set 0 to build+tag locally without pushing
@@ -53,9 +53,9 @@ if [ -z "$VARIANT" ]; then
 fi
 case "$VARIANT" in
   jp6) BASE_IMAGE="${BASE_IMAGE:-nvcr.io/nvidia/l4t-base:r36.2.0}"
-       IMAGES="${IMAGES:-cam-core ros2-bridge ros1-bridge webrtc-bridge}" ;;
+       IMAGES="${IMAGES:-cam-core ros2-bridge ros1-bridge webrtc-bridge rtsp-bridge}" ;;
   *)   BASE_IMAGE="${BASE_IMAGE:-ubuntu:24.04}"
-       IMAGES="${IMAGES:-cam-core ros2-bridge webrtc-bridge}" ;;
+       IMAGES="${IMAGES:-cam-core ros2-bridge webrtc-bridge rtsp-bridge}" ;;
 esac
 ROS_DISTRO="${ROS_DISTRO:-lyrical}"
 PUSH="${PUSH:-1}"
@@ -77,7 +77,8 @@ for img in $IMAGES; do
     ros2-bridge)   build_one ros2-bridge   plugins/ros2-bridge/Dockerfile   --build-arg "ROS_DISTRO=$ROS_DISTRO" ;;
     ros1-bridge)   build_one ros1-bridge   plugins/ros1-bridge/Dockerfile ;;   # Noetic (ROS_DISTRO baked in)
     webrtc-bridge) build_one webrtc-bridge plugins/webrtc-bridge/Dockerfile ;;
-    *) echo "build-images: unknown image '$img' (want: cam-core|ros2-bridge|ros1-bridge|webrtc-bridge)" >&2; exit 1 ;;
+    rtsp-bridge)   build_one rtsp-bridge   plugins/rtsp-bridge/Dockerfile ;;
+    *) echo "build-images: unknown image '$img' (want: cam-core|ros2-bridge|ros1-bridge|webrtc-bridge|rtsp-bridge)" >&2; exit 1 ;;
   esac
 done
 
