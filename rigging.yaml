@@ -34,6 +34,19 @@ build:                                   # rig's BUILD phase: how to (re)build +
   platforms: [jp7, jp6]                  #   platform tags this stack publishes -- rig builds the ones the fleet uses
   images: [cam-core, ros2-bridge, ros1-bridge, webrtc-bridge, rtsp-bridge]   # produced as <registry>/<image>:<platform>
                                          #   (ros1-bridge is Noetic / jp6-class; built into the jp6 set)
+  # This stack CONSUMES the deployment's base image (it declares no `provides: base` of its own). rig
+  # exports these to the build command; all optional, and absent means "use the Dockerfile default", so
+  # a plain `docker build` and this repo's CI keep working with no rig in sight:
+  #   RIG_BASE_IMAGE      the deployment's ONE base image, a COMPLETE ref (vehicle.yaml `images.base`,
+  #                       or composed from a service declaring `build: {..., provides: base}` --
+  #                       rig-infra's fleet-ros). Used VERBATIM as ros2-bridge's BASE_IMAGE build-arg:
+  #                       never re-tagged, and never suffixed with the platform above -- the matrix is a
+  #                       PRODUCER concern, and the base ref arrives already composed. ros2-bridge is the
+  #                       only image here that consumes it: it is the only one with a ROS/RMW apt stack.
+  #                       cam-core/webrtc-bridge/rtsp-bridge are L4T/ubuntu images with no /opt/ros, and
+  #                       ros1-bridge is ROS 1 Noetic -- a ROS 2 base is not a valid FROM for any of them.
+  #   RIG_BUILD_NO_CACHE  =1 from `rig build --no-cache`; forces a full rebuild of EVERY image here (the
+  #                       remediation for a fleet whose images already drifted at the apt layer).
 
 examples:                                # repo-relative example configs. [0] is special: `rig pkg add`
   #                                        seeds a bare (profile-less) instance's editable config from it,

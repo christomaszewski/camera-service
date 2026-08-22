@@ -14,10 +14,22 @@
 #
 #   env knobs:
 #     IMAGES="cam-core ros2-bridge webrtc-bridge"   subset to build (default: all for the variant)
-#     BASE_IMAGE=...                 cam-core base; defaults from the tag (jp6 -> l4t-base, else ubuntu:24.04)
+#     BASE_IMAGE=...                 cam-core base; defaults from the tag (jp6 -> l4t-base, else ubuntu:24.04).
+#                                    The NVIDIA/ubuntu base for the CORE image -- unrelated to RIG_BASE_IMAGE below.
 #     ROS_DISTRO=lyrical             ros2-bridge ROS 2 distro
 #     PUSH=1                         set 0 to build+tag locally without pushing
 #     PLATFORM_FLAG=                 e.g. --platform=linux/arm64 to cross-build from x86
+#
+#   rig's build channel (all optional; rig sets-or-pops them, so a stale shell value can't leak in).
+#   Absent/empty means "don't pass the flag at all" -> the Dockerfile's own default applies:
+#     RIG_BASE_IMAGE=reg/fleet-ros:v1.3.0   the DEPLOYMENT's ONE base image (vehicle.yaml `images.base`,
+#                                    or a service declaring `build: {..., provides: base}`). Passed VERBATIM
+#                                    as ros2-bridge's BASE_IMAGE build-arg -- never re-tagged, never
+#                                    suffixed with the platform: rig composed it already on the provider
+#                                    side, and this is the consumer side. Only ros2-bridge consumes it --
+#                                    it is the sole image here carrying a ROS/RMW apt stack (see below).
+#     RIG_BUILD_NO_CACHE=1           `rig build --no-cache`: force a full rebuild of EVERY image here, the
+#                                    remediation for a fleet whose images already drifted at the apt layer.
 #
 #   examples:
 #     tools/build-images.sh registry.lan:5000                      # all three -> :jp7 (ubuntu:24.04), pushed
@@ -60,13 +72,16 @@ esac
 ROS_DISTRO="${ROS_DISTRO:-lyrical}"
 PUSH="${PUSH:-1}"
 PLATFORM_FLAG="${PLATFORM_FLAG:-}"
+# `${VAR:+...}` throughout: set -> the flag; unset/empty -> NOTHING, so the Dockerfile default stands.
+NO_CACHE="${RIG_BUILD_NO_CACHE:-}"
+RIG_BASE_IMAGE="${RIG_BASE_IMAGE:-}"
 
 REFS=()
 build_one() {                      # build_one <image-name> <dockerfile> [extra docker build args...]
   local name="$1" dockerfile="$2"; shift 2
   local ref="$REGISTRY/$name:$TAG"
   echo "==> building $ref" >&2
-  docker build ${PLATFORM_FLAG:+$PLATFORM_FLAG} -f "$dockerfile" -t "$ref" "$@" .   # context = repo root
+  docker build ${NO_CACHE:+--no-cache} ${PLATFORM_FLAG:+$PLATFORM_FLAG} -f "$dockerfile" -t "$ref" "$@" .   # context = repo root
   if [ "$PUSH" = 1 ]; then echo "==> pushing  $ref" >&2; docker push "$ref"; fi
   REFS+=("$ref")
 }
@@ -74,7 +89,12 @@ build_one() {                      # build_one <image-name> <dockerfile> [extra 
 for img in $IMAGES; do
   case "$img" in
     cam-core)     build_one cam-core     core-driver/Dockerfile           --build-arg "BASE_IMAGE=$BASE_IMAGE" ;;
-    ros2-bridge)   build_one ros2-bridge   plugins/ros2-bridge/Dockerfile   --build-arg "ROS_DISTRO=$ROS_DISTRO" ;;
+    # The ONLY image built FROM the deployment base, because it is the only one here carrying a ROS/RMW
+    # apt stack -- so it is the only one that can drift from the fleet's other ROS containers.
+    # cam-core (L4T/ubuntu + Aravis), webrtc-bridge and rtsp-bridge (ubuntu:24.04 + GStreamer) have no
+    # /opt/ros at all, and ros1-bridge is ROS 1 Noetic; a ROS 2 base is not a valid FROM for any of them.
+    ros2-bridge)   build_one ros2-bridge   plugins/ros2-bridge/Dockerfile   --build-arg "ROS_DISTRO=$ROS_DISTRO" \
+                     ${RIG_BASE_IMAGE:+--build-arg "BASE_IMAGE=$RIG_BASE_IMAGE"} ;;
     ros1-bridge)   build_one ros1-bridge   plugins/ros1-bridge/Dockerfile ;;   # Noetic (ROS_DISTRO baked in)
     webrtc-bridge) build_one webrtc-bridge plugins/webrtc-bridge/Dockerfile ;;
     rtsp-bridge)   build_one rtsp-bridge   plugins/rtsp-bridge/Dockerfile ;;

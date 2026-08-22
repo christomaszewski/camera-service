@@ -44,6 +44,59 @@ Contract for `build.command`:
 
 Single-platform stacks (the nav drivers) set `platforms: [default]` (or omit) and push `…/<image>:latest`.
 
+## One base image per deployment (rig ≥ v0.2.21)
+
+Version skew is what this solves. Two images that `apt-get install ros-<distro>-rmw-zenoh-cpp`
+independently, at different times, against a moving ROS repo end up with two different zenoh builds —
+and their sessions cannot talk to each other. The fix is structural: **one apt-level ROS layer per
+deployment**, shared by every ROS container on the vehicle.
+
+rig resolves the deployment's base from vehicle.yaml `images.base` (a full ref, used verbatim) or from a
+service declaring `build: {…, provides: base}` (rig-infra's `fleet-ros`), builds it **first** (stage 0,
+aborting the run if it fails), and exports it to every build command:
+
+| env var | set when | this stack does |
+|---|---|---|
+| `RIG_BASE_IMAGE` | a base is resolved (e.g. `devbox:5000/fleet-ros:v1.3.0`) | passes it **verbatim** as ros2-bridge's `BASE_IMAGE` build-arg |
+| `RIG_BUILD_NO_CACHE` | `rig build --no-cache` | adds `--no-cache` to **every** image it builds |
+
+Both are optional, and both use the `${VAR:+…}` form in
+[`tools/build-images.sh`](../tools/build-images.sh): absent or empty means the flag is not passed at
+all, so the Dockerfile's own default applies and a plain `docker build` (and this repo's CI, which runs
+`rig certify` with `RIG_BASE_IMAGE` deliberately unset) keeps working untouched.
+
+**The base ref is a CONSUMER input — do not compose it.** rig already did any composition on the
+provider side. In particular, do *not* append `-$CAM_PLATFORM` to it: this stack's `build.platforms`
+matrix governs the tags it *publishes* (`…/ros2-bridge:v1.3.0-jp7`), not the base it *consumes*
+(`…/fleet-ros:v1.3.0`). If a per-platform base ever becomes genuinely necessary — a CUDA/L4T fleet base,
+where jp6 and jp7 need different bases — that is a change to the rig contract (a per-platform
+`images.base`), not something to invent here by string-munging the ref.
+
+**Which images rebase.** Only `ros2-bridge`. It is the only image in this repo carrying a ROS/RMW apt
+stack, so it is the only one that can drift from the fleet's other ROS containers:
+
+| image | base | `/opt/ros` | rebased? |
+|---|---|---|---|
+| `ros2-bridge` | `ros:<distro>-ros-base` → `${BASE_IMAGE}` | yes | **yes** |
+| `cam-core` | `nvcr.io/nvidia/l4t-base` (jp6) / `ubuntu:24.04` (jp7) | no | no — needs an L4T/NVENC base, carries no ROS |
+| `webrtc-bridge` | `ubuntu:24.04` | no | no — GStreamer/Rust only; its zenoh is the *Python* `eclipse-zenoh` wheel, not an RMW |
+| `rtsp-bridge` | `ubuntu:24.04` | no | no — same, GStreamer only |
+| `ros1-bridge` | `ros:noetic-ros-base` | yes (ROS 1) | no — ROS 1; a ROS 2 base is not a valid `FROM` |
+
+**Rebasing is only half of it — `apt-get install --no-upgrade`.** A `FROM` change alone does *not*
+eliminate skew. Plain `apt-get install <pkg>` on a package the base already carries silently **upgrades**
+it to the repo's current version, so the image drifts off the shared base within one layer. This was
+measured, not theorized: after rebasing, `rig image audit` still reported
+`version skew: ros-lyrical-rclcpp-components` (…`20260731` in `fleet-ros` vs …`20260812` in the freshly
+built bridge). `--no-upgrade` on both stages fixes it — base-pinned packages stay pinned, packages the
+base lacks still install (so the rig-less build on stock `ros-base` stays complete). Any image rebased
+onto a fleet base needs the same flag.
+
+**Detection and remediation.** `rig image audit` inspects every image the deployment's stacks resolve
+to and cross-checks distro, the declared RMW package, and `ros-*` versions *across* images; drift shows
+as `version skew: ros-<distro>-<pkg>`. `rig build --no-cache` re-converges a fleet that already
+drifted.
+
 ## rig build loop (pseudocode for `bringup`)
 
 ```python

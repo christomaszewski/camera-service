@@ -246,6 +246,14 @@ Docker Compose **profiles**, and brings up that sensor's stack:
   and ships a [`rigging.yaml`](rigging.yaml) descriptor telling the orchestrator how to invoke it. The
   dependency is one-way — this repo stays fully standalone. (`service:` + `name:` are the routing keys;
   the core exposes a health check so `rig status` is real.) See [DESIGN.md](docs/DESIGN.md).
+- **One ROS layer per deployment.** `rig build` (≥ v0.2.21) resolves the deployment's single base image
+  and exports it as `RIG_BASE_IMAGE`; [`tools/build-images.sh`](tools/build-images.sh) passes it verbatim
+  as **`ros2-bridge`'s `BASE_IMAGE`** build-arg, so the bridge and the vehicle's other ROS containers (a
+  `rmw_zenohd` router, a bag logger) share one apt-level ROS/RMW layer instead of each resolving
+  `rmw-zenoh-cpp` on its own — the drift `rig image audit` reports as `version skew`. `RIG_BUILD_NO_CACHE=1`
+  (`rig build --no-cache`) forces a full rebuild of every image. Both are optional and both default to
+  today's behavior, so a plain `docker build` and this repo's CI are unaffected. Only `ros2-bridge` rebases
+  (the others carry no `/opt/ros`); see [docs/fleet-build-contract.md](docs/fleet-build-contract.md).
 
 ```bash
 ./tools/orchestration_test.sh            # validate the whole model without a Jetson or camera

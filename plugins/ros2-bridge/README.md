@@ -119,3 +119,39 @@ docker run --rm --ipc=host -v cam_sock:/tmp/cam \  # --ipc=host only matters for
 control socket is in the volume). The **JP7 unixfd** transport passes file descriptors over the socket, so
 it needs no shared IPC namespace. In the per-sensor-container model the bridge can also run as a sibling
 process in the core's container (shm is then free).
+
+### The base image (`BASE_IMAGE`) — one ROS layer per deployment
+
+This is the only camera-service image with a ROS/RMW apt stack, so it is the only one that can drift
+from the *other* ROS containers on a vehicle (a router, a bag logger). Both build stages therefore come
+from one arg:
+
+```dockerfile
+ARG ROS_DISTRO=lyrical
+ARG BASE_IMAGE=ros:${ROS_DISTRO}-ros-base   # the default: no rig, no registry, no fleet needed
+FROM ${BASE_IMAGE}
+```
+
+- **Standalone / CI (nothing to do).** The command above still works unchanged, and
+  `--build-arg ROS_DISTRO=jazzy` still selects `ros:jazzy-ros-base` — an ARG default interpolates an
+  ARG declared before it. `rmw_zenoh_cpp` is installed here in that case, so the image speaks the
+  default middleware out of the box.
+- **Under `rig` (≥ v0.2.21).** `rig build` exports **`RIG_BASE_IMAGE`** — the deployment's one base
+  image, e.g. `devbox:5000/fleet-ros:v1.3.0` — and [`tools/build-images.sh`](../../tools/build-images.sh)
+  maps it onto `BASE_IMAGE` **verbatim** (no re-tagging, no `-jp7` suffix: rig composed it already on
+  the provider side). rig builds that base *first*, so it exists by the time this build runs.
+- **What keeps it deduped: `apt-get install --no-upgrade`.** Rebasing alone is not enough, and this is
+  the easy part to get wrong. Plain `apt-get install <pkg>` on a package the base *already carries*
+  silently **upgrades** it to whatever the ROS repo serves that day — so the image drifts off the base
+  within one layer and the skew returns under a different package name. (Measured here: a fleet-ros base
+  carrying `rclcpp-components` …`20260731` had …`20260812` installed over it, and `rig image audit`
+  duly flagged `version skew: ros-<distro>-rclcpp-components`.) With `--no-upgrade`, anything the base
+  pins stays exactly as pinned, while anything the base *lacks* is still installed — which is what keeps
+  a rig-less build on stock `ros-base` (no zenoh, no `image-proc`) a complete, working image. The same
+  flag is on the builder stage, so the component compiles against the versions it will run on.
+- **Still installed here** (camera-specific, not in a fleet base): GStreamer `plugins-{base,good,bad}`,
+  `image-transport`, `compressed-image-transport`, `rclcpp-components`, `image-proc`.
+
+`rig image audit` is the check: it cross-checks `ros-*` package versions across every image the
+deployment's stacks resolve to, and a bridge that installed its own zenoh shows up as
+`version skew: ros-<distro>-rmw-zenoh-cpp` — two zenoh builds whose sessions cannot talk to each other.
