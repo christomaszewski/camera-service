@@ -58,19 +58,45 @@ aborting the run if it fails), and exports it to every build command:
 | env var | set when | this stack does |
 |---|---|---|
 | `RIG_BASE_IMAGE` | a base is resolved (e.g. `devbox:5000/fleet-ros:v1.3.0`) | passes it **verbatim** as ros2-bridge's `BASE_IMAGE` build-arg |
+| `RIG_ROS_RMW` | vehicle.yaml `ros.rmw` (rig ≥ v0.2.23) | passes it as ros2-bridge's `RMW_IMPLEMENTATION` build-arg → installs `ros-<distro>-<name, `_`→`-`>` |
 | `RIG_BUILD_NO_CACHE` | `rig build --no-cache` | adds `--no-cache` to **every** image it builds |
 
-Both are optional, and both use the `${VAR:+…}` form in
+All rig-owned vars are **set-or-popped** by rig, so a value leaked from the caller's shell never
+reaches the build. `RIG_BASE_IMAGE` and `RIG_BUILD_NO_CACHE` use the `${VAR:+…}` form in
 [`tools/build-images.sh`](../tools/build-images.sh): absent or empty means the flag is not passed at
 all, so the Dockerfile's own default applies and a plain `docker build` (and this repo's CI, which runs
 `rig certify` with `RIG_BASE_IMAGE` deliberately unset) keeps working untouched.
 
-**The base ref is a CONSUMER input — do not compose it.** rig already did any composition on the
-provider side. In particular, do *not* append `-$CAM_PLATFORM` to it: this stack's `build.platforms`
-matrix governs the tags it *publishes* (`…/ros2-bridge:v1.3.0-jp7`), not the base it *consumes*
-(`…/fleet-ros:v1.3.0`). If a per-platform base ever becomes genuinely necessary — a CUDA/L4T fleet base,
-where jp6 and jp7 need different bases — that is a change to the rig contract (a per-platform
-`images.base`), not something to invent here by string-munging the ref.
+**Nothing hardcodes zenoh.** The rmw package name is derived from `RIG_ROS_RMW` using the *same*
+`ros-<distro>-<name with `_`→`-`>` mapping `rig image audit` uses to check it, so the builder and the
+checker agree by construction rather than by coincidence — a cyclonedds or FastDDS fleet gets a bridge
+whose middleware matches its graph. Note it is deliberately **not** the conventional
+`RMW_IMPLEMENTATION` env var: that name is exported in most ROS shells, and a dev box's `.bashrc` must
+not decide what a fleet image contains. `CAM_ROS_RMW` is the standalone equivalent, and runtime
+selection stays independent (the compose still honors `$RMW_IMPLEMENTATION` at `up` time).
+
+**This stack declares no `provides: base`.** That key marks a service as *producing* the base
+(rig-infra's `fleet-ros`); camera-service consumes it. Since v0.2.22 two services naming different base
+images is a hard error, so a stray declaration here would break every deployment that also runs
+rig-infra.
+
+**The tag/base asymmetry is expected — do not "fix" it.** From a real `rig build`
+(`images.tag: v1.3.0`, `platform: jp7`):
+
+```
+build camera-service: tools/build-images.sh localhost:5000 v1.3.0-jp7
+  ROS_DISTRO=lyrical RIG_ROS_RMW=rmw_zenoh_cpp RIG_TARGET_PLATFORM=jp7
+  RIG_BASE_IMAGE=localhost:5000/fleet-ros:v1.3.0
+```
+
+The tag arg carries the platform (`v1.3.0-jp7`) because this stack declares a `build.platforms` matrix.
+The base ref does **not** (`fleet-ros:v1.3.0`) because fleet-ros declares no matrix — it is
+`FROM ros:<distro>-ros-base` with no CUDA, so it is genuinely platform-independent (jp6 and jp7 are the
+same arch; they differ in JetPack userspace). **Our images are per-platform; our base is not.** So do
+*not* append `-$CAM_PLATFORM` to `$RIG_BASE_IMAGE` — it is a CONSUMER input and rig does all
+composition on the provider side. If a per-platform base ever becomes genuinely necessary — a CUDA/L4T
+fleet base, where jp6 and jp7 need different bases — that is a change to the rig contract (a
+per-platform `images.base`), not something to invent here by string-munging the ref.
 
 **Which images rebase.** Only `ros2-bridge`. It is the only image in this repo carrying a ROS/RMW apt
 stack, so it is the only one that can drift from the fleet's other ROS containers:

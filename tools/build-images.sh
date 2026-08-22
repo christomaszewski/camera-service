@@ -30,6 +30,16 @@
 #                                    it is the sole image here carrying a ROS/RMW apt stack (see below).
 #     RIG_BUILD_NO_CACHE=1           `rig build --no-cache`: force a full rebuild of EVERY image here, the
 #                                    remediation for a fleet whose images already drifted at the apt layer.
+#     RIG_ROS_RMW=rmw_cyclonedds_cpp vehicle.yaml `ros.rmw` (rig >= v0.2.23): the rmw ros2-bridge installs,
+#                                    as ros-<distro>-<name, '_' -> '-'> -- the same mapping `rig image
+#                                    audit` uses to CHECK it, so builder and checker agree by
+#                                    construction. Note it is deliberately NOT the conventional
+#                                    RMW_IMPLEMENTATION: that name is exported in most ROS shells, and a
+#                                    dev box's .bashrc must not decide what a fleet image contains. For
+#                                    builds outside rig use CAM_ROS_RMW; RIG_ROS_RMW wins when both are set.
+#                                    (Runtime selection is separate -- compose still honors
+#                                    $RMW_IMPLEMENTATION, so a differently-baked image can still be
+#                                    pointed at another rmw at `up` time.)
 #
 #   examples:
 #     tools/build-images.sh registry.lan:5000                      # all three -> :jp7 (ubuntu:24.04), pushed
@@ -75,6 +85,9 @@ PLATFORM_FLAG="${PLATFORM_FLAG:-}"
 # `${VAR:+...}` throughout: set -> the flag; unset/empty -> NOTHING, so the Dockerfile default stands.
 NO_CACHE="${RIG_BUILD_NO_CACHE:-}"
 RIG_BASE_IMAGE="${RIG_BASE_IMAGE:-}"
+# rig's declared rmw > a standalone CAM_ROS_RMW > today's default. Passed explicitly (not `:+`) so the
+# resolved choice is always visible in the build args; the Dockerfile carries the same default anyway.
+RMW="${RIG_ROS_RMW:-${CAM_ROS_RMW:-rmw_zenoh_cpp}}"
 
 REFS=()
 build_one() {                      # build_one <image-name> <dockerfile> [extra docker build args...]
@@ -94,6 +107,7 @@ for img in $IMAGES; do
     # cam-core (L4T/ubuntu + Aravis), webrtc-bridge and rtsp-bridge (ubuntu:24.04 + GStreamer) have no
     # /opt/ros at all, and ros1-bridge is ROS 1 Noetic; a ROS 2 base is not a valid FROM for any of them.
     ros2-bridge)   build_one ros2-bridge   plugins/ros2-bridge/Dockerfile   --build-arg "ROS_DISTRO=$ROS_DISTRO" \
+                     --build-arg "RMW_IMPLEMENTATION=$RMW" \
                      ${RIG_BASE_IMAGE:+--build-arg "BASE_IMAGE=$RIG_BASE_IMAGE"} ;;
     ros1-bridge)   build_one ros1-bridge   plugins/ros1-bridge/Dockerfile ;;   # Noetic (ROS_DISTRO baked in)
     webrtc-bridge) build_one webrtc-bridge plugins/webrtc-bridge/Dockerfile ;;

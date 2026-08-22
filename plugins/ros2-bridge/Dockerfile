@@ -21,6 +21,13 @@ ARG ROS_DISTRO=lyrical
 # repo is how a fleet ends up with two different `rmw_zenoh_cpp` builds whose sessions cannot talk --
 # the failure `rig image audit` reports as `version skew: ros-<distro>-rmw-zenoh-cpp`.
 ARG BASE_IMAGE=ros:${ROS_DISTRO}-ros-base
+# The rmw to install, as its ROS name. tools/build-images.sh sources it from RIG_ROS_RMW (vehicle.yaml
+# `ros.rmw`, rig >= v0.2.23); the default only applies outside rig. The apt package is
+# ros-<distro>-<name, '_' -> '-'> -- the SAME mapping `rig image audit` uses to check the declared rmw
+# is installed, so the builder and the checker agree by construction rather than by coincidence.
+# Hardcoding zenoh here is what makes a non-zenoh fleet build an image whose nodes silently run a
+# different middleware than the rest of the graph. (Same arg name and mapping as rig-infra's fleet-ros.)
+ARG RMW_IMPLEMENTATION=rmw_zenoh_cpp
 
 # ---- builder: colcon build the component library ----
 # Same base as the runtime stage on purpose: the component links against that layer's
@@ -44,14 +51,16 @@ RUN . /opt/ros/${ROS_DISTRO}/setup.sh && \
 # ---- runtime: the base + camera-specific GStreamer/ROS deps + the built component lib ----
 FROM ${BASE_IMAGE}
 ARG ROS_DISTRO
+ARG RMW_IMPLEMENTATION
 ENV DEBIAN_FRONTEND=noninteractive
 # plugins-bad provides `shmsrc` (JP6 transport) and `bayer2rgb` (JP7 in-pipeline debayer); on 24.04 it
 # also ships the GStreamer `onnx` element (libgstonnx -> onnxruntime), which we never use and whose arm64
 # init misbehaves ("Unknown CPU Vendor" CPUID probe + in-process heap corruption). Strip it so it can't load.
 # rclcpp-components -> component_container_mt; image-proc -> the DebayerNode composed on JP6 color.
-# rmw-zenoh-cpp -> the default ROS 2 middleware (RMW_IMPLEMENTATION=rmw_zenoh_cpp); it ships the
-# `rmw_zenohd` router too, so this same image runs the shared host router. FastDDS stays available
-# (ros-base ships rmw_fastrtps_cpp) as a selectable fallback via RMW_IMPLEMENTATION.
+# The rmw package is ${RMW_IMPLEMENTATION} (default rmw_zenoh_cpp, matching the compose default); on a
+# zenoh fleet it ships the `rmw_zenohd` router too, so this same image runs the shared host router.
+# FastDDS stays available (ros-base ships rmw_fastrtps_cpp) as a selectable fallback at RUNTIME via the
+# conventional RMW_IMPLEMENTATION env var, which is independent of what is baked in here.
 #
 # --no-upgrade is what makes the shared base actually WORK, and it is easy to leave off by accident:
 # `apt-get install <pkg>` on a package the base ALREADY carries silently UPGRADES it to whatever the
@@ -61,11 +70,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 # `version skew: ros-<distro>-rclcpp-components`.) With it, anything the base pins stays exactly as
 # the base pinned it, and anything the base LACKS is still installed -- which is what keeps a plain
 # rig-less `docker build` on stock ros-base (no zenoh, no image-proc) a complete, working image.
-RUN apt-get update && apt-get install -y --no-install-recommends --no-upgrade \
+RUN rmw_pkg="ros-${ROS_DISTRO}-$(echo "${RMW_IMPLEMENTATION}" | tr '_' '-')" \
+    && apt-get update && apt-get install -y --no-install-recommends --no-upgrade \
       gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
       ros-${ROS_DISTRO}-image-transport ros-${ROS_DISTRO}-compressed-image-transport \
       ros-${ROS_DISTRO}-rclcpp-components ros-${ROS_DISTRO}-image-proc \
-      ros-${ROS_DISTRO}-rmw-zenoh-cpp \
+      "${rmw_pkg}" \
     && rm -f /usr/lib/*/gstreamer-1.0/libgstonnx.so /usr/lib/*/libonnxruntime.so* \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /ws/install /ws/install

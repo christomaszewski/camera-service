@@ -47,6 +47,19 @@ build:                                   # rig's BUILD phase: how to (re)build +
   #                       ros1-bridge is ROS 1 Noetic -- a ROS 2 base is not a valid FROM for any of them.
   #   RIG_BUILD_NO_CACHE  =1 from `rig build --no-cache`; forces a full rebuild of EVERY image here (the
   #                       remediation for a fleet whose images already drifted at the apt layer).
+  #   RIG_ROS_RMW         vehicle.yaml `ros.rmw` (rig >= v0.2.23) -- the rmw ros2-bridge installs, as
+  #                       ros-<distro>-<name, '_' -> '-'>, the same mapping `rig image audit` uses to
+  #                       CHECK it. Nothing here hardcodes zenoh any more, so a cyclonedds/FastDDS fleet
+  #                       gets a bridge whose middleware matches its graph. Deliberately NOT the
+  #                       conventional RMW_IMPLEMENTATION (exported in most ROS shells -- a dev box's
+  #                       .bashrc must not decide what a fleet image contains); CAM_ROS_RMW is the
+  #                       standalone equivalent. Runtime selection stays independent: the compose still
+  #                       honors $RMW_IMPLEMENTATION at `up` time.
+  #
+  # NOTE this stack deliberately declares NO `provides: base` -- it CONSUMES the deployment base. That
+  # key marks a service as PRODUCING it (rig-infra's fleet-ros), and since v0.2.22 two services naming
+  # different base images is a hard error, so a stray declaration here would break every deployment
+  # that also runs rig-infra.
 
 examples:                                # repo-relative example configs. [0] is special: `rig pkg add`
   #                                        seeds a bare (profile-less) instance's editable config from it,

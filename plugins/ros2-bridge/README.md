@@ -136,10 +136,19 @@ FROM ${BASE_IMAGE}
   `--build-arg ROS_DISTRO=jazzy` still selects `ros:jazzy-ros-base` — an ARG default interpolates an
   ARG declared before it. `rmw_zenoh_cpp` is installed here in that case, so the image speaks the
   default middleware out of the box.
-- **Under `rig` (≥ v0.2.21).** `rig build` exports **`RIG_BASE_IMAGE`** — the deployment's one base
+- **Under `rig` (≥ v0.2.23).** `rig build` exports **`RIG_BASE_IMAGE`** — the deployment's one base
   image, e.g. `devbox:5000/fleet-ros:v1.3.0` — and [`tools/build-images.sh`](../../tools/build-images.sh)
-  maps it onto `BASE_IMAGE` **verbatim** (no re-tagging, no `-jp7` suffix: rig composed it already on
-  the provider side). rig builds that base *first*, so it exists by the time this build runs.
+  maps it onto `BASE_IMAGE` **verbatim** (no re-tagging, no `-jp7` suffix: our *images* are
+  per-platform, our *base* is not — fleet-ros carries no CUDA, and rig composed the ref already on the
+  provider side). rig builds that base *first*, so it exists by the time this build runs.
+- **The middleware is not hardcoded.** `rig` also exports **`RIG_ROS_RMW`** (vehicle.yaml `ros.rmw`),
+  which arrives as the `RMW_IMPLEMENTATION` build-arg and selects the package
+  `ros-<distro>-<name, `_`→`-`>` — the same mapping `rig image audit` uses to *check* it, so builder and
+  checker agree by construction. A cyclonedds or FastDDS fleet gets a bridge whose middleware matches
+  its graph. It is deliberately **not** read from the conventional `RMW_IMPLEMENTATION` *env* var (most
+  ROS shells export it; a dev box's `.bashrc` must not decide what a fleet image contains) —
+  `CAM_ROS_RMW` is the standalone override. Runtime selection is unchanged: compose still honors
+  `$RMW_IMPLEMENTATION` at `up` time, so a baked image can still be pointed elsewhere.
 - **What keeps it deduped: `apt-get install --no-upgrade`.** Rebasing alone is not enough, and this is
   the easy part to get wrong. Plain `apt-get install <pkg>` on a package the base *already carries*
   silently **upgrades** it to whatever the ROS repo serves that day — so the image drifts off the base
