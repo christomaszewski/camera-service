@@ -29,6 +29,7 @@ from gi.repository import GLib, Gst
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from zenoh_advertiser import StreamAdvertiser
 from h264_level import h264_level_for, level_covers, LEVELS as H264_LEVELS
+from format_adapt import adapt_for_input, debayer_enabled
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bridge_stream")
@@ -277,6 +278,7 @@ class Bridge:
         self._norm_passthrough = False  # input wasn't GRAY16: forward unmodified
         self._norm_dtype = None         # numpy dtype per the input caps ('<u2' / '>u2')
         self._norm_w = self._norm_h = 0
+        self._fmt_adapted = False       # the fmt_tap seam has been resolved (one-shot)
 
     def build(self):
         Gst.init(None)
@@ -301,6 +303,15 @@ class Bridge:
             norm_in.connect("eos", self._on_norm_eos)
             log.info("preview normalize: percentile window %g:%g (EMA-smoothed), 16->8 before encode",
                      lo, hi)
+        # Self-describing transport (unixfd): run.sh leaves an `identity name=fmt_tap` seam instead
+        # of an env-hardwired bayer2rgb; resolve it from the FIRST caps the stream actually carries
+        # (see adapt_for_input). The probe sits on the tap's SINK pad, so it runs -- on the streaming
+        # thread, serialized BEFORE the caps event reaches anything downstream of the tap -- early
+        # enough to splice the right element in ahead of negotiation.
+        tap = self.pipeline.get_by_name("fmt_tap")
+        if tap is not None:
+            pad = tap.get_static_pad("sink")
+            pad.add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self._on_fmt_caps, tap)
         # webrtcsink meta.name == producer_id, so discovery + signalling line up (one server, many producers).
         sink = self.pipeline.get_by_name("cam_webrtcsink")
         if sink is not None:
@@ -475,6 +486,79 @@ class Bridge:
         except Exception as e:                        # noqa: BLE001 -- never break the video path
             log.warning("encoder-setup failed: %s", e)
         return False
+
+    # ---- input format adapter (fmt_tap: adapt to the caps the stream ACTUALLY carries) ---------
+    def _on_fmt_caps(self, _pad, info, tap):
+        """Pad probe on fmt_tap's sink pad: on the first CAPS event, splice in whatever the real
+        input format needs (bayer2rgb / a GRAY8 relabel / nothing -- adapt_for_input). Runs on the
+        source's streaming thread while the sticky caps event is still upstream of the tap, so the
+        splice is complete before negotiation (let alone data) reaches the spliced-in element.
+
+        The seam is UNLINKED at build (run.sh emits the tap and the rest of the pipeline as two
+        separate chains, the same trick as the normalize split): the source negotiates before it
+        ever sends a caps event, and with the tap statically linked to videoconvert that
+        pre-caps negotiation would already have died not-negotiated on a Bayer stream (identity
+        proxies the caps query to videoconvert, which takes no video/x-bayer). Dangling, the tap
+        answers with its ANY template; this probe then completes the graph -- through the right
+        element -- and the caps event flows on into it. The first buffer follows the event on
+        this same thread, so the link always exists before data does."""
+        ev = info.get_event()
+        if ev is None or ev.type != Gst.EventType.CAPS:
+            return Gst.PadProbeReturn.OK
+        if self._fmt_adapted:
+            return Gst.PadProbeReturn.REMOVE
+        self._fmt_adapted = True
+        # norm_in first: with the normalize pump in the graph, the tap hands off to the pump's
+        # appsink (fmt_next is then the post-pump chain, fed by norm_out -- never by the tap).
+        nxt = self.pipeline.get_by_name("norm_in") or self.pipeline.get_by_name("fmt_next")
+        if nxt is None:                          # no downstream head to hand the stream to (bug)
+            log.error("format adapter: no norm_in/fmt_next element; pipeline is incomplete")
+            return Gst.PadProbeReturn.REMOVE
+        srcpad, nxtpad = tap.get_static_pad("src"), nxt.get_static_pad("sink")
+
+        def _link(a, b):
+            ret = a.link(b)
+            if ret != Gst.PadLinkReturn.OK:
+                raise RuntimeError("link {} -> {}: {}".format(a.get_name(), b.get_name(), ret))
+
+        try:
+            caps = ev.parse_caps()
+            st = caps.get_structure(0)
+            okf, num, den = st.get_fraction("framerate")
+            fr = "{}/{}".format(num, den) if (okf and den) else None
+            okw, w = st.get_int("width")
+            okh, h = st.get_int("height")
+            plan = adapt_for_input(st.get_name(), w if okw else 0, h if okh else 0, fr,
+                                   debayer_enabled(_env("CAM_WEBRTC_DEBAYER", "auto")))
+            el = None
+            if plan is not None:
+                factory, el_caps = plan
+                el = Gst.ElementFactory.make(factory, "fmt_adapt")
+                if el is None:                   # missing element must degrade, never kill the video
+                    log.warning("format adapter: element %r unavailable; passing %s through",
+                                factory, caps.to_string())
+                elif el_caps is not None:        # capssetter relabel: full replacement caps
+                    el.set_property("caps", Gst.Caps.from_string(el_caps))
+                    el.set_property("join", False)
+                    el.set_property("replace", True)
+            if el is not None:
+                self.pipeline.add(el)
+                el.sync_state_with_parent()
+                _link(srcpad, el.get_static_pad("sink"))
+                _link(el.get_static_pad("src"), nxtpad)
+                log.info("format adapter: input %s -> inserted %s%s", caps.to_string(), factory,
+                         " (relabel to {})".format(el_caps) if el_caps else " (debayer to color)")
+            else:
+                _link(srcpad, nxtpad)
+                log.info("format adapter: input %s passes through", caps.to_string())
+        except Exception as e:                   # noqa: BLE001 -- adapter failure = passthrough
+            log.warning("format adapter failed (%s); linking straight through", e)
+            if not srcpad.is_linked():
+                try:
+                    _link(srcpad, nxtpad)
+                except Exception as e2:          # noqa: BLE001
+                    log.error("format adapter: fallback link failed (%s); stream cannot start", e2)
+        return Gst.PadProbeReturn.REMOVE
 
     # ---- 16->8 preview normalize pump (norm_in appsink -> stretch -> norm_out appsrc) ----------
     def _norm_configure(self, caps):

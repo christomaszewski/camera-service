@@ -103,6 +103,12 @@ def parse_pixel_format(pixel_format):
     bits = 16 if any(tok in pf for tok in ("16", "12", "10")) else 8
     packed = pf.endswith("p") or "Packed" in pf
     bayer = _BAYER_MAP.get(pf[5:7].upper()) if pf.startswith("Bayer") and len(pf) >= 7 else None
+    if pf.startswith("Bayer") and bayer is None:
+        # Downstream consequence of losing the pattern: the stream publishes as plain GRAY8/16,
+        # consumers can't debayer, and a bridge told to expect Bayer fails caps negotiation.
+        log.warning("Bayer pixel format %r has an unrecognized CFA pattern; "
+                    "publishing as %s (no debayer downstream)",
+                    pf, "GRAY16_LE" if bits > 8 else "GRAY8")
     gst_format = "GRAY16_LE" if bits > 8 else "GRAY8"
     return gst_format, bits, bayer, packed, False
 

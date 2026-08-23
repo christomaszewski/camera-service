@@ -11,9 +11,12 @@
 #          from the sensor config (CAM_WIDTH/HEIGHT/FORMAT/FPS) and, for a CFA camera, the Bayer
 #          pattern (CAM_BAYER) is applied as video/x-bayer caps. Needs transport.raw_endpoint.enabled.
 #
-# Color: a Bayer camera (CAM_BAYER set) is debayered to color in-pipeline (bayer2rgb), so the browser
-# preview is RGB rather than a grayscale mosaic. Set CAM_WEBRTC_DEBAYER=false to preview the raw
-# mosaic instead. Mono cameras are a straight passthrough (the appsink/encoder read the format off caps).
+# Color: a Bayer camera is debayered to color in-pipeline (bayer2rgb), so the browser preview is RGB
+# rather than a grayscale mosaic; CAM_WEBRTC_DEBAYER=false previews the raw mosaic instead. On the
+# self-describing unixfd transport the bridge decides this AT RUNTIME from the caps the stream
+# actually carries (an `identity name=fmt_tap` seam the python launcher resolves -- env cannot
+# mispredict the device); on raw shm (no caps on the wire) CAM_BAYER drives it statically. Mono
+# cameras are a straight passthrough (the appsink/encoder read the format off caps).
 #
 # Env (all optional): CAM_PLATFORM ({jp6|jp7}), CAM_TRANSPORT ({unixfd|shm} override),
 # CAM_TRANSPORT_SOCKET (unixfd), CAM_SHM_SOCKET (raw shm), CAM_BAYER, CAM_WEBRTC_DEBAYER,
@@ -43,13 +46,34 @@ BAYER="${CAM_BAYER:-}"
 MINBR="${CAM_WEBRTC_MIN_BITRATE:-}"; MAXBR="${CAM_WEBRTC_MAX_BITRATE:-}"; STARTBR="${CAM_WEBRTC_START_BITRATE:-}"
 CC="${CAM_WEBRTC_CONGESTION:-}"
 
-# Debayer to color for a CFA camera (CAM_BAYER set) unless explicitly disabled. bayer2rgb reads the
-# pattern from the input caps (unixfd carries it; the JP6 capsfilter below sets it).
-DEBAYER_EL=""
-case "${CAM_WEBRTC_DEBAYER:-auto}" in
-  0|false|no|off) : ;;
-  *) [ -n "$BAYER" ] && DEBAYER_EL="bayer2rgb ! " ;;
+# Debayer to color for a CFA camera unless explicitly disabled. HOW differs by transport:
+#   shm (JP6): raw shm has no caps, so the config IS the format -- CAM_BAYER non-empty statically
+#              inserts `bayer2rgb` (the capsfilter below labels the stream video/x-bayer).
+#   unixfd (JP7): the stream is SELF-DESCRIBING, and env is only a prediction of what the core
+#              publishes -- a front-end hardwired from CAM_BAYER dies not-negotiated (crash loop)
+#              whenever they disagree (config vs device pixel format, CAM_BAYER unset, 16-bit
+#              Bayer riding as GRAY16). So the pipeline carries an inert `identity name=fmt_tap`
+#              seam instead, and the python launcher splices in bayer2rgb (or a GRAY8 mosaic
+#              relabel when CAM_WEBRTC_DEBAYER=false) from the FIRST caps the stream actually
+#              carries -- see bridge_stream.py adapt_for_input. The gst-launch escape hatch has
+#              no launcher, so it keeps the legacy env-driven element (and the legacy failure
+#              mode when env is wrong).
+WANT_DEBAYER=1
+# lowercase first: YAML `false` arrives via sensor_env as Python-cased "False"
+case "$(printf %s "${CAM_WEBRTC_DEBAYER:-auto}" | tr '[:upper:]' '[:lower:]')" in
+  0|false|no|off) WANT_DEBAYER=0 ;;
 esac
+DEBAYER_EL=""
+ADAPT_EL=""
+if [ "$TRANSPORT" = unixfd ] && [ "${CAM_LAUNCHER:-python}" != "gst-launch" ]; then
+  # Runtime seam: the chain ENDS at the tap (note: no trailing !), and the rest of the pipeline
+  # is a second, initially-unlinked chain -- the launcher links the two through the right element
+  # once the stream's first caps arrive. Statically linked, the source's pre-caps negotiation
+  # would already fail on a format the static chain can't take.
+  ADAPT_EL="identity name=fmt_tap   "
+elif [ "$WANT_DEBAYER" = 1 ] && [ -n "$BAYER" ]; then
+  DEBAYER_EL="bayer2rgb ! "
+fi
 
 # 16-bit operator preview (CAM_WEBRTC_NORMALIZE): percentile-stretch GRAY16 -> GRAY8 in the python
 # launcher BEFORE the 8-bit conversion -- videoconvert alone keeps the TOP byte, which renders an
@@ -122,12 +146,12 @@ if [ -n "$NORM" ]; then
   # sync=false drop=true already says "hand me samples as they come, don't pace or block on me"), so the
   # pipeline reaches PLAYING, new-sample starts firing, and the pump feeds the sink. Verified in cam-dev:
   # baseline -> state=paused, 0 frames; +async=false -> state=playing, frames flow.
-  PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=2 ! appsink name=norm_in emit-signals=true max-buffers=2 drop=true sync=false async=false   appsrc name=norm_out is-live=true format=time ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=I420 ! ${SINK}"
+  PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=2 ! ${ADAPT_EL}appsink name=norm_in emit-signals=true max-buffers=2 drop=true sync=false async=false   appsrc name=norm_out is-live=true format=time ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=I420 ! ${SINK}"
 else
-  PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=2 ! ${DEBAYER_EL}videoconvert ! video/x-raw,format=I420 ! ${SINK}"
+  PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=2 ! ${ADAPT_EL}${DEBAYER_EL}videoconvert name=fmt_next ! video/x-raw,format=I420 ! ${SINK}"
 fi
 
-echo "webrtc-bridge: ${TRANSPORT} ${SOCK}${BAYER:+ bayer=${BAYER}}${DEBAYER_EL:+ (debayer->color)}${NORM:+ normalize=${NORM}} -> webrtcsink (signalling :${PORT})"
+echo "webrtc-bridge: ${TRANSPORT} ${SOCK}${BAYER:+ bayer=${BAYER}}${DEBAYER_EL:+ (debayer->color)}${ADAPT_EL:+ (format-adaptive)}${NORM:+ normalize=${NORM}} -> webrtcsink (signalling :${PORT})"
 
 # Default launcher: a small Python process (tools/bridge_stream.py) that OWNS this pipeline and, once it
 # is streaming, advertises the stream over Zenoh for fleet discovery (docs/DISCOVERY.md). It shares this
