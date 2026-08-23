@@ -98,4 +98,12 @@ plugins:
       # is constrained-baseline (webrtcsink forces it at discovery); the level is auto-derived from
       # the stream so the SDP profile-level-id matches. See cam_rtsp.yaml for the full story.
       VIDEO_CAPS: video/x-h264
-      GST_PLUGIN_FEATURE_RANK: nvv4l2h264enc:MAX
+      # JP7 ONLY until you validate it on your JP6 host: forcing NVENC inside the webrtc-bridge is
+      # validated end-to-end on a JP7/R39 Orin, but on JP6 the nvidia runtime CSV-injects gst-1.20/
+      # 22.04-built NVENC plugins into this 24.04/gst-1.24 container -- explicitly UNVALIDATED
+      # (plugins/webrtc-bridge/compose.yml). If the injected plugin loads but malfunctions, webrtcsink's
+      # startup codec discovery dies and the container restart-loops -- while a config without the RANK
+      # (like cam_thermal.yaml) streams fine on CPU x264enc. Verify first:
+      #   cam-up <this>.yaml run --rm --no-deps webrtc-bridge gst-inspect-1.0 nvv4l2h264enc
+      # then uncomment. Software x264enc handles 5MP@25 constrained-baseline on an Orin, at CPU cost.
+      # GST_PLUGIN_FEATURE_RANK: nvv4l2h264enc:MAX
