@@ -98,6 +98,14 @@ services:
       - CAM_WEBRTC_MAX_BITRATE=${CAM_WEBRTC_MAX_BITRATE:-}
       - CAM_WEBRTC_START_BITRATE=${CAM_WEBRTC_START_BITRATE:-}
       - CAM_WEBRTC_CONGESTION=${CAM_WEBRTC_CONGESTION:-}
+      # Diagnostics: the bridge logs a startup element inventory (is NVENC actually present /
+      # ranked?) and a status heartbeat -- pipeline state, frames received from the core, negotiated
+      # caps, connected viewers -- every CAM_WEBRTC_STATUS seconds (default 10; 0 = off). GST_DEBUG
+      # is the standard GStreamer debug spec for deep dives (e.g. "3,webrtcsink:6"). Both settable
+      # from the sensor YAML's webrtc-bridge params (UPPERCASE passthrough).
+      - CAM_WEBRTC_STATUS=${CAM_WEBRTC_STATUS:-}
+      - GST_DEBUG=${GST_DEBUG:-}
+      - GST_DEBUG_NO_COLOR=1
     command: ["bash", "run.sh"]
     depends_on:
       - core-driver

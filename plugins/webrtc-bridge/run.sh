@@ -109,8 +109,22 @@ else
 fi
 
 # The core publishes the socket asynchronously; depends_on doesn't wait for readiness. Give it a
-# chance so we don't fail-and-restart on a cold start (both shm + unixfd create a socket file).
-for _ in $(seq 1 60); do [ -S "$SOCK" ] && break; sleep 1; done
+# chance so we don't fail-and-restart on a cold start (both shm + unixfd create a socket file) --
+# and say exactly what's missing when it never shows, because the source element's own failure is
+# an opaque "Failed to start / pipeline doesn't want to preroll".
+WAITED=0
+for _ in $(seq 1 60); do [ -S "$SOCK" ] && break; sleep 1; WAITED=$((WAITED+1)); done
+if [ -S "$SOCK" ]; then
+  if [ "$WAITED" -gt 0 ]; then echo "webrtc-bridge: socket $SOCK appeared after ${WAITED}s"; fi
+else
+  echo "webrtc-bridge: WARNING: no socket at $SOCK after ${WAITED}s -- the pipeline will fail to start." >&2
+  if [ "$TRANSPORT" = unixfd ]; then
+    echo "webrtc-bridge: unixfd needs the core up with transport.plugin_endpoint.enabled: true on a gst>=1.24 (JP7) core; check CAM_TRANSPORT_SOCKET matches its socket" >&2
+  else
+    echo "webrtc-bridge: raw shm needs the core up with transport.raw_endpoint.enabled: true; check CAM_SHM_SOCKET matches raw_endpoint.socket_path" >&2
+  fi
+fi
+if [ -n "${GST_PLUGIN_FEATURE_RANK:-}" ]; then echo "webrtc-bridge: GST_PLUGIN_FEATURE_RANK=${GST_PLUGIN_FEATURE_RANK}"; fi
 
 if [ "${RUN_SIGNALLING:-1}" = "1" ]; then
   gst-webrtc-signalling-server --host 0.0.0.0 --port "$PORT" &
