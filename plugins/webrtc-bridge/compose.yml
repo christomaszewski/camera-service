@@ -33,9 +33,11 @@ services:
       - CAM_TRANSPORT=${CAM_TRANSPORT:-}
       - CAM_TRANSPORT_SOCKET=${CAM_TRANSPORT_SOCKET:-/tmp/cam/unixfd}
       - CAM_SHM_SOCKET=${CAM_SHM_SOCKET:-/tmp/cam/raw}
-      # Bayer color: sensor_env derives the pattern from the camera pixel_format. Non-empty -> webrtc
-      # debayers the CFA preview to color (bayer2rgb); '' = mono. CAM_WEBRTC_DEBAYER=false forces the
-      # raw mosaic. On JP7 the unixfd caps carry the pattern; on JP6 raw-shm run.sh applies it.
+      # Bayer color: sensor_env derives the pattern from the camera pixel_format. On JP6 raw-shm a
+      # non-empty CAM_BAYER labels the stream video/x-bayer + debayers it (bayer2rgb); '' = mono.
+      # On JP7/unixfd CAM_BAYER is NOT consulted -- the self-describing stream caps decide at
+      # runtime (bridge_stream.py fmt_tap seam), so a config/device mismatch can't wedge the
+      # bridge. CAM_WEBRTC_DEBAYER=false forces the raw mosaic on either path.
       - CAM_BAYER=${CAM_BAYER:-}
       - CAM_WEBRTC_DEBAYER=${CAM_WEBRTC_DEBAYER:-auto}
       # 16-bit (thermal) operator preview: percentile-stretch GRAY16 -> GRAY8 in the bridge BEFORE the
@@ -96,6 +98,14 @@ services:
       - CAM_WEBRTC_MAX_BITRATE=${CAM_WEBRTC_MAX_BITRATE:-}
       - CAM_WEBRTC_START_BITRATE=${CAM_WEBRTC_START_BITRATE:-}
       - CAM_WEBRTC_CONGESTION=${CAM_WEBRTC_CONGESTION:-}
+      # Diagnostics: the bridge logs a startup element inventory (is NVENC actually present /
+      # ranked?) and a status heartbeat -- pipeline state, frames received from the core, negotiated
+      # caps, connected viewers -- every CAM_WEBRTC_STATUS seconds (default 10; 0 = off). GST_DEBUG
+      # is the standard GStreamer debug spec for deep dives (e.g. "3,webrtcsink:6"). Both settable
+      # from the sensor YAML's webrtc-bridge params (UPPERCASE passthrough).
+      - CAM_WEBRTC_STATUS=${CAM_WEBRTC_STATUS:-}
+      - GST_DEBUG=${GST_DEBUG:-}
+      - GST_DEBUG_NO_COLOR=1
     command: ["bash", "run.sh"]
     depends_on:
       - core-driver

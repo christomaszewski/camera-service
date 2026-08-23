@@ -249,7 +249,13 @@ class GigECamera:
         return self.camera.get_region()  # (x, y, width, height)
 
     def pixel_format_string(self) -> str:
+        """The DEVICE's current pixel format (source of truth for what the frames actually are);
+        the config value is only a fallback when the device won't say. An unreported Bayer format
+        silently degrades to the Mono8 default -> the whole stack labels the mosaic GRAY8 -- so
+        fall back to the config (which may know better) before the Mono8 last resort."""
         try:
-            return self.camera.get_pixel_format_as_string()
-        except GLib.Error:
-            return self.cfg.pixel_format or "Mono8"
+            s = self.camera.get_pixel_format_as_string()
+        except GLib.Error as e:
+            log.warning("could not read the device pixel format (%s); using config/default", e)
+            s = None
+        return s or self.cfg.pixel_format or "Mono8"

@@ -15,12 +15,14 @@ Separation of concerns (so the generic half is liftable by the next producer):
 Discovery is additive + best-effort: CAM_ADVERTISE=0 disables it; any Zenoh error is logged and the
 video keeps flowing. CAM_LAUNCHER=gst-launch (handled in run.sh) bypasses this entirely.
 """
+import faulthandler
 import json
 import logging
 import os
 import signal
 import socket
 import sys
+import time
 
 import gi
 gi.require_version("Gst", "1.0")
@@ -29,9 +31,15 @@ from gi.repository import GLib, Gst
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from zenoh_advertiser import StreamAdvertiser
 from h264_level import h264_level_for, level_covers, LEVELS as H264_LEVELS
+from format_adapt import adapt_for_input, debayer_enabled
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bridge_stream")
+
+# A crash inside a native GStreamer element (a platform-injected encoder is the prime suspect on
+# Jetson) otherwise kills the container with NOTHING in docker logs -- the restart loop is then
+# indistinguishable from a config error. This prints the C-level fault + Python stacks to stderr.
+faulthandler.enable()
 
 
 def _env(name, default=None):
@@ -277,6 +285,17 @@ class Bridge:
         self._norm_passthrough = False  # input wasn't GRAY16: forward unmodified
         self._norm_dtype = None         # numpy dtype per the input caps ('<u2' / '>u2')
         self._norm_w = self._norm_h = 0
+        self._fmt_adapted = False       # the fmt_tap seam has been resolved (one-shot)
+        # diagnostics (see the "diagnostics" section below)
+        self._error = False             # bus ERROR seen -> non-zero exit (legible in docker ps)
+        self._src_kind = "shmsrc"       # shmsrc | unixfdsrc, for targeted no-data hints
+        self._rx_frames = 0             # buffers seen on cam_src's src pad (the heartbeat counter)
+        self._rx_bytes = 0
+        self._status_iv = 0             # heartbeat period (CAM_WEBRTC_STATUS; 0 = off)
+        self._status_prev = 0
+        self._status_zero = 0           # consecutive heartbeats with zero frames received
+        self._consumers = 0             # webrtcsink consumers currently connected
+        self._warn_last = {}            # bus-warning throttle: message -> monotonic s
 
     def build(self):
         Gst.init(None)
@@ -285,7 +304,14 @@ class Bridge:
             log.error("CAM_PIPELINE not set; nothing to run")
             return False
         log.info("pipeline: %s", desc)
-        self.pipeline = Gst.parse_launch(desc)
+        try:
+            self.pipeline = Gst.parse_launch(desc)
+        except GLib.Error as e:
+            log.error("pipeline parse failed: %s -- a required element is missing from this image "
+                      "or the description is malformed (check with gst-inspect-1.0)", e)
+            return False
+        self._src_kind = "unixfdsrc" if "unixfdsrc" in desc else "shmsrc"
+        self._log_encoder_inventory()
         norm_in = self.pipeline.get_by_name("norm_in")
         self.norm_out = self.pipeline.get_by_name("norm_out")
         if norm_in is not None and self.norm_out is not None:
@@ -301,6 +327,15 @@ class Bridge:
             norm_in.connect("eos", self._on_norm_eos)
             log.info("preview normalize: percentile window %g:%g (EMA-smoothed), 16->8 before encode",
                      lo, hi)
+        # Self-describing transport (unixfd): run.sh leaves an `identity name=fmt_tap` seam instead
+        # of an env-hardwired bayer2rgb; resolve it from the FIRST caps the stream actually carries
+        # (see adapt_for_input). The probe sits on the tap's SINK pad, so it runs -- on the streaming
+        # thread, serialized BEFORE the caps event reaches anything downstream of the tap -- early
+        # enough to splice the right element in ahead of negotiation.
+        tap = self.pipeline.get_by_name("fmt_tap")
+        if tap is not None:
+            pad = tap.get_static_pad("sink")
+            pad.add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self._on_fmt_caps, tap)
         # webrtcsink meta.name == producer_id, so discovery + signalling line up (one server, many producers).
         sink = self.pipeline.get_by_name("cam_webrtcsink")
         if sink is not None:
@@ -318,6 +353,24 @@ class Bridge:
                 sink.connect("encoder-setup", self._on_encoder_setup)
             except Exception as e:
                 log.warning("could not connect webrtcsink encoder signals: %s", e)
+            # Viewer visibility for the status heartbeat (signature varies by build -> defensive).
+            for sig_name, handler in (("consumer-added", self._on_consumer_added),
+                                      ("consumer-removed", self._on_consumer_removed)):
+                try:
+                    sink.connect(sig_name, handler)
+                except Exception as e:                # noqa: BLE001
+                    log.debug("no %s signal on this webrtcsink: %s", sig_name, e)
+        # Heartbeat plumbing: count every buffer the source hands downstream, and log a periodic
+        # status line -- the difference between "no data ever arrives" (core/socket side), "data
+        # flows then the pipeline dies" (encoder/discovery), and "streams fine, nobody connected"
+        # then reads straight out of docker logs.
+        src = self.pipeline.get_by_name("cam_src")
+        pad = src.get_static_pad("src") if src is not None else None
+        if pad is not None:
+            pad.add_probe(Gst.PadProbeType.BUFFER, self._on_rx_buffer)
+        self._status_iv = self._status_interval()
+        if self._status_iv:
+            GLib.timeout_add_seconds(self._status_iv, self._status_tick)
         bus = self.pipeline.get_bus()
         bus.add_signal_watch()
         bus.connect("message", self._on_message)
@@ -331,6 +384,101 @@ class Bridge:
             self.loop.run()
         finally:
             self._teardown()
+
+    # ---- diagnostics ---------------------------------------------------------
+    _INVENTORY = ("nvv4l2h264enc", "nvh264enc", "x264enc", "openh264enc", "vp8enc", "rtpgccbwe")
+
+    def _log_encoder_inventory(self):
+        """One-shot startup line: which encoders (+ the congestion-control element) this container
+        actually has, at what rank -- so "which encoder will webrtcsink pick, and why" is
+        answerable from the log alone. Follows with a pointed warning when GST_PLUGIN_FEATURE_RANK
+        names an element the registry doesn't have: on Jetson that means the platform injection
+        (CSV on JP6, CDI on JP7) didn't deliver it or it blacklisted at scan, and webrtcsink will
+        quietly use the next-ranked encoder instead."""
+        reg = Gst.Registry.get()
+        parts = []
+        for name in self._INVENTORY:
+            f = reg.lookup_feature(name)
+            parts.append("{}={}".format(name, "rank {}".format(int(f.get_rank())) if f else "ABSENT"))
+        log.info("element inventory: %s", "  ".join(parts))
+        for spec in (os.environ.get("GST_PLUGIN_FEATURE_RANK") or "").split(","):
+            el = spec.split(":", 1)[0].strip()
+            if el and reg.lookup_feature(el) is None:
+                log.warning("GST_PLUGIN_FEATURE_RANK names %r but it is NOT in the registry "
+                            "(platform injection missing, or blacklisted at scan -- check "
+                            "`gst-inspect-1.0 %s` inside this container); webrtcsink will use the "
+                            "next-ranked encoder", el, el)
+
+    @staticmethod
+    def _status_interval():
+        raw = str(_env("CAM_WEBRTC_STATUS", "10") or "").strip().lower()
+        if raw in ("", "0", "off", "false", "no"):
+            return 0
+        try:
+            return max(int(raw), 1)
+        except ValueError:
+            log.warning("CAM_WEBRTC_STATUS=%r is not a seconds interval; using 10", raw)
+            return 10
+
+    def _on_rx_buffer(self, _pad, info):
+        buf = info.get_buffer()
+        self._rx_frames += 1
+        if buf is not None:
+            self._rx_bytes += buf.get_size()
+        return Gst.PadProbeReturn.OK
+
+    def _status_tick(self):
+        """The status heartbeat (every CAM_WEBRTC_STATUS seconds; default 10, 0 = off)."""
+        if self._stopping:
+            return False
+        delta = self._rx_frames - self._status_prev
+        self._status_prev = self._rx_frames
+        src = self.pipeline.get_by_name("cam_src") if self.pipeline is not None else None
+        pad = src.get_static_pad("src") if src is not None else None
+        caps = pad.get_current_caps() if pad is not None else None
+        capstr = caps.to_string() if caps is not None else None
+        if capstr is None and pad is not None:
+            # shmsrc never stamps current caps on its pad (the capsfilter downstream holds them);
+            # the allowed-caps intersection is the next-best truth for the heartbeat.
+            allowed = pad.get_allowed_caps()
+            if allowed is not None and not allowed.is_any() and not allowed.is_empty():
+                capstr = allowed.to_string()
+        _ok, state, pending = self.pipeline.get_state(0)
+        log.info("status: state=%s%s in=%d frames (+%d/%ds, %.1f MB) caps=%s consumers=%d",
+                 Gst.Element.state_get_name(state),
+                 "->" + Gst.Element.state_get_name(pending)
+                 if pending != Gst.State.VOID_PENDING else "",
+                 self._rx_frames, delta, self._status_iv, self._rx_bytes / 1e6,
+                 capstr if capstr is not None else "(none yet)", self._consumers)
+        if self._rx_frames == 0:
+            self._status_zero += 1
+            if self._status_zero == 2:            # ~2 intervals with nothing: say where to look
+                if self._src_kind == "unixfdsrc":
+                    log.warning("no frames from the core yet: is the core up with "
+                                "transport.plugin_endpoint.enabled: true on a gst>=1.24 (JP7) "
+                                "core, and does CAM_TRANSPORT_SOCKET match its socket?")
+                else:
+                    log.warning("no frames from the core yet: is the core up with "
+                                "transport.raw_endpoint.enabled: true, and does CAM_SHM_SOCKET "
+                                "match raw_endpoint.socket_path? (the JP6 bridge reads the raw "
+                                "shm endpoint)")
+        else:
+            self._status_zero = 0
+        return True
+
+    def _on_consumer_added(self, _sink, peer_id, _webrtcbin):
+        self._consumers += 1
+        log.info("webrtc consumer connected: %s (%d total)", peer_id, self._consumers)
+
+    def _on_consumer_removed(self, _sink, peer_id, _webrtcbin):
+        self._consumers = max(0, self._consumers - 1)
+        log.info("webrtc consumer left: %s (%d total)", peer_id, self._consumers)
+
+    @property
+    def had_error(self):
+        """True when the run ended on a pipeline ERROR -> main() exits non-zero, so a restart loop
+        shows exit code 1 in docker ps instead of looking like a clean stop."""
+        return self._error
 
     def _on_message(self, _bus, msg):
         t = msg.type
@@ -350,9 +498,21 @@ class Bridge:
         elif t == Gst.MessageType.EOS:
             log.info("EOS; stopping")
             self.loop.quit()
+        elif t == Gst.MessageType.WARNING:
+            # Failures often announce themselves as warnings first (encoder fallbacks, missing
+            # rtpgccbwe, allocator trouble); surface them, throttled per distinct message.
+            err, dbg = msg.parse_warning()
+            key = str(err)
+            now = time.monotonic()
+            if now - self._warn_last.get(key, 0.0) >= 10.0:
+                self._warn_last[key] = now
+                log.warning("pipeline warning from %s: %s (%s)",
+                            msg.src.get_name() if msg.src is not None else "?", err, dbg)
         elif t == Gst.MessageType.ERROR:
             err, dbg = msg.parse_error()
-            log.error("pipeline error: %s (%s)", err, dbg)
+            self._error = True
+            log.error("pipeline error from %s: %s (%s)",
+                      msg.src.get_name() if msg.src is not None else "?", err, dbg)
             self.loop.quit()
         return True
 
@@ -476,6 +636,79 @@ class Bridge:
             log.warning("encoder-setup failed: %s", e)
         return False
 
+    # ---- input format adapter (fmt_tap: adapt to the caps the stream ACTUALLY carries) ---------
+    def _on_fmt_caps(self, _pad, info, tap):
+        """Pad probe on fmt_tap's sink pad: on the first CAPS event, splice in whatever the real
+        input format needs (bayer2rgb / a GRAY8 relabel / nothing -- adapt_for_input). Runs on the
+        source's streaming thread while the sticky caps event is still upstream of the tap, so the
+        splice is complete before negotiation (let alone data) reaches the spliced-in element.
+
+        The seam is UNLINKED at build (run.sh emits the tap and the rest of the pipeline as two
+        separate chains, the same trick as the normalize split): the source negotiates before it
+        ever sends a caps event, and with the tap statically linked to videoconvert that
+        pre-caps negotiation would already have died not-negotiated on a Bayer stream (identity
+        proxies the caps query to videoconvert, which takes no video/x-bayer). Dangling, the tap
+        answers with its ANY template; this probe then completes the graph -- through the right
+        element -- and the caps event flows on into it. The first buffer follows the event on
+        this same thread, so the link always exists before data does."""
+        ev = info.get_event()
+        if ev is None or ev.type != Gst.EventType.CAPS:
+            return Gst.PadProbeReturn.OK
+        if self._fmt_adapted:
+            return Gst.PadProbeReturn.REMOVE
+        self._fmt_adapted = True
+        # norm_in first: with the normalize pump in the graph, the tap hands off to the pump's
+        # appsink (fmt_next is then the post-pump chain, fed by norm_out -- never by the tap).
+        nxt = self.pipeline.get_by_name("norm_in") or self.pipeline.get_by_name("fmt_next")
+        if nxt is None:                          # no downstream head to hand the stream to (bug)
+            log.error("format adapter: no norm_in/fmt_next element; pipeline is incomplete")
+            return Gst.PadProbeReturn.REMOVE
+        srcpad, nxtpad = tap.get_static_pad("src"), nxt.get_static_pad("sink")
+
+        def _link(a, b):
+            ret = a.link(b)
+            if ret != Gst.PadLinkReturn.OK:
+                raise RuntimeError("link {} -> {}: {}".format(a.get_name(), b.get_name(), ret))
+
+        try:
+            caps = ev.parse_caps()
+            st = caps.get_structure(0)
+            okf, num, den = st.get_fraction("framerate")
+            fr = "{}/{}".format(num, den) if (okf and den) else None
+            okw, w = st.get_int("width")
+            okh, h = st.get_int("height")
+            plan = adapt_for_input(st.get_name(), w if okw else 0, h if okh else 0, fr,
+                                   debayer_enabled(_env("CAM_WEBRTC_DEBAYER", "auto")))
+            el = None
+            if plan is not None:
+                factory, el_caps = plan
+                el = Gst.ElementFactory.make(factory, "fmt_adapt")
+                if el is None:                   # missing element must degrade, never kill the video
+                    log.warning("format adapter: element %r unavailable; passing %s through",
+                                factory, caps.to_string())
+                elif el_caps is not None:        # capssetter relabel: full replacement caps
+                    el.set_property("caps", Gst.Caps.from_string(el_caps))
+                    el.set_property("join", False)
+                    el.set_property("replace", True)
+            if el is not None:
+                self.pipeline.add(el)
+                el.sync_state_with_parent()
+                _link(srcpad, el.get_static_pad("sink"))
+                _link(el.get_static_pad("src"), nxtpad)
+                log.info("format adapter: input %s -> inserted %s%s", caps.to_string(), factory,
+                         " (relabel to {})".format(el_caps) if el_caps else " (debayer to color)")
+            else:
+                _link(srcpad, nxtpad)
+                log.info("format adapter: input %s passes through", caps.to_string())
+        except Exception as e:                   # noqa: BLE001 -- adapter failure = passthrough
+            log.warning("format adapter failed (%s); linking straight through", e)
+            if not srcpad.is_linked():
+                try:
+                    _link(srcpad, nxtpad)
+                except Exception as e2:          # noqa: BLE001
+                    log.error("format adapter: fallback link failed (%s); stream cannot start", e2)
+        return Gst.PadProbeReturn.REMOVE
+
     # ---- 16->8 preview normalize pump (norm_in appsink -> stretch -> norm_out appsrc) ----------
     def _norm_configure(self, caps):
         """One-shot: read the INPUT caps off the first sample and set the matching OUTPUT caps.
@@ -558,7 +791,7 @@ def main():
     if not bridge.build():
         return 1
     bridge.run()
-    return 0
+    return 1 if bridge.had_error else 0
 
 
 if __name__ == "__main__":

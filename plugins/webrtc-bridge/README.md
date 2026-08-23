@@ -12,9 +12,9 @@ The transport is selected by `CAM_PLATFORM` (cam-up exports it), so the bridge m
 the core publishes — exactly like the ros2 bridge picking CamUnixfdBridge vs CamHeaderBridge:
 
 ```
-JP7  core (unixfd  /tmp/cam/unixfd) ─► unixfdsrc ──► bayer2rgb ─► videoconvert ! I420 ─► webrtcsink ─► viewers
-       self-describing caps (geometry + Bayer format from the stream)        ▲                  ▲
-JP6  core (raw shm /tmp/cam/raw)    ─► shmsrc do-timestamp ! video/x-bayer ─┘   gst-webrtc-signalling-server (:8443)
+JP7  core (unixfd  /tmp/cam/unixfd) ─► unixfdsrc ─► [fmt_tap: runtime debayer/relabel] ─► videoconvert ! I420 ─► webrtcsink ─► viewers
+       self-describing caps (geometry + Bayer format from the stream)                             ▲                     ▲
+JP6  core (raw shm /tmp/cam/raw)    ─► shmsrc do-timestamp ! video/x-bayer ! bayer2rgb ──────────┘   gst-webrtc-signalling-server (:8443)
        caps from config (CAM_WIDTH/HEIGHT/FORMAT + CAM_BAYER)
 ```
 
@@ -28,11 +28,24 @@ JP6  core (raw shm /tmp/cam/raw)    ─► shmsrc do-timestamp ! video/x-bayer �
 
 ## Color (debayer)
 
-For a **Bayer** camera (`CAM_BAYER` set — sensor_env derives it from the camera `pixel_format`) the
-bridge debayers to color **in-pipeline** with `bayer2rgb`, so the browser sees RGB, not a grayscale
-mosaic. `bayer2rgb` reads the pattern from the input caps (unixfd carries it; the JP6 capsfilter sets
-it). Set `CAM_WEBRTC_DEBAYER=false` to preview the raw mosaic instead. **Mono** cameras pass straight
-through (the encoder reads the format off caps; chroma is neutralized by the I420 conversion).
+For a **Bayer** camera the bridge debayers to color **in-pipeline** with `bayer2rgb`, so the browser
+sees RGB, not a grayscale mosaic; `CAM_WEBRTC_DEBAYER=false` previews the raw mosaic instead.
+**Mono** cameras pass straight through (the encoder reads the format off caps; chroma is neutralized
+by the I420 conversion). *How* the bridge decides differs by transport:
+
+- **unixfd (JP7): decided at runtime from the stream itself.** The pipeline carries an inert
+  `identity name=fmt_tap` seam, left unlinked at build; on the stream's first caps the launcher
+  splices in `bayer2rgb` (`video/x-bayer` + debayer), a zero-copy GRAY8 relabel (`video/x-bayer` +
+  `CAM_WEBRTC_DEBAYER=false` — the 8-bit mosaic is byte-identical to a GRAY8 plane), or links
+  straight through (mono/raw). Env is never consulted for the format, so a config that mispredicts
+  the device (wrong/unset `pixel_format`, a camera that rejected the configured format, 16-bit Bayer
+  riding as GRAY16) can no longer kill the pipeline with a not-negotiated restart loop — the exact
+  failure a Bayer GigE camera hit when its mosaic arrived labeled differently than `CAM_BAYER`
+  predicted. (`CAM_LAUNCHER=gst-launch` has no launcher to splice, so it keeps the legacy env-driven
+  `bayer2rgb` — and the legacy failure mode.)
+- **raw shm (JP6): decided from config.** Raw shm carries no caps, so the config is the only truth:
+  `CAM_BAYER` non-empty (sensor_env derives it from the camera `pixel_format`) labels the stream
+  `video/x-bayer` and statically inserts `bayer2rgb`.
 
 ## Why a sibling container (not in-image)
 
@@ -64,8 +77,8 @@ Or via the per-sensor stack: `cam-up <sensor>.yaml up -d webrtc-bridge` (cam-up 
 | `CAM_TRANSPORT` | _(auto)_ | override the platform default: `unixfd` \| `shm` |
 | `CAM_TRANSPORT_SOCKET` | `/tmp/cam/unixfd` | unixfd socket (JP7; the core's plugin_endpoint) |
 | `CAM_SHM_SOCKET` | `/tmp/cam/raw` | raw shm socket (JP6) |
-| `CAM_BAYER` | _(empty)_ | Bayer pattern (`rggb`/`grbg`/`gbrg`/`bggr`) → debayer to color; empty → mono |
-| `CAM_WEBRTC_DEBAYER` | `auto` | `false` to preview the raw mosaic instead of debayering |
+| `CAM_BAYER` | _(empty)_ | Bayer pattern (`rggb`/`grbg`/`gbrg`/`bggr`) → debayer to color; empty → mono. **JP6 raw shm (and the gst-launch hatch) only** — on JP7/unixfd the stream's own caps decide at runtime |
+| `CAM_WEBRTC_DEBAYER` | `auto` | `false` to preview the raw mosaic instead of debayering (on unixfd: a zero-copy GRAY8 relabel) |
 | `CAM_WEBRTC_NORMALIZE` | `off` | 16-bit mono preview stretch: `auto` (1–99% percentile window, EMA-smoothed) or `lo:hi` (e.g. `5:99.5`). Stretches GRAY16 → GRAY8 **before** the 8-bit convert, so an LSB-aligned radiometric camera (thermal Y16) previews with full contrast instead of near-black. Preview-only — the recording and ROS topic keep the raw 16-bit. Needs the python launcher (the default) |
 | `CAM_WIDTH` / `CAM_HEIGHT` | `512` | **JP6 raw shm only** — must match the camera geometry |
 | `CAM_FORMAT` | `GRAY8` | **JP6 raw shm only** — mono raw format when not debayering |
@@ -75,6 +88,8 @@ Or via the per-sensor stack: `cam-up <sensor>.yaml up -d webrtc-bridge` (cam-up 
 | `CAM_WEBRTC_MAX_LEVEL` | `5.2` | safety clamp on the **auto-derived** H.264 level (the level is computed from the streamed resolution+fps — never fixed) |
 | `SIGNALLING_PORT` | `8443` | signalling server port |
 | `RUN_SIGNALLING` | `1` | run the bundled signalling server in-container |
+| `CAM_WEBRTC_STATUS` | `10` | seconds between status heartbeat lines — pipeline state, frames received from the core, negotiated caps, connected viewers (`0` = off). Startup also logs an encoder **element inventory** and warns when `GST_PLUGIN_FEATURE_RANK` names an element the registry doesn't have |
+| `GST_DEBUG` | _(unset)_ | standard GStreamer debug spec for deep dives (e.g. `3,webrtcsink:6`) — forwarded by compose, settable from sensor YAML params |
 
 ## Fleet discovery (Zenoh)
 
