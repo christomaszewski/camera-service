@@ -11,7 +11,9 @@ ARG ROS_DISTRO=lyrical
 FROM ros:${ROS_DISTRO}-ros-base AS builder
 ARG ROS_DISTRO
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# --no-upgrade: same parent-is-the-version-authority rule as the runtime stage below (this stage
+# doesn't ship, but keeping the builder's ROS packages at the parent's versions is consistent).
+RUN apt-get update && apt-get install -y --no-install-recommends --no-upgrade \
       build-essential cmake pkg-config \
       libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
       ros-${ROS_DISTRO}-image-transport ros-${ROS_DISTRO}-rclcpp-components \
@@ -22,6 +24,11 @@ RUN . /opt/ros/${ROS_DISTRO}/setup.sh && \
     colcon build --packages-select cam_ros2_bridge --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 # ---- runtime: ros-base + runtime GStreamer/ROS + the built component lib ----
+# TODO(re-parent): building FROM ${RIG_BASE_IMAGE} (rig-infra's fleet-ros = ros-base + rmw-zenoh +
+# rosbag2/mcap, a superset of what this runtime needs from ROS) would make shared-package agreement
+# STRUCTURAL instead of convention-based -- rig exports RIG_BASE_IMAGE to build commands for exactly
+# this. Needs its own testing pass on both JP variants; until then the --no-upgrade rule below is
+# the convergence mechanism.
 FROM ros:${ROS_DISTRO}-ros-base
 ARG ROS_DISTRO
 ENV DEBIAN_FRONTEND=noninteractive
@@ -32,7 +39,15 @@ ENV DEBIAN_FRONTEND=noninteractive
 # rmw-zenoh-cpp -> the default ROS 2 middleware (RMW_IMPLEMENTATION=rmw_zenoh_cpp); it ships the
 # `rmw_zenohd` router too, so this same image runs the shared host router. FastDDS stays available
 # (ros-base ships rmw_fastrtps_cpp) as a selectable fallback via RMW_IMPLEMENTATION.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+#
+# --no-upgrade: installing a package the parent ALREADY carries (rclcpp-components here) would
+# otherwise silently upgrade it to the current candidate, skewing this image ahead of the shared
+# ros:${ROS_DISTRO}-ros-base parent that rig-infra's fleet-ros also builds from -- `rig image audit`
+# flags exactly that skew. The parent is the version authority: parent-carried packages stay at the
+# parent's version, genuinely-new packages install normally, and if a new package ever strictly
+# needs a NEWER parent package apt fails loudly instead of skewing silently. (Same mechanism as
+# rig's v0.2.24 consumer --no-upgrade mandate, one level down.)
+RUN apt-get update && apt-get install -y --no-install-recommends --no-upgrade \
       gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
       ros-${ROS_DISTRO}-image-transport ros-${ROS_DISTRO}-compressed-image-transport \
       ros-${ROS_DISTRO}-rclcpp-components ros-${ROS_DISTRO}-image-proc \
