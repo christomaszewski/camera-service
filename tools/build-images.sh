@@ -18,6 +18,10 @@
 #     ROS_DISTRO=lyrical             ros2-bridge ROS 2 distro
 #     PUSH=1                         set 0 to build+tag locally without pushing
 #     PLATFORM_FLAG=                 e.g. --platform=linux/arm64 to cross-build from x86
+#     RIG_BUILD_NO_CACHE=1           rig's build-env contract: `rig build --no-cache` exports this;
+#                                    adds --no-cache AND --pull to every docker build, so a
+#                                    deliberate refresh also re-pulls the shared parents (notably
+#                                    ros:<distro>-ros-base) instead of inheriting a stale local copy
 #
 #   examples:
 #     tools/build-images.sh registry.lan:5000                      # all three -> :jp7 (ubuntu:24.04), pushed
@@ -66,7 +70,12 @@ build_one() {                      # build_one <image-name> <dockerfile> [extra 
   local name="$1" dockerfile="$2"; shift 2
   local ref="$REGISTRY/$name:$TAG"
   echo "==> building $ref" >&2
-  docker build ${PLATFORM_FLAG:+$PLATFORM_FLAG} -f "$dockerfile" -t "$ref" "$@" .   # context = repo root
+  # ${RIG_BUILD_NO_CACHE:+...}: rig's build-env contract -- `rig build --no-cache` exports
+  # RIG_BUILD_NO_CACHE=1 and scripts opt in. --pull rides along because a deliberate refresh must
+  # re-pull the shared ros:<distro>-ros-base parent too, or "fresh" builds keep inheriting the
+  # stale local copy. Unquoted on purpose: each expands to one word or none (safe under set -u).
+  docker build ${PLATFORM_FLAG:+$PLATFORM_FLAG} ${RIG_BUILD_NO_CACHE:+--no-cache} ${RIG_BUILD_NO_CACHE:+--pull} \
+    -f "$dockerfile" -t "$ref" "$@" .   # context = repo root
   if [ "$PUSH" = 1 ]; then echo "==> pushing  $ref" >&2; docker push "$ref"; fi
   REFS+=("$ref")
 }

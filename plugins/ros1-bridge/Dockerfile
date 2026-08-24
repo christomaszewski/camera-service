@@ -10,7 +10,10 @@ ARG ROS_DISTRO=noetic
 FROM ros:${ROS_DISTRO}-ros-base AS builder
 ARG ROS_DISTRO
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# --no-upgrade: never upgrade a package the ros:${ROS_DISTRO}-ros-base parent already carries --
+# the parent is the version authority (see plugins/ros2-bridge/Dockerfile for the full rationale;
+# `rig image audit` flags images skewed past the shared parent).
+RUN apt-get update && apt-get install -y --no-install-recommends --no-upgrade \
       build-essential cmake pkg-config \
       libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
       ros-${ROS_DISTRO}-image-transport \
@@ -24,7 +27,8 @@ FROM ros:${ROS_DISTRO}-ros-base
 ARG ROS_DISTRO
 ENV DEBIAN_FRONTEND=noninteractive
 # plugins-bad provides shmsrc (+ bayer2rgb); image-proc/nodelet -> the optional debayer in the launch.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# --no-upgrade: parent-carried packages stay at the parent's version (see ros2-bridge/Dockerfile).
+RUN apt-get update && apt-get install -y --no-install-recommends --no-upgrade \
       gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
       ros-${ROS_DISTRO}-image-transport ros-${ROS_DISTRO}-compressed-image-transport \
       ros-${ROS_DISTRO}-image-proc ros-${ROS_DISTRO}-nodelet \
