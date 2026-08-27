@@ -12,6 +12,15 @@ on JetPack 6 or 7; portable to Jetson Thor). Capture sources are pluggable behin
   delivered bitstream, RTCP→NTP per-frame timestamps (gst ≥ 1.24), reconnect with re-probe;
   validated on the Orin against a real 4K H.265 camera.
 
+Two **playback** sources re-run the service against previously captured data (dev/repro/
+roundtrip testing — recording, transport, and every plugin behave as if the camera were live):
+- **replay** — a recorded run (`.mkv` parts + sidecar CSV/JSON): frames come back with their
+  ORIGINAL per-frame stamps and provenance; lossless runs decode bit-exact, stream-copy runs
+  re-deliver the original bitstream. See [`config/replay.yaml`](core-driver/config/replay.yaml).
+- **pcap** — a Wireshark-on-Linux (usbmon) capture of a USB/UVC camera (e.g. a 16-bit thermal
+  core's Y16, or MJPEG), reassembled back into frames with capture-time stamps. See
+  [`config/pcap-thermal.yaml`](core-driver/config/pcap-thermal.yaml).
+
 Whatever the source, the core attaches a **per-frame hardware timestamp** (PTP/chunk on GigE,
 v4l2 SOF on USB, RTCP→NTP on RTSP — with a graceful provenance-tracked fallback ladder),
 records a **lossless, temporally-compressed** video file, and fans the stream out to consumer
@@ -154,8 +163,29 @@ The chunk-PTP parsing the fake camera *can't* drive is covered by a hardware-fre
 python3 core-driver/tests/test_timestamps.py     # or: pytest core-driver/tests
 ```
 
-(A networked fake — real GVSP, for discovery/packet-path testing — is available as a
-commented `fake-camera` service in `docker-compose.yml`.)
+(A networked fake — real GVSP with chunk data, for discovery/packet-path testing — is the
+patched-Aravis emitter in [`tools/gvsp-chunk-emitter/`](tools/gvsp-chunk-emitter).)
+
+### Playback sources (replay a recording or a pcap)
+
+Previously captured data can drive the whole service — no camera, but *real* frames:
+
+```bash
+# Replay a recorded run (mkv parts + sidecar): original stamps/provenance, optional
+# re-record (lossless runs roundtrip bit-exact -- that's what replay_test.sh asserts):
+docker run --rm -v "$PWD/core-driver:/app" -v /path/to/run:/replay cam-dev \
+  python3 main.py -c config/replay.yaml
+
+# Replay a Wireshark/usbmon capture of a USB (UVC) camera -- e.g. a Y16 thermal core:
+docker run --rm -v "$PWD/core-driver:/app" -v /path/to/captures:/input cam-dev \
+  python3 main.py -c config/pcap-thermal.yaml
+```
+
+Both pace to the data's own timestamps (`speed`, `loop`, `retime: wall` knobs), exit
+cleanly at end-of-data (the recording finalizes; `loop: true` makes a long-lived fake
+camera for plugin development), and fail legibly — the pcap parser can even tell you the
+camera's real format/geometry when the config mismatches, if the capture includes the
+device enumeration.
 
 ### Dev container (run the producer without a Jetson)
 
@@ -283,6 +313,8 @@ chunk-parse path** via a patched chunk-emitting GV camera:
 - [core-driver/tools/usb_test.sh](core-driver/tools/usb_test.sh) — USB source: raw, **MJPEG stream-copy** (dual-output), and color/FFV1 paths
 - [core-driver/tools/rtsp_test.sh](core-driver/tools/rtsp_test.sh) — RTSP source: local fake server → stream-copy record + **RTCP→NTP provenance** (CSV-checked)
 - [core-driver/tools/rtsp_reconnect_test.sh](core-driver/tools/rtsp_reconnect_test.sh) — RTSP stall/recovery: kill + restart the server, assert detect → reopen → frames resume
+- [core-driver/tools/replay_test.sh](core-driver/tools/replay_test.sh) — **replay source roundtrips**: record (GRAY8/GRAY16 FFV1, MJPEG stream-copy) → replay → re-record; sidecar CSV **identical**, frames/bitstream **bit-identical**
+- [core-driver/tools/pcap_test.sh](core-driver/tools/pcap_test.sh) — **pcap source**: synthetic usbmon capture (known Y16 ramps + noise/ERR/truncated URBs) → full service → recording **bit-exact** with the capture's timestamps
 - [plugins/ros2-bridge/tools/bridge_test.sh](plugins/ros2-bridge/tools/bridge_test.sh) — full chain → ROS2 raw + compressed `Image`
 - [core-driver/tools/supervisor_test.sh](core-driver/tools/supervisor_test.sh) — supervisor spawn / manage / clean teardown
 - [tools/gvsp-chunk-emitter/gvsp_test.sh](tools/gvsp-chunk-emitter) — **real GVSP + chunk-timestamp extraction** (patched Aravis fake camera)

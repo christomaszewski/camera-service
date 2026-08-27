@@ -1,0 +1,44 @@
+# USB pcap playback: run the service from a Wireshark-on-Linux (usbmon) capture of a
+# USB/UVC camera -- here a 16-bit RADIOMETRIC thermal core (uncompressed Y16 payloads ->
+# GRAY16_LE), the pcap twin of config/sensors/cam_thermal.yaml. The parser reassembles
+# the capture's UVC payload transfers back into frames and delivers them with stamps
+# from the CAPTURE timestamps, so the recording/CSV reproduce the captured timing.
+#
+# Capture on the camera host:  modprobe usbmon; wireshark/tcpdump -i usbmonX (X = the
+# camera's bus, `lsusb`). Capture the device PLUG-IN too and the parser can read the
+# camera's own format/geometry descriptors back to you when the config mismatches.
+#
+# Run (dev container):
+#   docker run --rm -v "$PWD/core-driver:/app" -v /path/to/captures:/input cam-dev \
+#     python3 main.py -c config/pcap-thermal.yaml
+camera:
+  type: pcap
+
+pcap:
+  path: /input/thermal.pcapng
+  # Pin what the camera actually streamed (like usb: for the live camera). Frame size is
+  # validated: a mismatch fails at startup naming the size the capture really carries.
+  pixel_format: GRAY16_LE    # UVC Y16 -> GRAY16_LE. MJPEG captures: set MJPEG (recording
+  #                            then stream-copies the original JPEGs, like the live cam)
+  width: 640
+  height: 512
+  # bus: 1                   # usbmon stream pin -- only needed when auto-detection picks
+  # device: 3                # the wrong stream (e.g. two cameras in one capture); partial
+  # endpoint: 0x81           # pins constrain the auto-detection
+  speed: 1.0                 # pacing by capture timestamps; 0 = as fast as it drains
+  loop: false                # keep replaying (a long-lived fake thermal camera)
+  retime: original           # or wall: rebase capture time onto NOW at start
+
+recording:
+  enabled: true
+  encoder: auto              # GRAY16 -> FFV1 (lossless, all 16 radiometric bits), exactly
+  #                            as a live 16-bit thermal camera records
+  name_prefix: pcap_thermal
+  segment_seconds: 60
+
+transport:
+  plugin_endpoint:
+    enabled: true            # ros2-bridge publishes mono16, webrtc-bridge previews with
+    socket_path: /tmp/cam/frames   # CAM_WEBRTC_NORMALIZE -- same as the live camera
+
+plugins: []

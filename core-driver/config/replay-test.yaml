@@ -1,0 +1,30 @@
+# Test config: replay the newest run in /data/recordings and RE-RECORD it (roundtrip).
+# Used by tools/replay_test.sh for every source shape (GRAY8/GRAY16 ffv1, MJPEG
+# stream-copy) -- replay self-configures from the run, so one config covers all.
+camera:
+  type: replay
+
+replay:
+  path: /data/recordings
+  speed: 2.0                 # 2x realtime: fast enough for a test, slow enough that the
+  #                            re-recording encoder never drops (drops would break the
+  #                            exact CSV diff the test asserts)
+
+recording:
+  enabled: true
+  encoder: auto              # raw runs re-encode (ffv1 here); stream-copy runs stream-copy
+  name_prefix: rerec
+  segment_seconds: 30
+
+preview:
+  enabled: false
+
+transport:
+  plugin_endpoint:
+    enabled: true
+    socket_path: /tmp/cam/frames
+  raw_endpoint:
+    enabled: false
+    socket_path: /tmp/cam/raw
+
+plugins: []

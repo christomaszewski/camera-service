@@ -71,7 +71,9 @@ def main(argv=None) -> int:
         source = make_source(cfg)
         source.open()
         source.configure()
-    except (CameraError, ValueError) as e:
+    except (CameraError, ValueError, OSError) as e:
+        # OSError: the playback sources open user-named files (pcap capture, run sidecar)
+        # at open() -- a typo'd path must be one legible line, not a restart-looped traceback
         log.error("%s", e)
         return 2
 

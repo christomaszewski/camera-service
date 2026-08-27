@@ -201,7 +201,9 @@ class CapturePipeline:
             log.warning("pixel format %s appears PACKED; fed as %s and will misinterpret data. "
                         "Use Mono8/Mono16/Bayer*8 or add an unpack step.", pf, self._gst_format)
 
-        fps = self.cfg.camera.frame_rate
+        # a playback source knows its real delivered rate (e.g. replay: sidecar median);
+        # an explicit camera.frame_rate still wins
+        fps = self.cfg.camera.frame_rate or self.source.delivered_frame_rate
         framerate = f"{int(round(fps))}/1" if fps else "0/1"
         self._frame_interval_ns = int(1_000_000_000 / fps) if fps else 1_000_000
         caps = (f"video/x-raw,format={self._gst_format},width={self._width},"
@@ -660,7 +662,7 @@ class CapturePipeline:
         self.loop = GLib.MainLoop()
         self.pipeline.set_state(Gst.State.PLAYING)
         self.source.start(self._on_frame, self._on_encoded)
-        if self.source.reconnect_enabled:
+        if self.source.reconnect_enabled or self.source.finite:
             GLib.timeout_add_seconds(1, self._watchdog)
         GLib.timeout_add_seconds(_HEALTH_INTERVAL_S, self._log_health)
         log.info("running")
@@ -696,11 +698,22 @@ class CapturePipeline:
 
     def _watchdog(self) -> bool:
         """Runs on the main loop ~1 Hz: ask the source whether it's disconnected and, if so,
-        kick off a reconnect in its own thread (so backoff doesn't block the pipeline)."""
+        kick off a reconnect in its own thread (so backoff doesn't block the pipeline). For a
+        finite (playback) source, also notice EOF and finalize cleanly."""
         if self._stopping:
             return False   # remove the watchdog
+        if self.source.finite and self.source.finished:
+            if self.source.finished_error:
+                log.error("playback ended on an error -> finalizing recording, exiting non-zero")
+                self._fatal = True   # a truncated reprocess must not look like a complete one
+            else:
+                log.info("playback finished -> finalizing recording and exiting")
+            self.request_stop()
+            return False
         if self._reconnecting:
             return True
+        if not self.source.reconnect_enabled:
+            return True    # finite-only watchdog: nothing to reconnect
         if self.source.is_disconnected():
             log.warning("source reports disconnect -> reconnecting")
             self._reconnecting = True

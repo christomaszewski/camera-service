@@ -278,6 +278,42 @@ def test_unique_run_prefix():
     assert unique_run_prefix("/nonexistent-dir-for-test", "cam", _now=1700000000) == "cam-20231114-221320"
 
 
+# ---- playback blocks (replay / pcap) -----------------------------------------
+def test_replay_block_defaults_and_parse():
+    r = parse_config({}).replay
+    assert (r.path, r.run, r.speed, r.loop, r.retime, r.decoder) == ("", "", 1.0, False, "original", "auto")
+    c = parse_config({"camera": {"type": "replay"},
+                      "replay": {"path": "/data/runs/x", "speed": 0, "loop": True, "retime": "wall"}})
+    assert c.camera.type == "replay"
+    assert (c.replay.path, c.replay.speed, c.replay.loop, c.replay.retime) == ("/data/runs/x", 0.0, True, "wall")
+
+
+def test_pcap_block_defaults_and_parse():
+    p = parse_config({}).pcap
+    assert (p.pixel_format, p.width, p.height) == ("GRAY16_LE", 640, 512)
+    assert p.bus is None and p.device is None and p.endpoint is None
+    c = parse_config({"camera": {"type": "pcap"},
+                      "pcap": {"path": "/input/cam.pcapng", "pixel_format": "MJPEG",
+                               "width": 1280, "height": "720", "device": 5}})
+    assert (c.pcap.width, c.pcap.height, c.pcap.device) == (1280, 720, 5)   # "720" coerced
+
+
+def test_pcap_numeric_typo_is_legible():
+    try:
+        parse_config({"pcap": {"width": "640px"}})
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "PcapConfig.width" in str(e)
+
+
+def test_general_frame_rate_overlays_playback_blocks():
+    c = parse_config({"camera": {"frame_rate": 42.0}})
+    assert c.replay.frame_rate == 42.0 and c.pcap.frame_rate == 42.0
+    # and stays None when unset (playback derives its own rate from the data)
+    c2 = parse_config({})
+    assert c2.replay.frame_rate is None and c2.pcap.frame_rate is None
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:
