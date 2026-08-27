@@ -189,18 +189,24 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
   (LTO-off + limited jobs to dodge the Docker OOM-on-link). It takes **raw video and encodes
   internally** — zerolatency/CBR/keyframe tuning, GCC congestion control, FEC/RTX, multi-viewer
   fan-out — so the bridge just feeds it frames; no hand-rolled encoder. It runs as a **sibling
-  container** consuming the **raw shm endpoint** (the Rust toolchain doesn't belong in the core image;
-  same model as ros2-bridge). Two non-obvious gotchas the container tests caught: (1) webrtcsink/
-  webrtcsrc need the **GStreamer libnice elements** (`gstreamer1.0-nice`, a separate package from the
-  libnice C library) or `webrtcbin` fails ICE with "libnice elements are not available"; (2)
-  shm-sourced buffers must be **re-timestamped** (`shmsrc do-timestamp=true`) and **converted to I420**
-  before webrtcsink — shm drops PTS (which RTP needs) and the encoders want YUV, not a mono camera's
-  GRAY8. Without either, the producer reaches PLAYING but never announces a negotiable stream, so a
-  consumer's `connect-to-first-producer` silently never latches. Validated headlessly (no browser) via
-  a `webrtcsink → gst-webrtc-signalling-server → webrtcsrc` loopback. Carrying the capture PTP time
-  through WebRTC (`webrtcsink do-clock-signalling=true` + the `ntp-64` RTP header extension →
-  `GstReferenceTimestampMeta` on a `webrtcsrc` consumer) is a future upgrade that would also require
-  consuming the header endpoint (for geometry + timestamp) instead of the raw endpoint.
+  container** consuming the **plugin endpoint** (unixfd on JP7; shm+36-byte-header on JP6, with a
+  python appsink→appsrc pump stripping the header — the raw shm endpoint remains only as the
+  `CAM_TRANSPORT=shm-raw` escape hatch), because the Rust toolchain doesn't belong in the core image;
+  same model as ros2-bridge. Consuming the plugin endpoint means geometry/format self-describe on
+  both platforms AND the absolute capture timestamp survives onto the buffers (`offset_end`), which
+  feeds the bridge's capture→encode latency metrics/overlay. Two non-obvious gotchas the container
+  tests caught: (1) webrtcsink/ webrtcsrc need the **GStreamer libnice elements**
+  (`gstreamer1.0-nice`, a separate package from the libnice C library) or `webrtcbin` fails ICE with
+  "libnice elements are not available"; (2) buffers need **valid PTS** (which RTP needs; shm drops
+  them — the header pump restamps from the capture time, the raw hatch falls back to
+  `shmsrc do-timestamp=true` arrival time) and must be **converted to I420** before webrtcsink (the
+  encoders want YUV, not a mono camera's GRAY8). Without either, the producer reaches PLAYING but
+  never announces a negotiable stream, so a consumer's `connect-to-first-producer` silently never
+  latches. Validated headlessly (no browser) via a `webrtcsink → gst-webrtc-signalling-server →
+  webrtcsrc` loopback. Carrying the capture PTP time onward **to the viewer**
+  (`webrtcsink do-clock-signalling=true` + the `ntp-64` RTP header extension →
+  `GstReferenceTimestampMeta` on a `webrtcsrc` consumer) is the remaining future upgrade — the
+  in-bridge half (capture time on the buffers) is done.
 
 - **Zenoh as the future data fabric.** Eclipse Zenoh (mature, v1.x; pub/sub, same-host SHM with
   transparent network fallback, per-message "attachments" ideal for ts+frame_id; `rmw_zenoh` is a

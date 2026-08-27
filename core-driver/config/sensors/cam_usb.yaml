@@ -31,8 +31,8 @@ transport:
     enabled: true          # JP7: unixfd -- BOTH bridges read this decoded-I420 endpoint
     socket_path: /tmp/cam/frames
   raw_endpoint:
-    enabled: true          # JP6 fallback: webrtc reads decoded I420 from the raw shm here
-    socket_path: /tmp/cam/raw
+    enabled: false         # legacy raw shm -- nothing reads it now (webrtc rides the plugin endpoint);
+    socket_path: /tmp/cam/raw   # enable only for CAM_TRANSPORT=shm-raw or generic host tools
 
 plugins:
   - name: ros2-bridge
@@ -46,9 +46,8 @@ plugins:
     isolation: container
     params:
       port: 8446           # host-facing signalling port -- unique per camera
-      width: 1920          # JP6-only geometry hint (JP7 unixfd self-describes)
-      height: 1080
-      format: I420
+      # Geometry/format self-describe on both platforms (JP7 unixfd caps; JP6 per-frame header).
+      # fps stays: the caps rate hint the H.264 level derivation reads (the header carries no rate).
       fps: 30
       # HW NVENC H.264 for the Chrome operator dashboard: VIDEO_CAPS pins H.264 (universal browser decode);
       # GST_PLUGIN_FEATURE_RANK forces nvv4l2h264enc over CPU x264enc. The element exists in the bridge

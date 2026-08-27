@@ -18,8 +18,9 @@ A plugin consumes:
      (see Time below).
    - **Thor / later:** `nvunixfdsink` for true zero-copy GPU (`NvBufSurface`) sharing.
    An optional header-free **raw `video/x-raw` shm endpoint** (`/tmp/cam/raw`,
-   `transport.raw_endpoint.enabled`) exists on both platforms for generic tools — that's what
-   the webrtc-bridge reads. The publish branch is a localized sink swap, not a rearchitecture.
+   `transport.raw_endpoint.enabled`) exists on both platforms for generic tools — the
+   webrtc-bridge reads the **plugin endpoint** on both platforms now (raw is only its legacy
+   `CAM_TRANSPORT=shm-raw` hatch). The publish branch is a localized sink swap, not a rearchitecture.
 2. **Caps** — the negotiated video format. On JP7/unixfd the stream is self-describing
    (`video/x-raw` GRAY8/16, or `video/x-bayer` with the pattern for 8-bit CFA); on JP6 the
    header endpoint's caps are `application/x-cam-frame` and the geometry/format ride the header.

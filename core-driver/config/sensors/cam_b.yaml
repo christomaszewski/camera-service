@@ -31,8 +31,8 @@ transport:
     enabled: true
     socket_path: /tmp/cam/frames
   raw_endpoint:
-    enabled: true
-    socket_path: /tmp/cam/raw
+    enabled: true                  # kept ON deliberately: tools/orchestration_test.sh asserts this
+    socket_path: /tmp/cam/raw      #   socket exists (webrtc itself rides the plugin endpoint now)
 
 # cam_b runs a different plugin than cam_a (webrtc instead of ros2) to show per-sensor selection.
 # Distinct signalling port (8444) because host networking means ports are shared across sensors.
@@ -47,10 +47,7 @@ plugins:
     enabled: true
     isolation: container
     params:
-      width: 512
-      height: 512
-      format: GRAY8
-      fps: 25
+      fps: 25              # caps rate hint; geometry/format self-describe from the transport
       port: 8444
       # Any UPPERCASE param key passes straight through as an env var (no sensor_env edit needed) --
       # e.g. lift webrtcsink's 8 Mbps default bitrate ceiling for a high-res stream:
