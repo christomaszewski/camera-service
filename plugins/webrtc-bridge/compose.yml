@@ -1,7 +1,9 @@
 # webrtc-bridge — heavy plugin, runs as its own container (gst-plugins-rs webrtcsink, built
 # from source). Pulled into the per-sensor stack via the top-level `include:`, activated only
-# when the `webrtc-bridge` profile is enabled. Transport mirrors the ros2 bridge (unixfd on JP7,
-# raw shm on JP6); port comes from the sensor config (host networking -> a distinct port per sensor).
+# when the `webrtc-bridge` profile is enabled. Transport mirrors the ros2 bridge (the core's
+# plugin endpoint: unixfd on JP7, shm+36-byte-header on JP6 — so geometry self-describes and the
+# capture timestamp survives for latency metrics); port comes from the sensor config (host
+# networking -> a distinct port per sensor).
 services:
   webrtc-bridge:
     profiles: ["webrtc-bridge"]
@@ -25,19 +27,25 @@ services:
     volumes:
       - cam_sock:/tmp/cam
     environment:
-      # Transport selection (mirrors the ros2 bridge; must match the core): unixfd on JP7 (rides the
-      # core's plugin_endpoint /tmp/cam/unixfd -- shared with the ros2 bridge, unixfdsink broadcasts),
-      # raw shm on JP6 (/tmp/cam/raw, needs transport.raw_endpoint.enabled). cam-up exports
-      # CAM_PLATFORM; CAM_TRANSPORT ({unixfd|shm}) overrides.
+      # Transport selection (mirrors the ros2 bridge; must match the core). Both platform defaults
+      # ride the core's PLUGIN endpoint (transport.plugin_endpoint.enabled): unixfd on JP7
+      # (/tmp/cam/unixfd -- unixfdsink broadcasts, shared with the ros2 bridge), headered shm on JP6
+      # (/tmp/cam/frames -- [36-byte CAMF header][pixels]; the launcher's pump strips the header, so
+      # geometry/format self-describe and the capture timestamp survives -> latency metrics).
+      # CAM_TRANSPORT=shm-raw is the legacy raw endpoint (/tmp/cam/raw, needs
+      # transport.raw_endpoint.enabled; env geometry, no capture timestamps). cam-up exports
+      # CAM_PLATFORM; CAM_TRANSPORT ({unixfd|shm|shm-raw}) overrides. CAM_TRANSPORT_SOCKET empty ->
+      # run.sh picks the per-transport default above (mirror of the ros2 bridge's launch default).
       - CAM_PLATFORM=${CAM_PLATFORM:-jp6}
       - CAM_TRANSPORT=${CAM_TRANSPORT:-}
-      - CAM_TRANSPORT_SOCKET=${CAM_TRANSPORT_SOCKET:-/tmp/cam/unixfd}
+      - CAM_TRANSPORT_SOCKET=${CAM_TRANSPORT_SOCKET:-}
       - CAM_SHM_SOCKET=${CAM_SHM_SOCKET:-/tmp/cam/raw}
-      # Bayer color: sensor_env derives the pattern from the camera pixel_format. On JP6 raw-shm a
-      # non-empty CAM_BAYER labels the stream video/x-bayer + debayers it (bayer2rgb); '' = mono.
-      # On JP7/unixfd CAM_BAYER is NOT consulted -- the self-describing stream caps decide at
-      # runtime (bridge_stream.py fmt_tap seam), so a config/device mismatch can't wedge the
-      # bridge. CAM_WEBRTC_DEBAYER=false forces the raw mosaic on either path.
+      # Bayer color: sensor_env derives the pattern from the camera pixel_format; '' = mono. On the
+      # self-describing transports the stream caps decide the front-end at runtime (bridge_stream.py
+      # fmt_tap seam), so a config/device mismatch can't wedge the bridge -- on JP6 headered shm the
+      # mosaic rides as GRAY8 and a non-empty CAM_BAYER relabels it video/x-bayer for bayer2rgb
+      # (byte-identical; a wrong pattern only mis-tints). On shm-raw CAM_BAYER statically labels +
+      # debayers. CAM_WEBRTC_DEBAYER=false forces the raw mosaic on every path.
       - CAM_BAYER=${CAM_BAYER:-}
       - CAM_WEBRTC_DEBAYER=${CAM_WEBRTC_DEBAYER:-auto}
       # 16-bit (thermal) operator preview: percentile-stretch GRAY16 -> GRAY8 in the bridge BEFORE the
@@ -45,8 +53,9 @@ services:
       # off (default) = plain videoconvert, which keeps only the top byte (near-black for LSB-aligned
       # radiometric cameras).
       - CAM_WEBRTC_NORMALIZE=${CAM_WEBRTC_NORMALIZE:-off}
-      # JP6 raw shm carries no caps -> geometry from the sensor config (must match the camera frame).
-      # Ignored on JP7 (unixfd caps are self-describing).
+      # Geometry: only the LEGACY shm-raw path needs it (raw shm carries no caps; must match the
+      # camera frame). The plugin-endpoint transports self-describe -- CAM_FPS alone still serves as
+      # the caps rate HINT on headered shm (the header carries no rate; feeds the H.264 level math).
       - CAM_WIDTH=${CAM_WIDTH:-512}
       - CAM_HEIGHT=${CAM_HEIGHT:-512}
       - CAM_FORMAT=${CAM_FORMAT:-GRAY8}
@@ -100,10 +109,15 @@ services:
       - CAM_WEBRTC_CONGESTION=${CAM_WEBRTC_CONGESTION:-}
       # Diagnostics: the bridge logs a startup element inventory (is NVENC actually present /
       # ranked?) and a status heartbeat -- pipeline state, frames received from the core, negotiated
-      # caps, connected viewers -- every CAM_WEBRTC_STATUS seconds (default 10; 0 = off). GST_DEBUG
-      # is the standard GStreamer debug spec for deep dives (e.g. "3,webrtcsink:6"). Both settable
-      # from the sensor YAML's webrtc-bridge params (UPPERCASE passthrough).
+      # caps, connected viewers, and (plugin-endpoint transports) per-interval capture->ingress /
+      # capture->encoder-input latency percentiles -- every CAM_WEBRTC_STATUS seconds (default 10;
+      # 0 = off). CAM_WEBRTC_LATENCY_OVERLAY=true burns the live capture->encode latency into the
+      # video itself (textoverlay; any viewer sees it, zero client support; "lat --" on shm-raw
+      # where no capture timestamp survives). GST_DEBUG is the standard GStreamer debug spec for
+      # deep dives (e.g. "3,webrtcsink:6"). All settable from the sensor YAML's webrtc-bridge
+      # params (UPPERCASE passthrough).
       - CAM_WEBRTC_STATUS=${CAM_WEBRTC_STATUS:-}
+      - CAM_WEBRTC_LATENCY_OVERLAY=${CAM_WEBRTC_LATENCY_OVERLAY:-}
       - GST_DEBUG=${GST_DEBUG:-}
       - GST_DEBUG_NO_COLOR=1
     command: ["bash", "run.sh"]

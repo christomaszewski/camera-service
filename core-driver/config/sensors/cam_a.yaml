@@ -22,8 +22,8 @@ transport:
     enabled: true
     socket_path: /tmp/cam/frames   # header endpoint (ros2-bridge reads this)
   raw_endpoint:
-    enabled: true
-    socket_path: /tmp/cam/raw      # raw video (webrtc-bridge reads this)
+    enabled: true                  # kept ON deliberately: tools/orchestration_test.sh cross-stack-reads
+    socket_path: /tmp/cam/raw      #   this socket (webrtc itself rides the plugin endpoint now)
 
 # Heavy plugins (own image) -> compose siblings, selected as profiles by cam-up.
 # Lightweight in-image plugins would use `isolation: process` and be spawned by the supervisor.
@@ -38,8 +38,5 @@ plugins:
     enabled: false
     isolation: container
     params:
-      width: 512
-      height: 512
-      format: GRAY8
-      fps: 25
+      fps: 25              # caps rate hint; geometry/format self-describe from the transport
       port: 8443

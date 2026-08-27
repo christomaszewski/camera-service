@@ -63,11 +63,11 @@ recording:
 
 transport:
   plugin_endpoint:
-    enabled: true          # JP7: unixfd -- both bridges read this; JP6: shm + 36-byte header
+    enabled: true          # ros2 AND webrtc bridges read this: JP7 unixfd; JP6 shm + 36-byte header
     socket_path: /tmp/cam/frames
-  raw_endpoint:
-    enabled: true          # JP6 fallback: webrtc reads the raw shm here
-    socket_path: /tmp/cam/raw
+  raw_endpoint:            # legacy raw shm -- only CAM_TRANSPORT=shm-raw reads it now (the webrtc
+    enabled: false         #   bridge rides the plugin endpoint on JP6 too); enable if something
+    socket_path: /tmp/cam/raw   # else on the host consumes it
 
 plugins:
   - name: ros2-bridge
@@ -89,10 +89,14 @@ plugins:
     isolation: container
     params:
       port: 8447           # host-facing signalling port -- MUST be unique per camera across the vehicle
-      width: 2448          # JP6-only geometry hint (JP7 unixfd self-describes) -- match the camera/ROI
-      height: 2048
-      format: GRAY8        # what the bridge consumes: the raw mono plane (a Bayer cam debayers in-bridge)
+      # Geometry self-describes on both platforms now (JP7 unixfd caps; JP6 per-frame header), so no
+      # width/height/format here. fps stays: the JP6 header carries no rate, and this hint feeds the
+      # caps + the H.264 level derivation (only shm-raw still needs full geometry -- see the bridge README).
       fps: 25
+      # Latency: the bridge logs capture->ingress / capture->encode percentiles in its heartbeat
+      # (docker logs) on the plugin-endpoint transports; uncomment to ALSO burn the live number
+      # into the video itself (textoverlay, top-left -- any viewer sees it):
+      # CAM_WEBRTC_LATENCY_OVERLAY: true
       # HW NVENC H.264 for the browser dashboard: VIDEO_CAPS pins H.264 (universal browser decode);
       # the RANK forces nvv4l2h264enc over CPU x264enc (a no-op where H.264 NVENC is absent). Profile
       # is constrained-baseline (webrtcsink forces it at discovery); the level is auto-derived from

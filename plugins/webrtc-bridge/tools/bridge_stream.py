@@ -32,6 +32,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from zenoh_advertiser import StreamAdvertiser
 from h264_level import h264_level_for, level_covers, LEVELS as H264_LEVELS
 from format_adapt import adapt_for_input, debayer_enabled
+from header_transport import (HeaderError, PtsTracker, TS_SOURCE_SHORT,
+                              caps_for_frame, parse_header)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bridge_stream")
@@ -148,6 +150,10 @@ def fill_dims_from_caps(d, src):
     try:
         pad = src.get_static_pad("src") if src is not None else None
         caps = pad.get_current_caps() if pad is not None else None
+        if caps is None and src is not None and src.find_property("caps") is not None:
+            # appsrc (the pump paths): the property is set before the first push, so it can be
+            # ahead of the pad's current caps when the advert runs off the first frame.
+            caps = src.get_property("caps")
         if caps is not None and caps.get_size() > 0:
             st = caps.get_structure(0)
             ok, val = st.get_int("width"); w = val if ok else None
@@ -286,6 +292,20 @@ class Bridge:
         self._norm_dtype = None         # numpy dtype per the input caps ('<u2' / '>u2')
         self._norm_w = self._norm_h = 0
         self._fmt_adapted = False       # the fmt_tap seam has been resolved (one-shot)
+        # Headered-shm pump (JP6 plugin endpoint; run.sh splits the pipeline at hdr_in/hdr_out):
+        # strip the 36-byte CAMF header, stamp caps from it, re-attach capture time as offset_end.
+        self.hdr_out = None             # the appsrc we push de-headered frames into
+        self._hdr_pts = PtsTracker()    # absolute capture ns -> relative monotonic PTS
+        self._hdr_caps_key = None       # (w, h, pixfmt) the current hdr_out caps were built from
+        self._hdr_warn_last = 0.0       # throttle for per-frame header errors (monotonic s)
+        # Capture->now latency (works wherever buffers carry the absolute capture ns in offset_end:
+        # unixfd natively, headered shm via the pump; n/a on shm-raw). Sample lists are drained by
+        # the heartbeat; the EMA feeds the optional burned-in overlay (lat_overlay element).
+        self._lat_rx = []               # capture->bridge-ingress ms (headered pump only)
+        self._lat_enc = []              # capture->webrtcsink-input ms (probe on its sink pad)
+        self._lat_ema = None            # smoothed capture->enc ms, for the overlay text
+        self._lat_wall = 0.0            # monotonic s of the last enc sample (overlay staleness)
+        self._ts_source = None          # provenance of the capture stamp (headered shm only)
         # diagnostics (see the "diagnostics" section below)
         self._error = False             # bus ERROR seen -> non-zero exit (legible in docker ps)
         self._src_kind = "shmsrc"       # shmsrc | unixfdsrc, for targeted no-data hints
@@ -327,6 +347,16 @@ class Bridge:
             norm_in.connect("eos", self._on_norm_eos)
             log.info("preview normalize: percentile window %g:%g (EMA-smoothed), 16->8 before encode",
                      lo, hi)
+        # Headered-shm pump (JP6 plugin endpoint): run.sh splits the pipeline at hdr_in/hdr_out;
+        # _on_hdr_sample strips the CAMF header, stamps hdr_out's caps from it (geometry/format
+        # self-describe -- env is not consulted for them), and re-attaches PTS/frame_id/capture-ns.
+        hdr_in = self.pipeline.get_by_name("hdr_in")
+        self.hdr_out = self.pipeline.get_by_name("hdr_out")
+        if hdr_in is not None and self.hdr_out is not None:
+            hdr_in.connect("new-sample", self._on_hdr_sample)
+            hdr_in.connect("eos", self._on_hdr_eos)
+            log.info("header pump: consuming the core's shm+header plugin endpoint "
+                     "(self-describing geometry; capture timestamps -> latency metrics)")
         # Self-describing transport (unixfd): run.sh leaves an `identity name=fmt_tap` seam instead
         # of an env-hardwired bayer2rgb; resolve it from the FIRST caps the stream actually carries
         # (see adapt_for_input). The probe sits on the tap's SINK pad, so it runs -- on the streaming
@@ -360,6 +390,24 @@ class Bridge:
                     sink.connect(sig_name, handler)
                 except Exception as e:                # noqa: BLE001
                     log.debug("no %s signal on this webrtcsink: %s", sig_name, e)
+            # capture->encode latency probe: buffers reaching webrtcsink still carry the absolute
+            # capture ns in offset_end (unixfd natively; headered shm via the pump; basetransform
+            # elements -- bayer2rgb/videoconvert/textoverlay -- copy offsets through). The sink pad
+            # is a request pad, but parse_launch has already linked it, so it exists here.
+            it = sink.iterate_sink_pads()
+            while True:
+                res, spad = it.next()
+                if res == Gst.IteratorResult.OK:
+                    spad.add_probe(Gst.PadProbeType.BUFFER, self._on_enc_buffer)
+                    break
+                if res == Gst.IteratorResult.RESYNC:
+                    it.resync()
+                else:
+                    break
+        # Burned-in latency overlay (CAM_WEBRTC_LATENCY_OVERLAY; run.sh inserts the element):
+        # refresh its text from the smoothed capture->enc latency a couple of times a second.
+        if self.pipeline.get_by_name("lat_overlay") is not None:
+            GLib.timeout_add(500, self._overlay_tick)
         # Heartbeat plumbing: count every buffer the source hands downstream, and log a periodic
         # status line -- the difference between "no data ever arrives" (core/socket side), "data
         # flows then the pipeline dies" (encoder/discovery), and "streams fine, nobody connected"
@@ -425,7 +473,69 @@ class Bridge:
         self._rx_frames += 1
         if buf is not None:
             self._rx_bytes += buf.get_size()
+            # unixfd buffers already carry capture ns in offset_end at the source pad (the headered
+            # pump adds its ingress sample itself -- its cam_src buffers are still [header][pixels]).
+            lat = self._capture_lat_ms(buf.offset_end)
+            if lat is not None:
+                self._lat_rx.append(lat)
         return Gst.PadProbeReturn.OK
+
+    # ---- capture->now latency (offset_end = absolute capture ns; unixfd + headered shm) --------
+    @staticmethod
+    def _capture_lat_ms(offset_end):
+        """now - capture, in ms -- or None when offset_end isn't a plausible absolute wall-clock ns
+        (CLOCK_TIME_NONE / unset on shm-raw; also guards a wildly skewed sender clock rather than
+        reporting a nonsense number). Window: 2001-09 <= stamp <= now+60s. NOTE: capture stamps are
+        PTP-epoch when the camera is locked -- an unsynced host clock shows up here as a constant
+        offset, which is exactly what the reading is for."""
+        if offset_end is None:
+            return None
+        now = time.time_ns()
+        if not (10**18 <= offset_end <= now + 60_000_000_000):
+            return None
+        return (now - offset_end) / 1e6
+
+    def _on_enc_buffer(self, _pad, info):
+        """BUFFER probe on webrtcsink's sink pad: per-frame capture->encoder-input latency. This
+        brackets everything upstream of the encoder (core + transport hop + queue/debayer/convert);
+        the WebRTC network/receiver legs are a per-consumer matter it cannot see."""
+        buf = info.get_buffer()
+        if buf is not None:
+            lat = self._capture_lat_ms(buf.offset_end)
+            if lat is not None:
+                self._lat_enc.append(lat)
+                self._lat_ema = lat if self._lat_ema is None else 0.85 * self._lat_ema + 0.15 * lat
+                self._lat_wall = time.monotonic()
+        return Gst.PadProbeReturn.OK
+
+    def _overlay_tick(self):
+        """Refresh the burned-in overlay text (2 Hz). "lat --" when no stamped buffer has passed
+        recently (shm-raw, or the stream stalled) -- the overlay must never show a stale number."""
+        if self._stopping:
+            return False
+        overlay = self.pipeline.get_by_name("lat_overlay") if self.pipeline is not None else None
+        if overlay is None:
+            return False
+        if self._lat_ema is not None and time.monotonic() - self._lat_wall < 3.0:
+            src = TS_SOURCE_SHORT.get(self._ts_source)
+            text = "lat {:.0f} ms{}".format(self._lat_ema, " ({})".format(src) if src else "")
+        else:
+            text = "lat --"
+        try:
+            overlay.set_property("text", text)
+        except Exception as e:                        # noqa: BLE001 -- never take down the video
+            log.debug("overlay text set failed: %s", e)
+        return True
+
+    @staticmethod
+    def _lat_fmt(label, samples):
+        """' lat[label]=p50/p95ms(n)' for one drained sample list, '' when empty."""
+        if not samples:
+            return ""
+        s = sorted(samples)
+        p50 = s[len(s) // 2]
+        p95 = s[min(len(s) - 1, int(round(0.95 * (len(s) - 1))))]
+        return " lat[{}]=p50 {:.0f}/p95 {:.0f}ms(n={})".format(label, p50, p95, len(s))
 
     def _status_tick(self):
         """The status heartbeat (every CAM_WEBRTC_STATUS seconds; default 10, 0 = off)."""
@@ -443,13 +553,21 @@ class Bridge:
             allowed = pad.get_allowed_caps()
             if allowed is not None and not allowed.is_any() and not allowed.is_empty():
                 capstr = allowed.to_string()
+        # capture->now latency over this interval (empty on shm-raw -- no capture stamps survive).
+        # cap->rx = capture -> bridge ingress; cap->enc = capture -> webrtcsink input, so
+        # (enc - rx) is the bridge's own queue/debayer/convert residency.
+        lat_rx, self._lat_rx = self._lat_rx, []
+        lat_enc, self._lat_enc = self._lat_enc, []
+        lat_seg = self._lat_fmt("cap->rx", lat_rx) + self._lat_fmt("cap->enc", lat_enc)
+        if lat_seg and self._ts_source:
+            lat_seg += " ts_src=" + self._ts_source
         _ok, state, pending = self.pipeline.get_state(0)
-        log.info("status: state=%s%s in=%d frames (+%d/%ds, %.1f MB) caps=%s consumers=%d",
+        log.info("status: state=%s%s in=%d frames (+%d/%ds, %.1f MB) caps=%s consumers=%d%s",
                  Gst.Element.state_get_name(state),
                  "->" + Gst.Element.state_get_name(pending)
                  if pending != Gst.State.VOID_PENDING else "",
                  self._rx_frames, delta, self._status_iv, self._rx_bytes / 1e6,
-                 capstr if capstr is not None else "(none yet)", self._consumers)
+                 capstr if capstr is not None else "(none yet)", self._consumers, lat_seg)
         if self._rx_frames == 0:
             self._status_zero += 1
             if self._status_zero == 2:            # ~2 intervals with nothing: say where to look
@@ -457,11 +575,17 @@ class Bridge:
                     log.warning("no frames from the core yet: is the core up with "
                                 "transport.plugin_endpoint.enabled: true on a gst>=1.24 (JP7) "
                                 "core, and does CAM_TRANSPORT_SOCKET match its socket?")
+                elif self.hdr_out is not None:
+                    log.warning("no frames from the core yet: is the core up with "
+                                "transport.plugin_endpoint.enabled: true on a gst<1.24 (JP6) "
+                                "core, and does CAM_TRANSPORT_SOCKET match "
+                                "plugin_endpoint.socket_path? (a gst>=1.24 core serves unixfd "
+                                "there instead -- use CAM_TRANSPORT=unixfd)")
                 else:
                     log.warning("no frames from the core yet: is the core up with "
                                 "transport.raw_endpoint.enabled: true, and does CAM_SHM_SOCKET "
-                                "match raw_endpoint.socket_path? (the JP6 bridge reads the raw "
-                                "shm endpoint)")
+                                "match raw_endpoint.socket_path? (CAM_TRANSPORT=shm-raw reads "
+                                "the raw shm endpoint)")
         else:
             self._status_zero = 0
         return True
@@ -492,8 +616,12 @@ class Bridge:
             # in every pipeline variant once capture is live. Verified in cam-dev: for the split
             # pipeline the pipeline-level PLAYING msg is never seen while the cam_src one reliably is.
             # cam_src is the run.sh source name (shmsrc on JP6 / unixfdsrc on JP7); single-chain
-            # cameras post it too, so this is universal.
-            if new == Gst.State.PLAYING and msg.src is not None and msg.src.get_name() == "cam_src":
+            # cameras post it too, so this is universal. EXCEPT the headered-shm pump: there
+            # cam_src's caps are application/x-cam-frame and the REAL video caps only exist once
+            # the pump has parsed the first header -- advertising here would stamp the descriptor
+            # from stale env defaults, so the pump triggers the advert itself (first frame).
+            if new == Gst.State.PLAYING and msg.src is not None \
+                    and msg.src.get_name() == "cam_src" and self.hdr_out is None:
                 self._advertise()
         elif t == Gst.MessageType.EOS:
             log.info("EOS; stopping")
@@ -522,7 +650,10 @@ class Bridge:
             log.info("CAM_ADVERTISE=0; discovery disabled")
             return
         try:
-            d = fill_dims_from_caps(base_descriptor(), self.pipeline.get_by_name("cam_src"))
+            # On the headered-shm path cam_src's pad says only application/x-cam-frame; the pump's
+            # appsrc (hdr_out) carries the real video caps the header described.
+            src = self.pipeline.get_by_name("hdr_out") or self.pipeline.get_by_name("cam_src")
+            d = fill_dims_from_caps(base_descriptor(), src)
             key = "fleet/{}/media/{}".format(vehicle_id(), sensor_id())
             self.advertiser = StreamAdvertiser(key, d, connect=zenoh_connect(), enabled=True)
             log.info("descriptor: %s", json.dumps(d))
@@ -561,7 +692,7 @@ class Bridge:
         INPUT caps (authoritative -- correct on JP7 unixfd where env geometry is unset, and after any
         future videoscale on the branch); fall back to the source caps, then CAM_WIDTH/HEIGHT/FPS (valid
         on the JP6 raw-shm path, where the config IS the geometry)."""
-        for el_name, which in (("cam_webrtcsink", "sink"), ("cam_src", "src")):
+        for el_name, which in (("cam_webrtcsink", "sink"), ("hdr_out", "src"), ("cam_src", "src")):
             whf = _wh_fps(_negotiated_caps(self.pipeline.get_by_name(el_name), which))
             if whf:
                 return whf + (el_name,)
@@ -763,6 +894,8 @@ class Bridge:
             buf.unmap(mi)
         obuf = Gst.Buffer.new_wrapped(out_bytes)
         obuf.pts, obuf.dts, obuf.duration = buf.pts, buf.dts, buf.duration
+        # keep frame_id/capture-ns riding across the pump (the latency probe reads offset_end)
+        obuf.offset, obuf.offset_end = buf.offset, buf.offset_end
         ret = self.norm_out.emit("push-buffer", obuf)
         if ret != Gst.FlowReturn.OK:
             log.warning("normalize: push-buffer -> %s", ret)
@@ -771,6 +904,80 @@ class Bridge:
     def _on_norm_eos(self, _sink):
         if self.norm_out is not None:
             self.norm_out.emit("end-of-stream")           # propagate EOS across the pump
+
+    # ---- headered-shm pump (hdr_in appsink -> strip CAMF header, restamp -> hdr_out appsrc) ----
+    def _hdr_warn(self, msg):
+        now = time.monotonic()
+        if now - self._hdr_warn_last >= 10.0:             # per-frame path: throttle, never spam
+            self._hdr_warn_last = now
+            log.warning("header pump: %s", msg)
+
+    def _on_hdr_sample(self, sink):
+        """Per frame: parse the 36-byte header, hand the PIXEL bytes on as a zero-copy sub-buffer
+        (copy_region shares the memory), and re-attach what shm dropped: a relative monotonic PTS
+        derived from the capture stamp, offset=frame_id, offset_end=absolute capture ns (the unixfd
+        convention -- everything downstream, latency probes included, is transport-agnostic).
+        A corrupt frame is dropped, throttled-warned, and the stream stays up."""
+        sample = sink.emit("pull-sample")
+        if sample is None:
+            return Gst.FlowReturn.OK
+        buf = sample.get_buffer()
+        ok, mi = buf.map(Gst.MapFlags.READ)
+        if not ok:
+            return Gst.FlowReturn.OK
+        try:
+            info = parse_header(mi.data)
+        except HeaderError as e:
+            self._hdr_warn("dropped frame ({})".format(e))
+            return Gst.FlowReturn.OK
+        finally:
+            buf.unmap(mi)
+        payload = buf.get_size() - info.header_len
+        if payload <= 0:
+            self._hdr_warn("dropped frame (no pixel bytes after the header)")
+            return Gst.FlowReturn.OK
+        # Geometry/format come from the HEADER (self-describing); env only contributes the CFA
+        # pattern + rate hint. One caps set per format, re-stamped if the camera changes mid-stream
+        # (rare -- reconnect at another ROI/format; the fmt_tap splice is one-shot, so a Bayer<->mono
+        # flip after start still needs a bridge restart, which the warning says).
+        key = (info.width, info.height, info.pixfmt)
+        if key != self._hdr_caps_key:
+            try:
+                fps = int(_env("CAM_FPS") or 0) or None
+            except ValueError:
+                fps = None
+            caps_s = caps_for_frame(info, bayer=_env("CAM_BAYER"),
+                                    debayer=debayer_enabled(_env("CAM_WEBRTC_DEBAYER", "auto")),
+                                    fps=fps)
+            self.hdr_out.set_property("caps", Gst.Caps.from_string(caps_s))
+            if self._hdr_caps_key is None:
+                log.info("header pump: stream is %s (ts_source=%s)", caps_s, info.ts_source)
+                if not self._advertised:
+                    # the pump path advertises HERE, not on cam_src PLAYING (see _on_message):
+                    # hdr_out now carries the true caps, so the descriptor gets real geometry.
+                    GLib.idle_add(self._advertise)
+            else:
+                log.warning("header pump: input format changed mid-stream (%s); if the preview "
+                            "breaks, restart the bridge (the format seam resolves once)", caps_s)
+            self._hdr_caps_key = key
+        obuf = buf.copy_region(Gst.BufferCopyFlags.MEMORY, info.header_len, payload)
+        obuf.pts = self._hdr_pts.pts_for(info.timestamp_ns)
+        obuf.dts = Gst.CLOCK_TIME_NONE
+        obuf.duration = Gst.CLOCK_TIME_NONE
+        obuf.offset = info.frame_id
+        obuf.offset_end = info.timestamp_ns
+        self._ts_source = info.ts_source
+        lat = self._capture_lat_ms(info.timestamp_ns)
+        if lat is not None:
+            self._lat_rx.append(lat)
+        ret = self.hdr_out.emit("push-buffer", obuf)
+        if ret != Gst.FlowReturn.OK:
+            self._hdr_warn("push-buffer -> {}".format(ret))
+        return Gst.FlowReturn.OK
+
+    def _on_hdr_eos(self, _sink):
+        if self.hdr_out is not None:
+            self.hdr_out.emit("end-of-stream")            # propagate EOS across the pump
 
     def _on_signal(self):
         if not self._stopping:

@@ -104,8 +104,8 @@ transport:
     # max_rate_hz: 0       # core-side cap on frames offered to ALL plugins; 0 = every frame
     #                        (per-plugin capping: prefer the ros2-bridge publish_rate param below)
   raw_endpoint:            # optional clean video/x-raw shm for generic same-host tools (no metadata);
-    enabled: true          #   the webrtc-bridge's JP6 fallback path reads this
-    socket_path: /tmp/cam/raw
+    enabled: false         #   nothing in the stack reads it by default (the webrtc bridge rides the
+    socket_path: /tmp/cam/raw   # plugin endpoint) — enable for CAM_TRANSPORT=shm-raw or external tools
     # shm_size: 0          # shm bytes; 0 = auto (frame_size * 8). NB max_rate_hz is plugin-endpoint-
     #                        only -- nothing rate-caps this raw branch (a value here parses but is ignored)
 
@@ -136,9 +136,10 @@ plugins:
     isolation: container
     params:
       port: 8443           # host-facing signalling port (unique per camera!)
-      width: 2448          # JP6 raw-shm caps are TRUSTED — must match the camera exactly (green/garbage
-      height: 2048         #   preview = a mismatch); on JP7/unixfd the stream self-describes, set anyway
-      format: GRAY8        # what the bridge consumes (GRAY8/GRAY16_LE/I420/...); Bayer debayers in-bridge
+      # Geometry/format self-describe on both platforms (JP7 unixfd caps; JP6 per-frame header), so no
+      # width/height/format here — only the legacy CAM_TRANSPORT=shm-raw path still needs them (and they
+      # must then match the camera exactly: green/garbage preview = a mismatch). fps stays: the JP6
+      # header carries no rate, and this hint feeds the caps + the H.264 level derivation.
       fps: 25
       # role: front-left   # discovery role label (docs/DISCOVERY.md); defaults to the instance name
       # Any UPPERCASE param passes straight through as an env var — the webrtc knobs in the wild:

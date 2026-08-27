@@ -43,8 +43,8 @@ transport:
     enabled: true          # JP7: unixfd -- BOTH bridges read this decoded-I420 endpoint (ros2 + webrtc share it)
     socket_path: /tmp/cam/frames
   raw_endpoint:
-    enabled: true          # JP6 fallback: webrtc reads decoded I420 from the raw shm here
-    socket_path: /tmp/cam/raw
+    enabled: false         # legacy raw shm -- nothing reads it now (webrtc rides the plugin endpoint);
+    socket_path: /tmp/cam/raw   # enable only for CAM_TRANSPORT=shm-raw or generic host tools
 
 plugins:
   - name: ros2-bridge
@@ -58,9 +58,9 @@ plugins:
     isolation: container
     params:
       port: 8445           # host-facing signalling port -- MUST be unique per camera across the vehicle
-      width: 3840          # JP6-only geometry hint (JP7 unixfd self-describes); the ZR30's 4K decode
-      height: 2160
-      format: I420         # the decoded format the bridge consumes
+      # Geometry/format self-describe on both platforms (JP7 unixfd caps; JP6 per-frame header) -- the
+      # ZR30's 4K decode arrives as I420 3840x2160 without config help. fps stays: it's the caps rate
+      # hint the H.264 level derivation reads (the JP6 header carries no rate).
       fps: 25
       # 4K needs more than webrtcsink's 8 Mbps default ceiling -- raise it (generic UPPERCASE env passthrough).
       # Congestion control (gcc) runs by default -- the image ships rtpgccbwe -- and adapts each

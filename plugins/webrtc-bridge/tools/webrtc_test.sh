@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Headless WebRTC round-trip (no Jetson, no camera, no browser). Exercises BOTH transports the
+# Headless WebRTC round-trip (no Jetson, no camera, no browser). Exercises ALL transports the
 # bridge supports, end to end:
 #
-#   1. JP6 raw shm  + mono  (GRAY8 passthrough)        core --raw shm-->  bridge
-#   2. JP7 unixfd   + color (Bayer -> bayer2rgb)       core --unixfd-->   bridge
+#   1. JP6 headered shm + mono  (self-describing; latency metrics + burned-in overlay)
+#   2. JP6 headered shm + color (GRAY8 mosaic relabeled video/x-bayer -> bayer2rgb)
+#   3. shm-raw (legacy) + mono  (env geometry; also the two H.264 profile/level scenarios)
+#   4. JP7 unixfd       + color (Bayer -> bayer2rgb)
 #
 # Each scenario:  core (fake cam) -> webrtc-bridge (webrtcsink + signalling) -> webrtcsrc consumer
 # (decode + count). shm is shared cross-container via a named volume (not a host bind mount --
@@ -11,8 +13,10 @@
 # path without a browser. PASS = each scenario decoded >= 30 frames.
 #
 # The unixfd scenario needs a GStreamer >= 1.24 core (unixfdsink landed in 1.24). The default cam-dev
-# is Ubuntu 22.04 / gst 1.20 (a JP6 userspace mirror -- no unixfd), so scenario 2 is auto-skipped there;
-# run it with a gst >= 1.24 core -- on an Orin: CORE_IMG=cam-core:bench WEBRTC_IMG=webrtc-bridge:jp7.
+# is Ubuntu 22.04 / gst 1.20 (a JP6 userspace mirror -- no unixfd), so it is auto-skipped there; run
+# it with a gst >= 1.24 core -- on an Orin: CORE_IMG=cam-core:bench WEBRTC_IMG=webrtc-bridge:jp7.
+# Inversely, the HEADERED scenarios need a core WITHOUT unixfdsink (unixfd replaces the header
+# endpoint when available), i.e. the default cam-dev -- they are auto-skipped on a 1.24 core.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."          # repo root
 REPO="$(pwd)"
@@ -73,9 +77,48 @@ run_scenario() {
 }
 
 FAILED=0
-run_scenario "JP6 raw shm + mono (GRAY8 passthrough)" \
+# One probe, two gates: unixfd needs a gst >= 1.24 core; the headered-shm endpoint only EXISTS on a
+# core without unixfdsink (unixfd replaces it at the same plugin endpoint when available).
+if docker run --rm --entrypoint bash "$CORE_IMG" -c 'gst-inspect-1.0 unixfdsink >/dev/null 2>&1'; then
+  CORE_HAS_UNIXFD=1
+else
+  CORE_HAS_UNIXFD=0
+fi
+
+if [ "$CORE_HAS_UNIXFD" = 0 ]; then
+  # The JP6 DEFAULT path: no geometry env AT ALL -- the header must self-describe 512x512 GRAY8@25.
+  # The overlay knob doubles as the fonts/pango smoke test (textoverlay errors the pipeline when the
+  # element or a font is missing). After the consumer passes, the bridge log must show the
+  # capture->encode latency percentiles -- that is the heartbeat metric this transport exists for.
+  if run_scenario "JP6 headered shm + mono (self-describing + latency)" \
+      config/webrtc-fake.yaml \
+      -e CAM_PLATFORM=jp6 -e CAM_WEBRTC_LATENCY_OVERLAY=1; then
+    if docker logs "$BRIDGE" 2>&1 | grep -Fq "lat[cap->enc]"; then
+      echo "-- latency metrics present in the heartbeat --"
+    else
+      echo "-- FAIL: no lat[cap->enc] heartbeat line (capture timestamps didn't survive) --"
+      FAILED=1
+    fi
+  else
+    FAILED=1
+  fi
+
+  # Color on the headered path: the wire carries the GRAY8 mosaic; CAM_BAYER relabels it
+  # video/x-bayer and the fmt_tap seam splices bayer2rgb.
+  run_scenario "JP6 headered shm + color (Bayer relabel -> bayer2rgb)" \
+    config/webrtc-fake-bayer.yaml \
+    -e CAM_PLATFORM=jp6 -e CAM_BAYER=rggb \
+    || FAILED=1
+else
+  echo
+  echo "########## SCENARIOS: JP6 headered shm -- SKIPPED ##########"
+  echo "   core image '$CORE_IMG' HAS unixfdsink (gst >= 1.24), so its plugin endpoint serves unixfd,"
+  echo "   not shm+header. Re-run with the default cam-dev (22.04/gst 1.20) core to cover these."
+fi
+
+run_scenario "shm-raw (legacy) + mono (GRAY8, env geometry)" \
   config/webrtc-fake.yaml \
-  -e CAM_PLATFORM=jp6 -e CAM_SHM_SOCKET=/tmp/cam/raw \
+  -e CAM_PLATFORM=jp6 -e CAM_TRANSPORT=shm-raw -e CAM_SHM_SOCKET=/tmp/cam/raw \
   -e CAM_WIDTH=512 -e CAM_HEIGHT=512 -e CAM_FORMAT=GRAY8 -e CAM_FPS=25 \
   || FAILED=1
 
@@ -86,23 +129,22 @@ run_scenario "JP6 raw shm + mono (GRAY8 passthrough)" \
 # SDP profile-level-id matches the stream. BOTH knob values must stay green: the default
 # (constrained-baseline) and `high`, which must WARN + fall back to constrained-baseline without
 # breaking the stream (webrtcsink rejects any other profile for raw input -- see bridge_stream.py).
+# Kept on the shm-raw path: the level math reads env geometry there, the fallback worth pinning.
 run_scenario "H.264 auto-level, constrained-baseline" \
   config/webrtc-fake.yaml \
-  -e CAM_PLATFORM=jp6 -e CAM_SHM_SOCKET=/tmp/cam/raw \
+  -e CAM_PLATFORM=jp6 -e CAM_TRANSPORT=shm-raw -e CAM_SHM_SOCKET=/tmp/cam/raw \
   -e CAM_WIDTH=512 -e CAM_HEIGHT=512 -e CAM_FORMAT=GRAY8 -e CAM_FPS=25 \
   -e VIDEO_CAPS=video/x-h264 -e CAM_WEBRTC_PROFILE=constrained-baseline \
   || FAILED=1
 
 run_scenario "H.264 auto-level, high (warns + falls back to constrained-baseline)" \
   config/webrtc-fake.yaml \
-  -e CAM_PLATFORM=jp6 -e CAM_SHM_SOCKET=/tmp/cam/raw \
+  -e CAM_PLATFORM=jp6 -e CAM_TRANSPORT=shm-raw -e CAM_SHM_SOCKET=/tmp/cam/raw \
   -e CAM_WIDTH=512 -e CAM_HEIGHT=512 -e CAM_FORMAT=GRAY8 -e CAM_FPS=25 \
   -e VIDEO_CAPS=video/x-h264 -e CAM_WEBRTC_PROFILE=high \
   || FAILED=1
 
-# unixfd needs a gst >= 1.24 core (the default cam-dev is 22.04/1.20). Skip scenario 2 -- rather than
-# fail it -- when the core image can't produce the transport at all.
-if docker run --rm --entrypoint bash "$CORE_IMG" -c 'gst-inspect-1.0 unixfdsink >/dev/null 2>&1'; then
+if [ "$CORE_HAS_UNIXFD" = 1 ]; then
   run_scenario "JP7 unixfd + color (Bayer -> bayer2rgb)" \
     config/webrtc-fake-bayer.yaml \
     -e CAM_PLATFORM=jp7 -e CAM_BAYER=rggb \

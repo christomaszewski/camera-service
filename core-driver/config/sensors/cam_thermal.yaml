@@ -49,8 +49,8 @@ transport:
     enabled: true          # JP7: unixfd (self-describing GRAY16 caps) -- ros2-bridge reads this
     socket_path: /tmp/cam/frames
   raw_endpoint:
-    enabled: true          # JP6 fallback: webrtc reads raw GRAY16 from the shm here
-    socket_path: /tmp/cam/raw
+    enabled: false         # legacy raw shm -- nothing reads it now (webrtc rides the plugin endpoint);
+    socket_path: /tmp/cam/raw   # enable only for CAM_TRANSPORT=shm-raw or generic host tools
 
 plugins:
   - name: ros2-bridge
@@ -65,12 +65,9 @@ plugins:
     isolation: container
     params:
       port: 8448           # host-facing signalling port -- MUST be unique per camera across the vehicle
-      # JP6 raw-shm caps are TRUSTED, not negotiated: these MUST match the camera exactly or the encoder
-      # reads mislabeled bytes (the classic green/garbage preview). On JP7/unixfd they're ignored (the
-      # stream self-describes), but set them right anyway so one config works on both platforms.
-      format: GRAY16_LE
-      width: 640
-      height: 512
+      # Geometry/format self-describe on both platforms (JP7 unixfd caps; JP6 per-frame header) -- the
+      # old green/garbage-preview risk of mislabeled trusted raw-shm caps is gone with that path. fps
+      # stays: the caps rate hint (the JP6 header carries no rate).
       fps: 60
       # 16-bit OPERATOR PREVIEW: percentile-stretch GRAY16 -> GRAY8 BEFORE the 8-bit convert. Without it,
       # videoconvert keeps only the top byte and LSB-aligned thermal counts render near-black. `auto` =

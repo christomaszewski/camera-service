@@ -58,10 +58,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 # fails with "Signalling error: ... OpenSSL error" even on a plain ws:// URI. kmod: the NVENC
 # plugins are runtime-injected on Jetson (CSV on JP6, CDI on JP7) and their init runs `lsmod`
 # (libnvtvmr) -- without kmod that aborts on r38 (warn-only noise on r39); same bake as the core.
+# gstreamer1.0-x: despite the name, this is where Ubuntu packages the PANGO text elements
+# (textoverlay -- the burned-in latency overlay); they are NOT in gstreamer1.0-plugins-base.
+# fontconfig + fonts-dejavu-core: pango renders nothing without a resolvable font on this slim base.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
       gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice \
-      ca-certificates kmod \
+      gstreamer1.0-x ca-certificates kmod fontconfig fonts-dejavu-core \
       python3 python3-gi python3-pip python3-numpy gir1.2-glib-2.0 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
     && rm -f /usr/lib/*/gstreamer-1.0/libgstonnx.so /usr/lib/*/libonnxruntime.so* \
     && rm -rf /var/lib/apt/lists/*
