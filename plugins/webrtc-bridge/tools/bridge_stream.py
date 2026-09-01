@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from zenoh_advertiser import StreamAdvertiser
 from h264_level import h264_level_for, level_covers, LEVELS as H264_LEVELS
 from format_adapt import adapt_for_input, debayer_enabled
+from scale_plan import fit_within, parse_max_size, scale_caps
 from header_transport import (HeaderError, PtsTracker, TS_SOURCE_SHORT,
                               caps_for_frame, parse_header)
 
@@ -292,6 +293,10 @@ class Bridge:
         self._norm_dtype = None         # numpy dtype per the input caps ('<u2' / '>u2')
         self._norm_w = self._norm_h = 0
         self._fmt_adapted = False       # the fmt_tap seam has been resolved (one-shot)
+        # Encode-side downscale (CAM_WEBRTC_MAX_SIZE; run.sh inserts fmt_scale -> scale_caps):
+        # the bound, and the target the capsfilter currently pins (None = passthrough).
+        self._max_size = None
+        self._scale_target = None
         # Headered-shm pump (JP6 plugin endpoint; run.sh splits the pipeline at hdr_in/hdr_out):
         # strip the 36-byte CAMF header, stamp caps from it, re-attach capture time as offset_end.
         self.hdr_out = None             # the appsrc we push de-headered frames into
@@ -366,6 +371,24 @@ class Bridge:
         if tap is not None:
             pad = tap.get_static_pad("sink")
             pad.add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self._on_fmt_caps, tap)
+        # Encode-side downscale (CAM_WEBRTC_MAX_SIZE): run.sh inserts `videoscale name=fmt_scale !
+        # capsfilter name=scale_caps` (caps ANY = passthrough) right after the format seam; the
+        # target is planned from the caps the stream ACTUALLY carries by a probe on the scaler's
+        # sink pad -- it runs ahead of the scaler's own negotiation, so the pinned size is in place
+        # before anything downstream (webrtcsink's codec discovery included) ever sees a geometry.
+        scaler = self.pipeline.get_by_name("fmt_scale")
+        if scaler is not None:
+            spec = _env("CAM_WEBRTC_MAX_SIZE")
+            try:
+                self._max_size = parse_max_size(spec)
+            except ValueError as e:
+                log.warning("CAM_WEBRTC_MAX_SIZE=%r ignored (%s); streaming at source resolution",
+                            spec, e)
+            if self._max_size is not None:
+                scaler.get_static_pad("sink").add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM,
+                                                        self._on_scale_caps)
+                log.info("scale: bounding the encode geometry to %dx%d (CAM_WEBRTC_MAX_SIZE=%s)",
+                         self._max_size[0], self._max_size[1], spec)
         # webrtcsink meta.name == producer_id, so discovery + signalling line up (one server, many producers).
         sink = self.pipeline.get_by_name("cam_webrtcsink")
         if sink is not None:
@@ -654,6 +677,13 @@ class Bridge:
             # appsrc (hdr_out) carries the real video caps the header described.
             src = self.pipeline.get_by_name("hdr_out") or self.pipeline.get_by_name("cam_src")
             d = fill_dims_from_caps(base_descriptor(), src)
+            if self._max_size is not None and d.get("width") and d.get("height"):
+                # The viewer receives the DOWNSCALED geometry (CAM_WEBRTC_MAX_SIZE): the same plan
+                # the fmt_scale probe applies, computed here from the source dims because the advert
+                # fires before the first caps have reached the scaler.
+                target = fit_within(d["width"], d["height"], *self._max_size)
+                if target is not None:
+                    d["width"], d["height"] = target
             key = "fleet/{}/media/{}".format(vehicle_id(), sensor_id())
             self.advertiser = StreamAdvertiser(key, d, connect=zenoh_connect(), enabled=True)
             log.info("descriptor: %s", json.dumps(d))
@@ -689,8 +719,8 @@ class Bridge:
 
     def _encode_geometry(self):
         """(w, h, fps, source) actually fed to webrtcsink's encoder. Prefer webrtcsink's negotiated
-        INPUT caps (authoritative -- correct on JP7 unixfd where env geometry is unset, and after any
-        future videoscale on the branch); fall back to the source caps, then CAM_WIDTH/HEIGHT/FPS (valid
+        INPUT caps (authoritative -- correct on JP7 unixfd where env geometry is unset, and after the
+        CAM_WEBRTC_MAX_SIZE downscale on the branch); fall back to the source caps, then CAM_WIDTH/HEIGHT/FPS (valid
         on the JP6 raw-shm path, where the config IS the geometry)."""
         for el_name, which in (("cam_webrtcsink", "sink"), ("hdr_out", "src"), ("cam_src", "src")):
             whf = _wh_fps(_negotiated_caps(self.pipeline.get_by_name(el_name), which))
@@ -788,11 +818,16 @@ class Bridge:
         if self._fmt_adapted:
             return Gst.PadProbeReturn.REMOVE
         self._fmt_adapted = True
-        # norm_in first: with the normalize pump in the graph, the tap hands off to the pump's
-        # appsink (fmt_next is then the post-pump chain, fed by norm_out -- never by the tap).
-        nxt = self.pipeline.get_by_name("norm_in") or self.pipeline.get_by_name("fmt_next")
+        # The head of the post-seam chain, in the order run.sh emits them: the downscaler
+        # (fmt_scale) when CAM_WEBRTC_MAX_SIZE is set, else the normalize pump's appsink (norm_in --
+        # fmt_next is then the post-pump chain, fed by norm_out, never by the tap), else videoconvert.
+        nxt = None
+        for head in ("fmt_scale", "norm_in", "fmt_next"):
+            nxt = self.pipeline.get_by_name(head)
+            if nxt is not None:
+                break
         if nxt is None:                          # no downstream head to hand the stream to (bug)
-            log.error("format adapter: no norm_in/fmt_next element; pipeline is incomplete")
+            log.error("format adapter: no fmt_scale/norm_in/fmt_next element; pipeline is incomplete")
             return Gst.PadProbeReturn.REMOVE
         srcpad, nxtpad = tap.get_static_pad("src"), nxt.get_static_pad("sink")
 
@@ -839,6 +874,46 @@ class Bridge:
                 except Exception as e2:          # noqa: BLE001
                     log.error("format adapter: fallback link failed (%s); stream cannot start", e2)
         return Gst.PadProbeReturn.REMOVE
+
+    # ---- encode-side downscale (fmt_scale: bound the geometry fed to the encoder) --------------
+    def _on_scale_caps(self, _pad, info):
+        """Pad probe on fmt_scale's sink pad: on every CAPS event, pin scale_caps to the geometry
+        that fits CAM_WEBRTC_MAX_SIZE (fit_within: aspect kept, even dims, never upscaled), or leave
+        it ANY when the frame already fits, which keeps videoscale in passthrough. Runs on the
+        streaming thread BEFORE the scaler negotiates the new caps, so the pinned size is what it
+        (and everything downstream) fixates on. Kept installed rather than one-shot: a reconnect at
+        another geometry (the header pump re-stamps caps) re-plans. Changing the capsfilter posts a
+        RECONFIGURE upstream -- the normal caps-change path; it settles on the same caps."""
+        ev = info.get_event()
+        if ev is None or ev.type != Gst.EventType.CAPS:
+            return Gst.PadProbeReturn.OK
+        try:
+            caps = ev.parse_caps()
+            st = caps.get_structure(0)
+            okw, w = st.get_int("width")
+            okh, h = st.get_int("height")
+            if not (okw and okh):
+                log.warning("scale: input caps %s carry no geometry; passing through", caps.to_string())
+                return Gst.PadProbeReturn.OK
+            target = fit_within(w, h, *self._max_size)
+            if target == self._scale_target:
+                return Gst.PadProbeReturn.OK
+            cf = self.pipeline.get_by_name("scale_caps")
+            if target is None:
+                if self._scale_target is not None:       # was pinned for an earlier geometry
+                    cf.set_property("caps", Gst.Caps.new_any())
+                log.info("scale: %dx%d already fits %dx%d; videoscale passes through",
+                         w, h, self._max_size[0], self._max_size[1])
+            else:
+                cf.set_property("caps", Gst.Caps.from_string(scale_caps(*target)))
+                log.info("scale: %dx%d -> %dx%d (CAM_WEBRTC_MAX_SIZE bound %dx%d); convert/encode "
+                         "now run on %.0f%% of the source pixels", w, h, target[0], target[1],
+                         self._max_size[0], self._max_size[1],
+                         100.0 * target[0] * target[1] / (w * h))
+            self._scale_target = target
+        except Exception as e:                   # noqa: BLE001 -- never break the video path
+            log.warning("scale plan failed (%s); passing through at source resolution", e)
+        return Gst.PadProbeReturn.OK
 
     # ---- 16->8 preview normalize pump (norm_in appsink -> stretch -> norm_out appsrc) ----------
     def _norm_configure(self, caps):

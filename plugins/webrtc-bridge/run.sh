@@ -34,6 +34,7 @@
 # CAM_SHM_SOCKET (raw shm), CAM_BAYER, CAM_WEBRTC_DEBAYER,
 # CAM_WEBRTC_NORMALIZE (16-bit mono preview stretch: off | auto | "lo:hi" percentiles -- see below),
 # CAM_WEBRTC_LATENCY_OVERLAY (burn capture->now latency into the video -- see below),
+# CAM_WEBRTC_MAX_SIZE (WxH | N: downscale the preview to fit BEFORE convert/encode -- see below),
 # CAM_WIDTH/HEIGHT/FORMAT (shm-raw only), CAM_FPS (shm-raw geometry; caps rate HINT on headered shm),
 # SIGNALLING_PORT, VIDEO_CAPS (e.g. "video/x-h264" to pin the codec), RUN_SIGNALLING (1=start the
 # bundled signalling server, default 1), CAM_WEBRTC_{MIN,MAX,START}_BITRATE (bit/sec; bound
@@ -91,7 +92,8 @@ ADAPT_EL=""
 if { [ "$TRANSPORT" = unixfd ] || [ "$TRANSPORT" = shm ]; } && [ "${CAM_LAUNCHER:-python}" != "gst-launch" ]; then
   # Runtime seam: the chain ENDS at the tap (note: no trailing !), and the rest of the pipeline
   # is a second, initially-unlinked chain -- the launcher links the two through the right element
-  # once the stream's first caps arrive. Statically linked, the source's pre-caps negotiation
+  # once the stream's first caps arrive (to the chain's head: fmt_scale / norm_in / fmt_next,
+  # whichever this script emitted first). Statically linked, the source's pre-caps negotiation
   # would already fail on a format the static chain can't take.
   ADAPT_EL="identity name=fmt_tap   "
 elif [ "$WANT_DEBAYER" = 1 ] && [ -n "$BAYER" ]; then
@@ -128,6 +130,43 @@ fi
 OVERLAY_EL=""
 if [ -n "$OVERLAY" ]; then
   OVERLAY_EL="textoverlay name=lat_overlay halignment=left valignment=top shaded-background=true font-desc=\"monospace 24\" ! "
+fi
+
+# Encode-side downscale (CAM_WEBRTC_MAX_SIZE): bound the geometry fed to webrtcsink -- `WxH` (a box,
+# e.g. 1280x720) or `N` (both axes, e.g. 1280 = a longest-edge cap). Aspect preserved, never upscaled,
+# even output dimensions. A `videoscale` sits right after the format seam -- BEFORE videoconvert, the
+# encoder, the normalize pump and the overlay -- so everything from there on runs at the reduced size.
+# videoconvert + a software x264enc at 5MP are what a full-res color preview burns CPU on, and both
+# scale with the pixel count; bayer2rgb (when present) is upstream and still runs at sensor
+# resolution. Preview-only: the recording and the ROS topic are untouched.
+#   python launcher: the target is planned at RUNTIME from the caps the stream actually carries
+#     (a probe on fmt_scale's sink pad pins scale_caps -- bridge_stream.py _on_scale_caps +
+#     scale_plan.py), so it works on the self-describing transports where env holds no geometry,
+#     and a frame that already fits leaves the scaler in passthrough (zero cost).
+#   gst-launch hatch: no launcher to plan, so the bound rides as caps RANGES and videoscale fixates
+#     DAR-preserving on its own (can land on an odd dimension -- debug hatch only).
+MAXSZ="$(printf %s "${CAM_WEBRTC_MAX_SIZE:-off}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+case "$MAXSZ" in 0|false|no|none|off|"") MAXSZ="" ;; esac
+SCALE_EL=""
+if [ -n "$MAXSZ" ]; then
+  case "$MAXSZ" in
+    *x*) MAXW="${MAXSZ%%x*}"; MAXH="${MAXSZ#*x}" ;;
+    *)   MAXW="$MAXSZ"; MAXH="$MAXSZ" ;;
+  esac
+  case "${MAXW}:${MAXH}" in
+    *[!0-9:]*|:*|*:) MAXW=0 ;;                 # not two plain integers -> rejected below
+  esac
+  if [ "$MAXW" -lt 2 ] || [ "$MAXH" -lt 2 ]; then
+    echo "webrtc-bridge: CAM_WEBRTC_MAX_SIZE=${CAM_WEBRTC_MAX_SIZE} is not WxH or N (>= 2); ignoring" >&2
+    MAXSZ=""
+  fi
+fi
+if [ -n "$MAXSZ" ]; then
+  if [ "${CAM_LAUNCHER:-python}" = "gst-launch" ]; then
+    SCALE_EL="videoscale add-borders=false ! video/x-raw,width=(int)[1,${MAXW}],height=(int)[1,${MAXH}],pixel-aspect-ratio=1/1 ! "
+  else
+    SCALE_EL="videoscale name=fmt_scale add-borders=false ! capsfilter name=scale_caps ! "
+  fi
 fi
 
 # Source chain (+ socket path) per transport.
@@ -208,12 +247,12 @@ if [ -n "$NORM" ]; then
   # sync=false drop=true already says "hand me samples as they come, don't pace or block on me"), so the
   # pipeline reaches PLAYING, new-sample starts firing, and the pump feeds the sink. Verified in cam-dev:
   # baseline -> state=paused, 0 frames; +async=false -> state=playing, frames flow.
-  PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=2 ! ${ADAPT_EL}appsink name=norm_in emit-signals=true max-buffers=2 drop=true sync=false async=false   appsrc name=norm_out is-live=true format=time ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=I420 ! ${OVERLAY_EL}${SINK}"
+  PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=2 ! ${ADAPT_EL}${SCALE_EL}appsink name=norm_in emit-signals=true max-buffers=2 drop=true sync=false async=false   appsrc name=norm_out is-live=true format=time ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=I420 ! ${OVERLAY_EL}${SINK}"
 else
-  PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=2 ! ${ADAPT_EL}${DEBAYER_EL}videoconvert name=fmt_next ! video/x-raw,format=I420 ! ${OVERLAY_EL}${SINK}"
+  PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=2 ! ${ADAPT_EL}${DEBAYER_EL}${SCALE_EL}videoconvert name=fmt_next ! video/x-raw,format=I420 ! ${OVERLAY_EL}${SINK}"
 fi
 
-echo "webrtc-bridge: ${TRANSPORT} ${SOCK}${BAYER:+ bayer=${BAYER}}${DEBAYER_EL:+ (debayer->color)}${ADAPT_EL:+ (format-adaptive)}${NORM:+ normalize=${NORM}}${OVERLAY:+ (latency-overlay)} -> webrtcsink (signalling :${PORT})"
+echo "webrtc-bridge: ${TRANSPORT} ${SOCK}${BAYER:+ bayer=${BAYER}}${DEBAYER_EL:+ (debayer->color)}${ADAPT_EL:+ (format-adaptive)}${NORM:+ normalize=${NORM}}${OVERLAY:+ (latency-overlay)}${MAXSZ:+ max-size=${MAXSZ}} -> webrtcsink (signalling :${PORT})"
 
 # Default launcher: a small Python process (tools/bridge_stream.py) that OWNS this pipeline and, once it
 # is streaming, advertises the stream over Zenoh for fleet discovery (docs/DISCOVERY.md). It shares this
@@ -222,6 +261,7 @@ echo "webrtc-bridge: ${TRANSPORT} ${SOCK}${BAYER:+ bayer=${BAYER}}${DEBAYER_EL:+
 # profile/level pinning (webrtcsink's fixed defaults) -- debugging / minimal only.
 if [ "${CAM_LAUNCHER:-python}" = "gst-launch" ]; then
   echo "webrtc-bridge: launcher=gst-launch (discovery + H.264 profile/level off)"
+  set -f                          # no globbing: the caps-range size bound carries [ ]
   exec gst-launch-1.0 -e ${PIPELINE}
 fi
 export CAM_PIPELINE="$PIPELINE"

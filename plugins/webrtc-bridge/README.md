@@ -106,6 +106,7 @@ Or via the per-sensor stack: `cam-up <sensor>.yaml up -d webrtc-bridge` (cam-up 
 | `CAM_WEBRTC_DEBAYER` | `auto` | `false` to preview the raw mosaic instead of debayering (self-describing paths: a zero-copy GRAY8 relabel) |
 | `CAM_WEBRTC_NORMALIZE` | `off` | 16-bit mono preview stretch: `auto` (1–99% percentile window, EMA-smoothed) or `lo:hi` (e.g. `5:99.5`). Stretches GRAY16 → GRAY8 **before** the 8-bit convert, so an LSB-aligned radiometric camera (thermal Y16) previews with full contrast instead of near-black. Preview-only — the recording and ROS topic keep the raw 16-bit. Needs the python launcher (the default) |
 | `CAM_WEBRTC_LATENCY_OVERLAY` | `off` | burn the live **capture→encode latency** into the video (`textoverlay`, top-left, e.g. `lat 87 ms (ptp)`) — any viewer sees it with zero client support; `lat --` where no capture stamp survives (shm-raw). Needs the python launcher |
+| `CAM_WEBRTC_MAX_SIZE` | _(off)_ | **encode-side downscale**: bound the streamed geometry to a box `WxH` (e.g. `1280x720`) or `N` on both axes (e.g. `1280`, a longest-edge cap). Aspect preserved, even dimensions, never upscaled. A `videoscale` right after the format seam, so `videoconvert`, the encoder and the overlay/normalize passes all run at the reduced size — the CPU lever for a 5MP color preview. Planned at runtime from the stream's own caps (a frame that already fits leaves the scaler in passthrough); the auto H.264 level and the discovery descriptor follow the streamed size. Preview-only — recording/ROS keep full resolution. The `gst-launch` hatch bounds via caps ranges instead (may land on an odd dimension) |
 | `CAM_WIDTH` / `CAM_HEIGHT` | `512` | **shm-raw only** — must match the camera geometry |
 | `CAM_FORMAT` | `GRAY8` | **shm-raw only** — mono raw format when not debayering |
 | `CAM_FPS` | `25` | **shm-raw** geometry; on headered shm a caps rate **hint** (the header carries no rate; feeds the H.264 level derivation) |
@@ -167,7 +168,7 @@ On the plugin-endpoint transports every buffer carries the **absolute capture ti
 - **`lat[cap->rx]`** — capture → bridge ingress (core pipeline + transport hop).
 - **`lat[cap->enc]`** — capture → `webrtcsink` input (adds the bridge's queue/debayer/convert), so
   `enc − rx` is the bridge's own processing residency — the number to watch when A/B-ing
-  `CAM_WEBRTC_DEBAYER`, `videoscale`, or NVENC-vs-x264.
+  `CAM_WEBRTC_DEBAYER`, `CAM_WEBRTC_MAX_SIZE`, or NVENC-vs-x264.
 
 Both appear as per-interval p50/p95 in the status heartbeat, e.g.
 `status: ... lat[cap->rx]=p50 6/p95 11ms(n=248) lat[cap->enc]=p50 21/p95 34ms(n=248) ts_src=ptp_chunk`,
@@ -192,9 +193,10 @@ the viewer (`do-clock-signalling` + ntp-64) is the future step below.
 Runs the full loopback per transport: core fake camera → transport → this bridge (`webrtcsink`) →
 [`webrtc_consumer.py`](tools/webrtc_consumer.py) (`webrtcsrc` → decode → counts frames) — headered
 shm (self-describing, no geometry env; asserts the latency heartbeat + exercises the burned-in
-overlay), headered shm + Bayer relabel, legacy shm-raw (+ the two H.264 profile/level scenarios),
-and unixfd on a gst ≥ 1.24 core. Proves the whole egress path without a browser. PASS = each
-scenario decoded ≥30 frames.
+overlay), headered shm + Bayer relabel, legacy shm-raw (+ the two H.264 profile/level scenarios and
+the `CAM_WEBRTC_MAX_SIZE` downscale, asserted off the auto-level line — the encoder must negotiate the
+scaled geometry), and unixfd on a gst ≥ 1.24 core (+ the downscale planned behind the runtime seam).
+Proves the whole egress path without a browser. PASS = each scenario decoded ≥30 frames.
 
 Discovery has its own test (needs a Linux host for host networking + a Zenoh router):
 
@@ -251,7 +253,12 @@ Brings up a `rmw_zenohd` router + core + bridge, and a Zenoh probe
   `CAM_WEBRTC_CONGESTION=disabled` + `CAM_WEBRTC_START_BITRATE=<bps>` as an honest fixed rate.)
 - **5MP color is CPU-heavy.** `bayer2rgb` + `videoconvert` + (software) encode at 2448×2048 is a load;
   the `leaky=downstream` queue drops to the newest frame under pressure (correct for a live preview).
-  Add a `videoscale` before the encoder, or force NVENC (above), for a lighter stream.
+  The lever is `CAM_WEBRTC_MAX_SIZE` (e.g. `1280` → 1280×1070): a `videoscale` right after the format
+  seam, so `videoconvert`, the encoder and the overlay/normalize passes run on ~¼ of the pixels — the
+  encoder cost scales with pixel count, and on software `x264enc` it is the dominant term.
+  `bayer2rgb` still runs at sensor resolution upstream of the scaler (a Bayer-aware 2×2 decimation
+  would cut that too — not built). Forcing NVENC (above) is the other half; both compose. The auto
+  H.264 level tracks the streamed size. Watch `lat[cap->enc]` in the heartbeat when A/B-ing.
 - **Build on-device:** gst-plugins-rs builds against the Jetson's GStreamer (≥ the 1.20 floor); arm64
   builds are RAM-bound — the Dockerfile already uses LTO-off + limited jobs.
 
