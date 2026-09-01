@@ -21,7 +21,7 @@ jobs:
   unit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Everything from apt against the system python3, so there is no PEP-668/venv dance and gi is
       # importable. python3-gi matters: without it test_recorder.py self-SKIPS, which is how a
       # missing >8-bit depth guard on the HW encoder could sit in main unnoticed. Only the gi
@@ -32,11 +32,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             python3-pytest python3-yaml python3-numpy python3-gi gir1.2-gstreamer-1.0
-      # plugins/webrtc-bridge/tools is in scope deliberately: test_h264_level.py and
-      # test_thermal_preview.py live there and were referenced by no script, doc or workflow.
+      # plugins/webrtc-bridge/tools is in scope deliberately: its test_*.py suites (H.264 level,
+      # thermal preview, format adapter, header transport, ...) ran in no script, doc or workflow.
       #
-      # A SKIP has to fail this job. Two suites self-skip when `gi` won't import (test_recorder,
-      # test_pipeline_pts), which is the correct behaviour on a bare dev laptop and exactly the wrong
+      # A SKIP has to fail this job. Some suites self-skip when `gi` won't import (test_recorder;
+      # the PTS/reconnect suites), which is the correct behaviour on a bare dev laptop and exactly the wrong
       # behaviour here: if a runner-image change ever breaks the bindings, those suites would quietly
       # stop running and the job would go green in precisely the way it exists to prevent. Same
       # "measured zero vs unmeasured" trap the service itself had. `-p no:randomly` is not needed;
