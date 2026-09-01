@@ -130,7 +130,7 @@ def encode(mode_raw, w, h, fps, enc_name, gop_s, bframes, preset, maxperf, base)
     rec_enc = ENCODERS[enc_name][0]
     cfg = SimpleNamespace(encoder=rec_enc, segment_seconds=100000, keyframe_interval_s=gop_s,
                           bframes=bframes, nvenc_preset=preset, nvenc_maxperf=maxperf)
-    frag = recorder.build_recorder_description(cfg, 8, base, fps)
+    frag, _enc = recorder.build_recorder_description(cfg, 8, base, fps)
     desc = (f'filesrc location="{mode_raw}" ! rawvideoparse width={w} height={h} format=gray8 '
             f'framerate={max(1, int(round(fps)))}/1 ! {frag}')
     # argv list, NOT shell=True: the NVMM caps contain "(memory:NVMM)" and a shell would choke on the

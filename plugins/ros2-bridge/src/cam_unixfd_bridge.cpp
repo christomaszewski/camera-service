@@ -16,9 +16,15 @@ namespace cam_ros2_bridge {
 namespace {
 
 // Map negotiated GStreamer caps -> (sensor_msgs encoding, big-endian, width, height, yuv-convert).
-// Returns false on an unrecognized format. Covers mono GRAY8/16, Bayer rggb/grbg/gbrg/bggr, RGB/BGR,
-// and the planar/semi-planar YUV the decode branch delivers for color (I420/NV12/YUY2 -> convert to rgb8;
-// `yuv` set non-NONE). The core pushes tight (width-stride) buffers, so the converter reads map.data as-is.
+// Returns false on an unrecognized format.
+//
+// This table MUST cover every raw format the core can put on the unixfd caps -- i.e. everything in
+// cam_driver/formats.py `_GST_RAW`, which is the same set cam_header_bridge.cpp's pixfmt_info carries
+// as wire codes 1-15. It previously stopped at the 8 formats that existed when it was written, so on
+// JP7 a UYVY/YV12/NV24/RGBA/BGRA/RGBx/BGRx source had EVERY frame dropped here behind a 1 Hz warning
+// -- no ERROR, so the bus watcher never exited and the restart policy never fired -- while the identical
+// config worked on JP6 through the header transport. tests/test_transport.py asserts the two tables
+// stay in step. The core pushes tight (width-stride) buffers, so the converter reads map.data as-is.
 bool caps_to_meta(GstCaps* caps, std::string& enc, bool& big_endian, int& w, int& h, Yuv& yuv) {
   yuv = Yuv::NONE;
   if (!caps || gst_caps_get_size(caps) == 0) return false;
@@ -26,8 +32,12 @@ bool caps_to_meta(GstCaps* caps, std::string& enc, bool& big_endian, int& w, int
   const char* name = gst_structure_get_name(s);
   const char* fmt = gst_structure_get_string(s, "format");
   if (!name || !fmt) return false;
-  gst_structure_get_int(s, "width", &w);
-  gst_structure_get_int(s, "height", &h);
+  // Geometry drives publish()'s stride/size arithmetic -- an absent or nonsense field would sail
+  // through its `size < step * height` check as 0 and publish an empty image.
+  if (!gst_structure_get_int(s, "width", &w) || !gst_structure_get_int(s, "height", &h) ||
+      w <= 0 || h <= 0) {
+    return false;
+  }
   big_endian = false;
   const std::string n = name, f = fmt;
   if (n == "video/x-bayer") {
@@ -47,6 +57,13 @@ bool caps_to_meta(GstCaps* caps, std::string& enc, bool& big_endian, int& w, int
     if (f == "I420") { enc = "rgb8"; yuv = Yuv::I420; return true; }
     if (f == "NV12") { enc = "rgb8"; yuv = Yuv::NV12; return true; }
     if (f == "YUY2") { enc = "rgb8"; yuv = Yuv::YUY2; return true; }
+    if (f == "YV12") { enc = "rgb8"; yuv = Yuv::YV12; return true; }   // I420 with V/U swapped
+    if (f == "UYVY") { enc = "rgb8"; yuv = Yuv::UYVY; return true; }   // 4:2:2 packed
+    if (f == "NV24") { enc = "rgb8"; yuv = Yuv::NV24; return true; }   // 4:4:4 interleaved UV
+    // RGBx/BGRx: the 4th byte is undefined padding, published as alpha -- geometry and stride are
+    // what matter, and a consumer that cares about alpha shouldn't be fed an x-format.
+    if (f == "RGBA" || f == "RGBx") { enc = "rgba8"; return true; }
+    if (f == "BGRA" || f == "BGRx") { enc = "bgra8"; return true; }
     return false;
   }
   return false;
