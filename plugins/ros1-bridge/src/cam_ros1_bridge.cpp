@@ -158,13 +158,26 @@ class CamRos1Bridge {
   }
 
   ~CamRos1Bridge() {
-    stopping_ = true;   // the watcher polls with a finite timeout, so join returns within one tick
-    if (bus_thread_.joinable()) bus_thread_.join();
-    if (bus_) gst_object_unref(bus_);
-    if (pipeline_) {
-      gst_element_set_state(pipeline_, GST_STATE_NULL);
-      gst_object_unref(pipeline_);
+    // Flag first: the NULL transition below can race a producer going away in the same
+    // `compose down`, and shmsrc legitimately posts ERROR/EOS then -- with the flag still false the
+    // watcher reads that as a producer restart and `_exit(EXIT_FAILURE)`s, turning a clean stop into
+    // an intermittent `Exited (1)`.
+    stopping_ = true;
+    // Then stop the dataflow, before the members go. on_sample() -> publish() reads frame_id_,
+    // encoding_ and pub_, which are destroyed the instant this body returns, so a sample still in
+    // flight on the GStreamer streaming thread is a use-after-free. Disconnect, then NULL (which
+    // joins the streaming threads, so any in-flight callback has returned by the time it comes
+    // back), then the bus join last -- previously that join ran FIRST and widened the window it was
+    // standing in. Mirrors CamBridgeBase::stop_pipeline in the ros2 bridge.
+    if (sink_ && sample_handler_) {
+      g_signal_handler_disconnect(sink_, sample_handler_);
+      sample_handler_ = 0;
     }
+    if (pipeline_) gst_element_set_state(pipeline_, GST_STATE_NULL);
+    if (bus_thread_.joinable()) bus_thread_.join();
+    if (sink_) gst_object_unref(sink_);
+    if (bus_) gst_object_unref(bus_);
+    if (pipeline_) gst_object_unref(pipeline_);
   }
 
  private:
@@ -180,9 +193,12 @@ class CamRos1Bridge {
       if (err) g_error_free(err);
       throw std::runtime_error("failed to build pipeline: " + m);
     }
-    GstElement* sink = gst_bin_get_by_name(GST_BIN(pipeline_), "sink");
-    g_signal_connect(sink, "new-sample", G_CALLBACK(&CamRos1Bridge::on_sample_static), this);
-    gst_object_unref(sink);
+    // Keep the appsink ref (released in the destructor): teardown needs the element and the handler
+    // id to sever the callback before the members publish() reads are destroyed.
+    sink_ = gst_bin_get_by_name(GST_BIN(pipeline_), "sink");
+    if (!sink_) throw std::runtime_error("pipeline has no `appsink name=sink`");
+    sample_handler_ = g_signal_connect(sink_, "new-sample",
+                                       G_CALLBACK(&CamRos1Bridge::on_sample_static), this);
     if (gst_element_set_state(pipeline_, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
       throw std::runtime_error("pipeline failed to reach PLAYING (is the core up and serving " +
                                socket_path_ + "?)");
@@ -295,6 +311,8 @@ class CamRos1Bridge {
 
   std::string socket_path_, topic_, frame_id_, encoding_;
   GstElement* pipeline_ = nullptr;
+  GstElement* sink_ = nullptr;         // owned ref on the appsink; held so teardown can disconnect
+  gulong sample_handler_ = 0;          // the new-sample connection, severed before teardown
   GstBus* bus_ = nullptr;              // watched for ERROR/EOS (producer restart) by bus_thread_
   std::thread bus_thread_;
   std::atomic<bool> stopping_{false};  // set by the destructor so the bus watcher exits quietly

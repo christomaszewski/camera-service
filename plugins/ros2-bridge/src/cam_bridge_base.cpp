@@ -105,14 +105,36 @@ CamBridgeBase::CamBridgeBase(const std::string& node_name, const rclcpp::NodeOpt
   pub_ = image_transport::create_publisher(this, topic_, rclcpp::SensorDataQoS().get_rmw_qos_profile());
 }
 
-CamBridgeBase::~CamBridgeBase() {
-  stopping_ = true;   // the watcher polls with a finite timeout, so join returns within one tick
-  if (bus_thread_.joinable()) bus_thread_.join();
-  if (bus_) gst_object_unref(bus_);
-  if (pipeline_) {
-    gst_element_set_state(pipeline_, GST_STATE_NULL);
-    gst_object_unref(pipeline_);
+void CamBridgeBase::stop_pipeline() {
+  if (stopped_) return;
+  stopped_ = true;
+  // Raise the flag FIRST. It is free, and it makes the bus watcher ignore everything that follows:
+  // the NULL transition below tears the graph down while the producer may be going away in the same
+  // `compose down`, so shmsrc/unixfdsrc legitimately posts ERROR/EOS mid-teardown. With the flag
+  // still false the watcher treats that as a producer restart and `_exit(EXIT_FAILURE)`s -- a CLEAN
+  // stop reported as `Exited (1)`, intermittently, which is a ghost to debug.
+  stopping_ = true;
+  // Then order the rest by what it protects. Disconnect, so no NEW sample can enter on_new_sample().
+  // Then NULL, which joins the streaming threads -- so by the time set_state returns, any IN-FLIGHT
+  // callback has also returned and no further virtual dispatch through this object is possible. The
+  // bus JOIN goes last because it is the slow part (up to one 500 ms poll tick); only the join has
+  // to be last, which is why the flag is hoisted above it.
+  if (sink_ && sample_handler_) {
+    g_signal_handler_disconnect(sink_, sample_handler_);
+    sample_handler_ = 0;
   }
+  if (pipeline_) gst_element_set_state(pipeline_, GST_STATE_NULL);
+  if (bus_thread_.joinable()) bus_thread_.join();
+}
+
+CamBridgeBase::~CamBridgeBase() {
+  // Subclass destructors call stop_pipeline() first (see the header); this is only the no-op tail
+  // for that, plus the ref cleanup. It CANNOT substitute for the subclass call -- reaching here
+  // with the dataflow still live means the derived subobject is already gone.
+  stop_pipeline();
+  if (sink_) gst_object_unref(sink_);
+  if (bus_) gst_object_unref(bus_);
+  if (pipeline_) gst_object_unref(pipeline_);
 }
 
 void CamBridgeBase::start_pipeline() {
@@ -125,10 +147,12 @@ void CamBridgeBase::start_pipeline() {
     if (err) g_error_free(err);
     throw std::runtime_error("failed to build pipeline: " + m);
   }
-  GstElement* sink = gst_bin_get_by_name(GST_BIN(pipeline_), "sink");
-  if (!sink) throw std::runtime_error("pipeline has no `appsink name=sink`");
-  g_signal_connect(sink, "new-sample", G_CALLBACK(&CamBridgeBase::on_new_sample_static), this);
-  gst_object_unref(sink);
+  // Keep the appsink ref (released in the destructor): stop_pipeline() needs the element and the
+  // handler id to sever the callback before this object starts coming apart.
+  sink_ = gst_bin_get_by_name(GST_BIN(pipeline_), "sink");
+  if (!sink_) throw std::runtime_error("pipeline has no `appsink name=sink`");
+  sample_handler_ = g_signal_connect(sink_, "new-sample",
+                                     G_CALLBACK(&CamBridgeBase::on_new_sample_static), this);
   if (gst_element_set_state(pipeline_, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
     throw std::runtime_error("pipeline failed to reach PLAYING (is the core up and serving " +
                              socket_path_ + "?)");
