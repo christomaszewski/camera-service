@@ -185,7 +185,13 @@ Both pace to the data's own timestamps (`speed`, `loop`, `retime: wall` knobs), 
 cleanly at end-of-data (the recording finalizes; `loop: true` makes a long-lived fake
 camera for plugin development), and fail legibly — the pcap parser can even tell you the
 camera's real format/geometry when the config mismatches, if the capture includes the
-device enumeration.
+device enumeration. A playback source feeds the recording through *blocking* appsrcs, so
+`speed: 0` (as fast as the pipeline drains) is lossless: the reader waits for the encoder
+instead of dropping. Two caveats: a run containing a recorded gap longer than 60 s replays
+with that gap collapsed in the re-recorded `pts_ns` (the PTS guard treats a larger forward
+step as a clock-source change; the sidecar keeps the true stamps), and under `cam-up`/compose
+a finished playback exits 0 but `restart: unless-stopped` starts it again — playback is a
+dev-container / `python3 main.py` tool for now.
 
 ### Dev container (run the producer without a Jetson)
 

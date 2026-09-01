@@ -245,7 +245,20 @@ class ReplaySource(GstPipelineSource):
         super().stop()
 
     # ---- EOF / loop --------------------------------------------------------
+    def _check_row_count(self) -> None:
+        """Frame N of the recording is re-stamped from CSV row N (ordinal, not keyed), which holds
+        only while every frame the sidecar attests is actually delivered. Fewer frames than rows
+        means a frame went missing somewhere in the decode path -- and every row after it was
+        attached to the wrong frame. Say so, loudly, rather than let a silently mis-stamped
+        reprocess look complete. (More frames than rows is handled in _new_stamp.)"""
+        rows = len(self._csv_stamps)
+        if 0 < self._idx < rows:
+            log.warning("replay: %s has %d rows but only %d frames were delivered -- rows after the "
+                        "first missing frame were attached to the wrong frames; the re-recorded "
+                        "stamps are NOT trustworthy for this run", self._run.csv_path, rows, self._idx)
+
     def _on_eos(self, _bus, _msg) -> None:
+        self._check_row_count()
         if not self.cfg.loop:
             log.info("replay: end of run (%d frames delivered)", self._idx)
             self._finished = True

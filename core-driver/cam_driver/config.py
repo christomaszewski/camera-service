@@ -318,6 +318,15 @@ def parse_config(raw: dict) -> AppConfig:
     rtsp = _build(RtspConfig, raw.get("rtsp"))
     replay = _build(ReplayConfig, raw.get("replay"))
     pcap = _build(PcapConfig, raw.get("pcap"))
+    # Playback knobs that would otherwise fail late or silently: a negative speed is meaningless
+    # (0 = as fast as the pipeline drains), and an unset pcap path surfaced as a bare
+    # FileNotFoundError('') deep in the parser instead of naming the knob.
+    for block, sc in (("replay", replay), ("pcap", pcap)):
+        if sc.speed < 0:
+            raise ValueError(f"{block}.speed: must be >= 0 (0 = as fast as the pipeline drains), "
+                             f"got {sc.speed!r}")
+    if camera.type == "pcap" and not pcap.path:
+        raise ValueError("pcap.path: required for camera.type: pcap (the .pcap/.pcapng file to replay)")
 
     # Overlay the GENERAL camera settings onto each source's effective config -- the source code reads
     # frame_rate/reconnect from its own block, but the YAML sets them ONCE under `camera:`. frame_rate

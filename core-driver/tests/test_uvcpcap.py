@@ -165,6 +165,19 @@ def test_bulk_zlp_terminated_payloads():
     assert got == expected
 
 
+def test_mjpeg_frame_with_a_missed_iso_packet_is_dropped_not_merged():
+    # A missed/errored iso packet (nonzero descriptor status) is lost DATA. A raw frame with a hole
+    # is caught by the size check, but an MJPEG one still starts with SOI and ends with EOI -- so
+    # the extractor must treat the packet like a snaplen cut and skip the frame, or a JPEG with a
+    # hole gets stream-copied into the recording as a valid frame.
+    blob, expected = build_mjpeg_capture(errored_frame=1)
+    p = _path(blob, "mjpeg-lost.pcap")
+    ex = UvcFrameExtractor(p, bus=1, dev=6, ep=2, mjpeg=True)
+    got = list(ex)
+    assert got == expected and len(got) == 4          # frame 1 gone, its neighbours byte-exact
+    assert ex.stats.truncated >= 1                    # the lost packet is counted with the cuts
+
+
 def test_wholly_lost_frame_does_not_swallow_the_next():
     # usbmon drops EVERY urb of frame 5: frame 6 repeats frame 4's FID and must still emit
     p, expected = _y16("y16-omit.pcap", omit_frame=5, err_frame=None, truncated_frame=None,

@@ -41,6 +41,30 @@ docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
   [ -s /tmp/a.raw ] || { echo "FAIL: original decode produced nothing"; exit 1; }
   cmp /tmp/a.raw /tmp/b.raw || { echo "FAIL: replayed frames are not bit-identical"; exit 1; }
   echo "frames bit-identical ($(stat -c %s /tmp/a.raw) bytes)"
+
+  echo "=== 5. loop: cycles must stay strictly monotonic in the re-recorded pts_ns ==="
+  # Frame ids repeat every cycle (it IS the same frame again), and the pipeline PTS memo is keyed
+  # on the stamp too -- so cycle N+1 must never replay cycle N pts into the muxer. speed: 0 (as
+  # fast as the pipeline drains) rides the blocking recording appsrcs: no frame may be dropped.
+  rm -f /data/recordings/rerec-*
+  timeout 60 python3 main.py -c config/replay-loop-test.yaml >/tmp/loop.log 2>&1 &
+  LOOP=$!; sleep 6; kill -INT "$LOOP"
+  wait "$LOOP" || { echo "FAIL: looped replay exited non-zero"; tail -20 /tmp/loop.log; exit 1; }
+  grep -q "replay: loop -> cycle" /tmp/loop.log || { echo "FAIL: replay never looped"; exit 1; }
+  LOOP_CSV=$(ls /data/recordings/rerec-*.csv) || { echo "FAIL: no looped CSV"; exit 1; }
+  python3 - "$LOOP_CSV" "$ROWS" <<EOF
+import csv, sys
+rows = list(csv.DictReader(open(sys.argv[1])))
+orig = int(sys.argv[2])
+pts = [int(r["pts_ns"]) for r in rows]
+assert len(rows) > orig, f"only {len(rows)} rows: less than one full cycle ({orig})"
+bad = [i for i in range(1, len(pts)) if pts[i] <= pts[i - 1]]
+assert not bad, f"pts_ns not strictly increasing at rows {bad[:5]}"
+fids = [int(r["frame_id"]) for r in rows]
+if len(fids) >= 2 * orig:
+    assert fids[:orig] == fids[orig:2 * orig], "frame ids should repeat per cycle"
+print(f"loop ok: {len(rows)} rows ({len(rows) / orig:.1f} cycles), pts_ns strictly increasing, no drops")
+EOF
 '
 
 echo

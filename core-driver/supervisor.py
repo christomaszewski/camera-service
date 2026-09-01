@@ -89,6 +89,11 @@ class Supervisor:
         self.services: list[Service] = []
         self._stopping = False
         self._exit_rc = 0        # the sensor's exit status; a dead core propagates its own
+        # A playback source (replay / pcap) is FINITE: the core exiting 0 on its own means the data
+        # ran out and the recording finalized -- the one case where a clean core exit is the sensor's
+        # success, not its death. (compose `restart: unless-stopped` re-runs it regardless of the
+        # status; playback is a dev-container / main.py tool for now -- see the README.)
+        self._playback = self.cfg.camera.type in ("replay", "pcap")
 
     def _build_services(self) -> None:
         self.services.append(Service(
@@ -154,6 +159,11 @@ class Supervisor:
                     continue
                 rc = s.proc.returncode
                 if s.critical:
+                    if rc == 0 and self._playback:
+                        log.info("playback finished (core exited 0); tearing down sensor (exiting 0)")
+                        self._exit_rc = 0
+                        self._teardown()
+                        return
                     # Propagate the core's status instead of reporting a clean exit for a hard
                     # failure: rc=2 is a config / pipeline-build error and rc=1 a bus ERROR, and with
                     # `restart: unless-stopped` a swallowed 2 turned a misconfiguration into an

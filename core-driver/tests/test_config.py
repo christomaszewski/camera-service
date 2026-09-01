@@ -306,6 +306,26 @@ def test_pcap_numeric_typo_is_legible():
         assert "PcapConfig.width" in str(e)
 
 
+def test_playback_speed_must_not_be_negative_but_zero_is_the_drain_mode():
+    for block in ("replay", "pcap"):
+        try:
+            parse_config({block: {"speed": -1}})
+            assert False, "expected ValueError"
+        except ValueError as e:
+            assert f"{block}.speed" in str(e)
+    assert parse_config({"replay": {"speed": 0}}).replay.speed == 0     # as fast as the pipeline drains
+
+
+def test_pcap_source_needs_a_path():
+    # an empty path used to surface as FileNotFoundError('') deep in the parser; name the knob instead
+    try:
+        parse_config({"camera": {"type": "pcap"}})
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "pcap.path" in str(e)
+    assert parse_config({"pcap": {}}).pcap.path == ""   # only required when the source IS pcap
+
+
 def test_general_frame_rate_overlays_playback_blocks():
     c = parse_config({"camera": {"frame_rate": 42.0}})
     assert c.replay.frame_rate == 42.0 and c.pcap.frame_rate == 42.0

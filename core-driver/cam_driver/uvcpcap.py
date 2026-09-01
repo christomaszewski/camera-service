@@ -155,7 +155,11 @@ class _UsbmonParser:
         return le   # neither plausible: let downstream filters discard it
 
     def iso_payloads(self, urb: _Urb) -> Iterator[Tuple[bytes, bool]]:
-        """(payload_bytes, truncated) per delivered iso packet of a completion URB."""
+        """(payload_bytes, lost) per iso packet of a completion URB. `lost` = this packet's bytes are
+        not in the capture -- cut by len_cap/snaplen, OR an errored/missed packet (nonzero status):
+        either way the frame being assembled has a hole and must be skipped. (A raw frame with a hole
+        is also caught by the size check; an MJPEG one is not -- a JPEG with a hole still starts with
+        SOI and ends with EOI, so it would be stream-copied as valid.)"""
         endian = self._endian or "<"
         data = urb.data()
         for i in range(urb.ndesc):
@@ -163,8 +167,11 @@ class _UsbmonParser:
             if off + 16 > len(urb.record):
                 return
             iso_status, iso_off, iso_len, _pad = _ISO_DESC[endian].unpack_from(urb.record, off)
-            if iso_status != 0 or iso_len == 0:
-                continue   # missed/errored or empty packet: no payload, no state impact
+            if iso_status != 0:
+                yield b"", True    # missed/errored: its bytes are gone -> poison the current frame
+                continue
+            if iso_len == 0:
+                continue           # empty packet: nothing was sent, so nothing is missing
             if iso_off + iso_len > len(data):
                 yield b"", True    # cut by len_cap/snaplen: poison the current frame
             else:

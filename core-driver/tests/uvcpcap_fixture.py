@@ -146,13 +146,18 @@ def uvc_payload(data: bytes, *, fid: int, eof: bool = False, err: bool = False,
 
 def iso_urb(payloads: List[bytes], *, urb_id: int, ep: int, dev: int, bus: int = 1,
             slot_len: int, linktype: int = 220, big_endian: bool = False,
-            truncate_at: Optional[int] = None) -> bytes:
+            truncate_at: Optional[int] = None, errored: Optional[int] = None) -> bytes:
     """A 'C' ISO URB carrying `payloads` at slot offsets, holes filled with 0xEE.
-    truncate_at cuts the RECORD (simulating snaplen) while len_cap still claims it all."""
+    truncate_at cuts the RECORD (simulating snaplen) while len_cap still claims it all.
+    errored marks payload #errored's descriptor as missed (status -EXDEV, length 0): the bytes
+    never reached the host, exactly what usbmon records for an iso error."""
     region = bytearray(b"\xee" * (slot_len * len(payloads)))
     descs = []
     for i, p in enumerate(payloads):
         assert len(p) <= slot_len
+        if i == errored:
+            descs.append((-18, i * slot_len, 0))   # -EXDEV: packet missed, no data
+            continue
         region[i * slot_len:i * slot_len + len(p)] = p
         descs.append((0, i * slot_len, len(p)))
     rec = usbmon_record(urb_id=urb_id, rtype="C", xfer=_ISO, ep=0x80 | ep, dev=dev, bus=bus,
@@ -331,8 +336,12 @@ def build_y16_capture(*, frames: int = 6, width: int = 64, height: int = 8,
 def build_mjpeg_capture(*, frames: int = 5, fmt: str = "pcap", bus: int = 1, dev: int = 6,
                         ep: int = 2, base_ns: int = 1_700_000_000_000_000_000,
                         frame_period_ns: int = 33_333_000, payload_data: int = 128,
+                        errored_frame: Optional[int] = None,
                         ) -> Tuple[bytes, List[Tuple[int, bytes]]]:
-    """ISO MJPEG capture: variable-size SOI..EOI blobs, one with trailing 0x00 padding."""
+    """ISO MJPEG capture: variable-size SOI..EOI blobs, one with trailing 0x00 padding.
+    errored_frame loses one MID-frame iso packet (status -EXDEV) of that frame: the JPEG still
+    begins with SOI and ends with EOI, so only the packet status reveals the hole. It is left out
+    of `expected` -- the extractor must drop it, not emit a JPEG with a hole."""
     cap = _Capture(fmt)
     expected: List[Tuple[int, bytes]] = []
     urb_id = 0xFFFF990000000000
@@ -348,11 +357,16 @@ def build_mjpeg_capture(*, frames: int = 5, fmt: str = "pcap", bus: int = 1, dev
         for j in range(0, len(payloads), 4):
             ts = cap.quant(base_ns + k * frame_period_ns + (j // 4) * 1_000_000)
             first_ts = first_ts if first_ts is not None else ts
-            cap.add(ts, iso_urb(payloads[j:j + 4], urb_id=urb_id, ep=ep, dev=dev, bus=bus,
+            group = payloads[j:j + 4]
+            # lose a mid-frame packet of the errored frame: the 2nd of its first urb, which is
+            # never the frame's first or last payload (frames span several packets)
+            lost = 1 if (k == errored_frame and j == 0 and len(group) > 2) else None
+            cap.add(ts, iso_urb(group, urb_id=urb_id, ep=ep, dev=dev, bus=bus,
                                 slot_len=slot_len, linktype=cap.linktype,
-                                big_endian=cap.big_endian))
+                                big_endian=cap.big_endian, errored=lost))
             urb_id += 1
-        expected.append((first_ts, jpeg))
+        if k != errored_frame:
+            expected.append((first_ts, jpeg))
         fid ^= 1
     return cap.getvalue(), expected
 
