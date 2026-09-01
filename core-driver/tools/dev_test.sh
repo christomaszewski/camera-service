@@ -21,11 +21,21 @@ docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
   python3 tests/test_formats.py
   python3 tests/test_recorder.py
 
-  echo "=== fake-camera producer + shm probe ==="
+  echo "=== fake-camera producer + shm probe (starting over a STALE socket) ==="
+  # Simulate what a SIGKILL/OOM/power-loss leaves in the persistent socket volume: a bound AF_UNIX
+  # file with no listener. shmsink does not fail on that -- shmpipe answers EADDRINUSE by binding
+  # <path>.0 and reporting success -- so without the unlink guard the core comes up "healthy" while
+  # every consumer dials a dead path. The probe below connects to the CONFIGURED path, so it is the
+  # assertion: it only reads frames if the guard ran.
+  touch /tmp/cam/frames   # bind() returns EADDRINUSE for ANY existing path, so this is faithful
   python3 main.py -c config/fake-camera.yaml >/tmp/core.log 2>&1 &
   CORE=$!
   sleep 5
   python3 tools/shm_probe.py --socket /tmp/cam/frames --count 5 --timeout 5
+  [ -e /tmp/cam/frames.0 ] && { echo "FAIL: shmsink bound a suffixed path -- the stale-socket guard did not run"; exit 1; }
+  grep -q "removing a stale plugin transport socket" /tmp/core.log \
+    || { echo "FAIL: the stale socket was not cleared (no guard log line)"; exit 1; }
+  echo "stale-socket guard engaged (bound the configured path, not <path>.0)"
   kill -INT "$CORE"; wait "$CORE"; echo "core exit: $?"
 
   echo "=== encoder fallback (auto -> hw-hevc-lossless, no NVENC here -> ffv1) ==="
