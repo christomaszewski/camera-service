@@ -134,12 +134,19 @@ class CapturePipeline:
         Safe here because each sensor owns its own socket volume and the core is the sole writer of
         these paths. Do not copy this to a path something else might legitimately be serving."""
         try:
-            if os.path.exists(path):
+            # lexists, not exists: a DANGLING symlink must go too -- bind() still answers EADDRINUSE
+            # through it, while exists() follows the link and reports False.
+            if os.path.lexists(path):
                 log.warning("removing a stale %s socket at %s (left by an unclean exit)", what, path)
                 os.unlink(path)
         except OSError as e:
-            log.warning("could not remove stale %s socket %s: %s -- a consumer may end up dialling "
-                        "a dead path", what, path, e)
+            # Not a warning. If the corpse stays (a directory at the path, a permission problem),
+            # shmsink silently binds <path>.0 and every consumer dials a dead path -- the exact
+            # failure this guard exists to prevent, back with a log line nobody reads. Refuse to
+            # start instead; the config is wrong.
+            log.error("cannot clear the %s socket path %s: %s -- refusing to start (shmsink would "
+                      "silently bind %s.0 and every consumer would dial a dead path)", what, path, e, path)
+            raise
 
     def build(self) -> str:
         Gst.init(None)
