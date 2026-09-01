@@ -60,7 +60,20 @@ assert s["enc"] == exp, "expected encoding {!r}, got {!r}".format(exp, s["enc"])
 print("PASS")
 PY
 docker cp "$VERIFY" cam_bridge:/tmp/verify.py >/dev/null; rm -f "$VERIFY"
+# The verifier's status has to become the SCRIPT's status, and two things were swallowing it:
+#   1. this docker exec was the last command, so the script exited with the status of the PIPELINE,
+#      which is grep's, not python3's;
+#   2. `set -o pipefail` is not inherited -- this is a fresh bash inside the container.
+# Together they made the test unfailable in the nastiest way: a failing assert prints a traceback
+# that ECHOES THE SOURCE LINE, which contains the word `assert`, so the grep matched and returned 0.
+# A bridge delivering zero messages, or the wrong encoding, reported PASS.
 docker exec -e EXPECT_ENC="${CAM_TEST_ENCODING:-mono8}" cam_bridge bash -c '
+set -o pipefail
 source "/opt/ros/${ROS_DISTRO}/setup.bash"; source /ws/install/setup.bash
 export ROS_DOMAIN_ID=0 RMW_IMPLEMENTATION=rmw_zenoh_cpp
 timeout 12 python3 /tmp/verify.py 2>&1 | grep -E "image_raw:|PASS|Error|assert"'
+RC=$?
+
+# Explicit verdict + status, matching the sibling webrtc_test.sh / discovery_test.sh.
+if [ "$RC" -eq 0 ]; then echo "BRIDGE TEST: PASS"; else echo "BRIDGE TEST: FAIL (rc=$RC)"; fi
+exit "$RC"
