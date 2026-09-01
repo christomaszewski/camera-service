@@ -4,8 +4,9 @@
 #
 #   1. JP6 headered shm + mono  (self-describing; latency metrics + burned-in overlay)
 #   2. JP6 headered shm + color (GRAY8 mosaic relabeled video/x-bayer -> bayer2rgb)
-#   3. shm-raw (legacy) + mono  (env geometry; also the two H.264 profile/level scenarios)
-#   4. JP7 unixfd       + color (Bayer -> bayer2rgb)
+#   3. shm-raw (legacy) + mono  (env geometry; also the two H.264 profile/level scenarios and
+#                                the CAM_WEBRTC_MAX_SIZE encode-side downscale)
+#   4. JP7 unixfd       + color (Bayer -> bayer2rgb; + the downscale behind the runtime seam)
 #
 # Each scenario:  core (fake cam) -> webrtc-bridge (webrtcsink + signalling) -> webrtcsrc consumer
 # (decode + count). shm is shared cross-container via a named volume (not a host bind mount --
@@ -76,6 +77,21 @@ run_scenario() {
   return "$rc"
 }
 
+# bridge_log_has <substring>: poll the bridge log (up to 20s) for a substring. Polled because the
+# heartbeat is periodic and its first tick can land just AFTER the consumer exits on a slow cold
+# start. Substring check, NOT `| grep -q`: under this script's pipefail, grep -q exiting at first
+# match SIGPIPEs a still-writing `docker logs` and the pipeline reports 141 -- a false negative that
+# triggers exactly when the log is big enough (measured: the chattier 0.15 signalling log tipped it
+# while 0.13 stayed under the buffer).
+bridge_log_has() {
+  local needle="$1"
+  for _ in $(seq 1 20); do
+    if [[ "$(docker logs "$BRIDGE" 2>&1)" == *"$needle"* ]]; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+
 FAILED=0
 # One probe, two gates: unixfd needs a gst >= 1.24 core; the headered-shm endpoint only EXISTS on a
 # core without unixfdsink (unixfd replaces it at the same plugin endpoint when available).
@@ -92,11 +108,11 @@ if [ "$CORE_HAS_UNIXFD" = 0 ]; then
   # capture->encode latency percentiles -- that is the heartbeat metric this transport exists for.
   if run_scenario "JP6 headered shm + mono (self-describing + latency)" \
       config/webrtc-fake.yaml \
-      -e CAM_PLATFORM=jp6 -e CAM_WEBRTC_LATENCY_OVERLAY=1; then
-    if docker logs "$BRIDGE" 2>&1 | grep -Fq "lat[cap->enc]"; then
+      -e CAM_PLATFORM=jp6 -e CAM_WEBRTC_LATENCY_OVERLAY=1 -e CAM_WEBRTC_STATUS=5; then
+    if bridge_log_has "lat[cap->enc]"; then
       echo "-- latency metrics present in the heartbeat --"
     else
-      echo "-- FAIL: no lat[cap->enc] heartbeat line (capture timestamps didn't survive) --"
+      echo "-- FAIL: no lat[cap->enc] heartbeat line within 20s (capture timestamps didn't survive) --"
       FAILED=1
     fi
   else
@@ -104,11 +120,21 @@ if [ "$CORE_HAS_UNIXFD" = 0 ]; then
   fi
 
   # Color on the headered path: the wire carries the GRAY8 mosaic; CAM_BAYER relabels it
-  # video/x-bayer and the fmt_tap seam splices bayer2rgb.
-  run_scenario "JP6 headered shm + color (Bayer relabel -> bayer2rgb)" \
-    config/webrtc-fake-bayer.yaml \
-    -e CAM_PLATFORM=jp6 -e CAM_BAYER=rggb \
-    || FAILED=1
+  # video/x-bayer and the fmt_tap seam splices bayer2rgb. + the encode-side downscale BEHIND that
+  # seam (tap -> bayer2rgb -> fmt_scale): the plan must come from the stream's caps -- no geometry
+  # env on this path -- and land after the debayer.
+  if run_scenario "JP6 headered shm + color (Bayer relabel -> bayer2rgb) + CAM_WEBRTC_MAX_SIZE=256" \
+      config/webrtc-fake-bayer.yaml \
+      -e CAM_PLATFORM=jp6 -e CAM_BAYER=rggb -e CAM_WEBRTC_MAX_SIZE=256; then
+    if bridge_log_has "scale: 512x512 -> 256x256"; then
+      echo "-- downscale planned from the stream's own caps (behind the fmt_tap seam) --"
+    else
+      echo "-- FAIL: no 'scale: 512x512 -> 256x256' line (runtime plan behind the seam) --"
+      FAILED=1
+    fi
+  else
+    FAILED=1
+  fi
 else
   echo
   echo "########## SCENARIOS: JP6 headered shm -- SKIPPED ##########"
@@ -144,11 +170,40 @@ run_scenario "H.264 auto-level, high (warns + falls back to constrained-baseline
   -e VIDEO_CAPS=video/x-h264 -e CAM_WEBRTC_PROFILE=high \
   || FAILED=1
 
+# Encode-side downscale (CAM_WEBRTC_MAX_SIZE): the fake 512x512 must reach the encoder at 256x256.
+# Two assertions off the bridge log: the scaler's plan line, and the auto-level line -- which reads
+# webrtcsink's NEGOTIATED input caps, so it proves the encoder (not just the scaler) saw the scaled
+# geometry (the derived level follows it too -- 1.3 here; the proof is the "for 256x256@" text).
+if run_scenario "shm-raw + CAM_WEBRTC_MAX_SIZE=256 (encode-side downscale)" \
+    config/webrtc-fake.yaml \
+    -e CAM_PLATFORM=jp6 -e CAM_TRANSPORT=shm-raw -e CAM_SHM_SOCKET=/tmp/cam/raw \
+    -e CAM_WIDTH=512 -e CAM_HEIGHT=512 -e CAM_FORMAT=GRAY8 -e CAM_FPS=25 \
+    -e VIDEO_CAPS=video/x-h264 -e CAM_WEBRTC_MAX_SIZE=256; then
+  if bridge_log_has "scale: 512x512 -> 256x256" && bridge_log_has "for 256x256@"; then
+    echo "-- downscale planned + encoder negotiated 256x256 --"
+  else
+    echo "-- FAIL: encoder did not negotiate 256x256 (see the 'scale:' / 'h264 encode:' lines) --"
+    FAILED=1
+  fi
+else
+  FAILED=1
+fi
+
 if [ "$CORE_HAS_UNIXFD" = 1 ]; then
-  run_scenario "JP7 unixfd + color (Bayer -> bayer2rgb)" \
-    config/webrtc-fake-bayer.yaml \
-    -e CAM_PLATFORM=jp7 -e CAM_BAYER=rggb \
-    || FAILED=1
+  # + the encode-side downscale BEHIND the runtime format seam (tap -> bayer2rgb -> fmt_scale):
+  # the plan must come from the stream's caps (no geometry env on this path).
+  if run_scenario "JP7 unixfd + color (Bayer -> bayer2rgb) + CAM_WEBRTC_MAX_SIZE=256" \
+      config/webrtc-fake-bayer.yaml \
+      -e CAM_PLATFORM=jp7 -e CAM_BAYER=rggb -e CAM_WEBRTC_MAX_SIZE=256; then
+    if bridge_log_has "scale: 512x512 -> 256x256"; then
+      echo "-- downscale planned from the stream's own caps (behind the fmt_tap seam) --"
+    else
+      echo "-- FAIL: no 'scale: 512x512 -> 256x256' line (runtime plan behind the seam) --"
+      FAILED=1
+    fi
+  else
+    FAILED=1
+  fi
 else
   echo
   echo "########## SCENARIO: JP7 unixfd + color -- SKIPPED ##########"

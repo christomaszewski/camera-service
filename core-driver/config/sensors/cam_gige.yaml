@@ -97,6 +97,10 @@ plugins:
       # (docker logs) on the plugin-endpoint transports; uncomment to ALSO burn the live number
       # into the video itself (textoverlay, top-left -- any viewer sees it):
       # CAM_WEBRTC_LATENCY_OVERLAY: true
+      # CPU: the 5MP color preview pays bayer2rgb + videoconvert + encode at full resolution. Bound
+      # the STREAMED size (aspect kept, never upscaled) so convert/encode run on ~1/4 of the pixels.
+      # Preview-only -- the recording and the ROS topic keep full resolution:
+      # CAM_WEBRTC_MAX_SIZE: 1280       # longest edge; or a box, e.g. 1280x720
       # HW NVENC H.264 for the browser dashboard: VIDEO_CAPS pins H.264 (universal browser decode);
       # the RANK forces nvv4l2h264enc over CPU x264enc (a no-op where H.264 NVENC is absent). Profile
       # is constrained-baseline (webrtcsink forces it at discovery); the level is auto-derived from
