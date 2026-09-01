@@ -66,6 +66,12 @@ _PUB_QUEUE_FRAMES = 8    # best-effort publish feeds (transport/unixfd): drop ea
 # a file per keyframe until the disk fills. Absorbed, the recording timeline stays continuous and the
 # TRUE per-frame timestamp is still in the sidecar CSV, so absolute time is recoverable either way.
 # A genuine outage shorter than this (a reconnect) stays visible as a real gap in the recording.
+# Deliberate trade-off: a real outage LONGER than this (a camera reboot is 1-2 min) is collapsed to one
+# frame interval in the recording too -- the sidecar CSV keeps the true stamps. The stamp's provenance
+# (FrameStamp.source flips SYSTEM -> RTP_NTP once the RTCP anchor returns) is NOT a cleaner signal: a
+# source flip also brackets a REAL gap (the reconnect test's 18.4 s stall straddles one), so keying
+# the rebase on it would collapse exactly the gaps this threshold exists to preserve. Revisit if a
+# deployment must record across minute-long outages with an honest timeline.
 _MAX_PTS_JUMP_NS = 60 * 1_000_000_000
 
 # Per-frame PTS memo depth. Only needs to span the lag between the two callbacks of a stream-copy
@@ -90,7 +96,7 @@ class CapturePipeline:
         self._last_pts: Optional[int] = None        # for the monotonic-PTS guard
         self._pts_skew = 0                          # accumulated discontinuity correction (see _pts_for)
         self._pts_warn_last: float = 0.0            # monotonic s of the last logged PTS rebase
-        self._pts_memo: "OrderedDict[int, int]" = OrderedDict()   # frame_id -> pts (bounded)
+        self._pts_memo: "OrderedDict[tuple, int]" = OrderedDict()   # (frame_id, timestamp_ns) -> pts (bounded)
         self._frame_interval_ns = 1_000_000         # set in build() from frame_rate
         self._reconnecting = False
         self._stop_event = threading.Event()         # wakes the reconnect backoff on shutdown
@@ -365,7 +371,7 @@ class CapturePipeline:
             return False
         return True
 
-    def _pts_for(self, stamp: FrameStamp) -> int:
+    def _pts_for(self, stamp: FrameStamp, own: bool = True) -> int:
         """The buffer PTS for `stamp`: computed ONCE per frame, shared by every branch that carries
         it, and the ONLY writer of the time base.
 
@@ -383,11 +389,31 @@ class CapturePipeline:
         backward/repeated stamps (a camera clock reset across a reconnect) and forward clock-SOURCE
         changes (_MAX_PTS_JUMP_NS) both have to be corrected, or the muxer gets a PTS it can't use.
         The lock is what makes the shared state safe across the two feeder threads -- _base_ts was
-        previously mutated outside it, which is exactly what _base_lock existed to prevent."""
+        previously mutated outside it, which is exactly what _base_lock existed to prevent.
+
+        `own` says whether the caller FEEDS THE RECORDING. Only that caller may move the shared
+        state (base, skew, last pts, memo). On a stream-copy source the best-effort decode branch
+        (_on_frame) passes own=False and only READS: a memo hit when the recording branch has already
+        been here, else the plain arithmetic with no side effects. Otherwise the two feeder threads
+        race for the timeline: the decode branch's _stamp_for miss returns the NEWEST pre-tee stamp,
+        one the recording branch may not have delivered yet, and a rebase it triggers lands on frames
+        the recording sees later -- the one-interval shift again, through a different door.
+
+        The memo is keyed on (frame_id, timestamp_ns), NOT frame_id alone: ids recycle without a
+        reconnect (a playback source looping a run repeats them every cycle; a camera-side block-id
+        reset need not drop the control channel), and a memo hit returns BEFORE the monotonicity
+        guard. The stamp disambiguates; both callbacks of a stream-copy source share the SAME
+        FrameStamp object, so they still agree by construction."""
+        key = (stamp.frame_id, stamp.timestamp_ns)
         with self._base_lock:
-            memo = self._pts_memo.get(stamp.frame_id)
+            memo = self._pts_memo.get(key)
             if memo is not None:
                 return memo
+            if not own:
+                # read-only view for the best-effort branch; the recording branch defines the base
+                if self._base_ts is None:
+                    return 0
+                return max(0, stamp.timestamp_ns - self._base_ts + self._pts_skew)
             if self._base_ts is None:
                 self._base_ts = stamp.timestamp_ns
                 self._write_header()
@@ -405,7 +431,7 @@ class CapturePipeline:
             if pts < 0:
                 pts = 0
             self._last_pts = pts
-            self._pts_memo[stamp.frame_id] = pts
+            self._pts_memo[key] = pts
             while len(self._pts_memo) > _PTS_MEMO_FRAMES:
                 self._pts_memo.popitem(last=False)   # bounded; evict oldest
             return pts
@@ -457,7 +483,9 @@ class CapturePipeline:
         for stream-copy it lives in _on_encoded, so leaky decode drops never desync the sidecar."""
         if self._stopping:
             return   # draining for EOS; stop feeding the pipeline
-        pts = self._pts_for(stamp)
+        # stream-copy: this branch is best-effort consumer pixels; the recording (_on_encoded) owns
+        # the timeline and this call must not move it -- see _pts_for.
+        pts = self._pts_for(stamp, own=not self._stream_copy)
 
         rec_ok = not self._queue_full(self.appsrc, len(frame_bytes), "camsrc")
         if rec_ok:

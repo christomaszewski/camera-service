@@ -162,15 +162,38 @@ def test_recycled_frame_id_after_a_memo_clear_does_not_return_a_stale_pts():
     assert recycled > last, "a recycled frame_id must be re-derived, not served from the memo"
 
 
-def test_stale_memo_would_break_monotonicity_without_the_clear():
-    # Pins WHY the clear is required: without it the same sequence returns a pts from before the flap.
+def test_recycled_frame_id_with_a_new_stamp_is_never_served_from_the_memo():
+    # The memo is keyed on (frame_id, timestamp_ns), not frame_id alone. Ids recycle WITHOUT a
+    # reconnect: a playback source looping a run repeats them every cycle, and a memo hit returns
+    # BEFORE the monotonicity guard -- keyed on the id alone, cycle N+1 would replay cycle N's pts
+    # straight into the muxer for any cycle shorter than the memo depth. No clear involved here.
     p = _pipe()
     base = 1_000_000_000
     for i in range(1, 6):
         p._pts_for(_stamp(i, base + i * INTERVAL))
     last = p._last_pts
-    stale = p._pts_for(_stamp(1, base + 100 * INTERVAL))   # memo NOT cleared
-    assert stale < last, "guard test: a retained memo does serve a backward pts (hence the clear)"
+    again = p._pts_for(_stamp(1, base + 100 * INTERVAL))   # same id, later stamp, memo NOT cleared
+    assert again > last, "a recycled id with a new stamp is a new frame, not a memo hit"
+    assert p.drops.pts_rebases == 0     # ...and a later stamp is simply later, not a discontinuity
+
+
+def test_best_effort_branch_never_moves_the_timeline():
+    # Stream-copy: the decode branch (_on_frame, own=False) only reads; the encoded branch owns.
+    # Its _stamp_for miss can hand it the NEWEST pre-tee stamp before the recording has delivered
+    # that frame -- so it must neither define the base, advance _last_pts, nor rebase.
+    p = _pipe()
+    base = 1_000_000_000
+    assert p._pts_for(_stamp(0, base), own=False) == 0
+    assert p._base_ts is None and p._last_pts is None and not p._pts_memo
+    p._pts_for(_stamp(0, base))                         # the recording branch defines the base
+    p._pts_for(_stamp(1, base + INTERVAL))
+    ahead = _stamp(2, base + 2 * INTERVAL)               # decode branch runs ahead of the recording
+    assert p._pts_for(ahead, own=False) == 2 * INTERVAL
+    assert p._pts_for(ahead, own=False) == 2 * INTERVAL  # a duplicate on that branch: no rebase
+    assert p._last_pts == INTERVAL and (2, ahead.timestamp_ns) not in p._pts_memo
+    assert p.drops.pts_rebases == 0 and p._pts_skew == 0
+    assert p._pts_for(ahead) == 2 * INTERVAL             # the recording branch, arriving later, agrees
+    assert p._last_pts == 2 * INTERVAL
 
 
 def _main():
