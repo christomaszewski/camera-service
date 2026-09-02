@@ -278,6 +278,20 @@ def test_unique_run_prefix():
     assert unique_run_prefix("/nonexistent-dir-for-test", "cam", _now=1700000000) == "cam-20231114-221320"
 
 
+
+def test_health_block_defaults_off_and_parses():
+    assert parse_config({}).health.threads == 0
+    assert parse_config({"health": {"threads": 6}}).health.threads == 6
+
+
+def test_ffv1_knobs_parse():
+    r = parse_config({"recording": {"ffv1_coder": "golomb", "ffv1_context": False,
+                                    "ffv1_slices": 8, "ffv1_slicecrc": False}}).recording
+    assert (r.ffv1_coder, r.ffv1_context, r.ffv1_slices, r.ffv1_slicecrc) == ("golomb", False, 8, False)
+    d = parse_config({}).recording
+    assert (d.ffv1_coder, d.ffv1_context, d.ffv1_slices, d.ffv1_slicecrc) == ("range", True, 4, True)
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

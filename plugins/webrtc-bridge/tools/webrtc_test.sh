@@ -142,11 +142,24 @@ else
   echo "   not shm+header. Re-run with the default cam-dev (22.04/gst 1.20) core to cover these."
 fi
 
-run_scenario "shm-raw (legacy) + mono (GRAY8, env geometry)" \
-  config/webrtc-fake.yaml \
-  -e CAM_PLATFORM=jp6 -e CAM_TRANSPORT=shm-raw -e CAM_SHM_SOCKET=/tmp/cam/raw \
-  -e CAM_WIDTH=512 -e CAM_HEIGHT=512 -e CAM_FORMAT=GRAY8 -e CAM_FPS=25 \
-  || FAILED=1
+# + the ingress knobs: the idle throttle must engage while no viewer is connected (grace cut to
+# 3 s; the consumer only joins 12 s in) and lift for it -- the consumer decoding >= 30 frames IS
+# the lift assertion; the 5 fps cap and the per-thread CPU segment must show on the heartbeat.
+if run_scenario "shm-raw (legacy) + mono (GRAY8, env geometry) + idle throttle + fps cap" \
+    config/webrtc-fake.yaml \
+    -e CAM_PLATFORM=jp6 -e CAM_TRANSPORT=shm-raw -e CAM_SHM_SOCKET=/tmp/cam/raw \
+    -e CAM_WIDTH=512 -e CAM_HEIGHT=512 -e CAM_FORMAT=GRAY8 -e CAM_FPS=25 \
+    -e CAM_WEBRTC_MAX_FPS=5 -e CAM_WEBRTC_IDLE_GRACE_S=3 -e CAM_WEBRTC_STATUS=5 -e CAM_WEBRTC_STATUS_THREADS=4; then
+  if bridge_log_has "ingress: idle" && bridge_log_has "ingress: viewer present" \
+      && bridge_log_has "fps-cap=5" && bridge_log_has "cpu="; then
+    echo "-- idle throttle engaged then lifted for the viewer; fps cap + thread CPU on the heartbeat --"
+  else
+    echo "-- FAIL: idle throttle / fps cap / thread CPU not evidenced in the bridge log --"
+    FAILED=1
+  fi
+else
+  FAILED=1
+fi
 
 # H.264 with an AUTO-derived level (the fix for the fixed-profile-level-id black tile). Pinning
 # VIDEO_CAPS=video/x-h264 forces the H.264 codec so the level/profile path is exercised; the bridge

@@ -158,6 +158,24 @@ class RecordingConfig:
     # res (single-threaded ~21fps for 5MP in a 30W power mode -- right at the 24fps line). Parallelize it
     # across cores so the recorder keeps real-time with margin (5MP: n-threads=6 -> ~69fps). 0 = all cores.
     videoconvert_threads: int = 4
+    # FFV1 (the software lossless path: >8-bit / thermal, color, or no NVENC) trades compression for
+    # speed. The defaults are FFV1's best-compression shape; a 60 fps 16-bit thermal camera that needs
+    # CPU back can drop to `golomb` + no context for ~1.5-2x cheaper encoding at a few percent larger
+    # files -- still bit-exact lossless. Ignored by the HW / x265 encoders.
+    ffv1_coder: str = "range"      # range (default; slower, smaller) | golomb (faster)
+    ffv1_context: bool = True      # context modelling (compression); off = faster
+    ffv1_slices: int = 4           # parallel slices = threads the encoder can use (1-64)
+    ffv1_slicecrc: bool = True     # per-slice CRC (corruption detection); off = slightly faster
+
+
+@dataclass
+class HealthConfig:
+    """The periodic `health:` log line (every 30 s)."""
+    # Append the process's busiest threads (percent of ONE core) to the health line. GStreamer names
+    # its streaming threads after the element, so this reads as a per-element CPU breakdown straight
+    # from `docker logs` -- videoconvert vs the encoder vs the Python feeder -- with no `top -H` on the
+    # vehicle. The number is how many threads to list; 0 = off. Linux only (/proc).
+    threads: int = 0
 
 
 @dataclass
@@ -204,6 +222,7 @@ class AppConfig:
     rtsp: RtspConfig = field(default_factory=RtspConfig)         # rtsp source params
     recording: RecordingConfig = field(default_factory=RecordingConfig)
     preview: PreviewConfig = field(default_factory=PreviewConfig)
+    health: HealthConfig = field(default_factory=HealthConfig)
     transport: TransportConfig = field(default_factory=TransportConfig)
     plugins: list = field(default_factory=list)   # list[PluginConfig], for the plugin supervisor
 
@@ -309,6 +328,7 @@ def parse_config(raw: dict) -> AppConfig:
         rtsp=rtsp,
         recording=_build(RecordingConfig, raw.get("recording")),
         preview=_build(PreviewConfig, raw.get("preview")),
+        health=_build(HealthConfig, raw.get("health")),
         transport=transport_cfg,
         plugins=plugins,
     )

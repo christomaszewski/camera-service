@@ -20,6 +20,7 @@ docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
   python3 tests/test_dropstats.py
   python3 tests/test_formats.py
   python3 tests/test_recorder.py
+  python3 tests/test_threadcpu.py
   python3 tests/test_pipeline_pts.py
   python3 tests/test_pipeline_reconnect.py
   python3 tests/test_sidecar.py

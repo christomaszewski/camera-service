@@ -107,6 +107,9 @@ Or via the per-sensor stack: `cam-up <sensor>.yaml up -d webrtc-bridge` (cam-up 
 | `CAM_WEBRTC_NORMALIZE` | `off` | 16-bit mono preview stretch: `auto` (1–99% percentile window, EMA-smoothed) or `lo:hi` (e.g. `5:99.5`). Stretches GRAY16 → GRAY8 **before** the 8-bit convert, so an LSB-aligned radiometric camera (thermal Y16) previews with full contrast instead of near-black. Preview-only — the recording and ROS topic keep the raw 16-bit. Needs the python launcher (the default) |
 | `CAM_WEBRTC_LATENCY_OVERLAY` | `off` | burn the live **capture→encode latency** into the video (`textoverlay`, top-left, e.g. `lat 87 ms (ptp)`) — any viewer sees it with zero client support; `lat --` where no capture stamp survives (shm-raw). Needs the python launcher |
 | `CAM_WEBRTC_MAX_SIZE` | _(off)_ | **encode-side downscale**: bound the streamed geometry to a box `WxH` (e.g. `1280x720`) or `N` on both axes (e.g. `1280`, a longest-edge cap). Aspect preserved, even dimensions, never upscaled. A `videoscale` right after the format seam, so `videoconvert`, the encoder and the overlay/normalize passes all run at the reduced size — the CPU lever for a 5MP color preview. Planned at runtime from the stream's own caps (a frame that already fits leaves the scaler in passthrough); the auto H.264 level and the discovery descriptor follow the streamed size. Preview-only — recording/ROS keep full resolution. The `gst-launch` hatch bounds via caps ranges instead (may land on an odd dimension) |
+| `CAM_WEBRTC_IDLE_FPS` | `1` | **idle throttle**: while no viewer is connected, the chain ahead of `webrtcsink` (header pump, debayer, convert, scale) runs at this trickle rate instead of the endpoint rate — it otherwise runs for nobody. A trickle rather than a stop, deliberately: webrtcsink's startup codec discovery needs real buffers to finish, and a viewer can never starve behind it. Full rate during `CAM_WEBRTC_IDLE_GRACE_S` (default `10`) after boot and until 30 buffers have reached `webrtcsink`, on a session request, and while any viewer is connected; the viewer count is re-synced from `get-sessions` every heartbeat. `0` = full rate always |
+| `CAM_WEBRTC_MAX_FPS` | _(off)_ | **preview rate cap**, dropped at ingress. The plugin endpoint's `max_rate_hz` is shared with the ROS bridge; this runs the preview slower than it (e.g. `5`) |
+| `CAM_WEBRTC_STATUS_THREADS` | `0` | append the N busiest threads (percent of one core) to the status heartbeat — GStreamer names streaming threads after the element, so it reads as a per-element CPU breakdown (`bayer2rgb0:src 38% ...`); Linux `/proc` |
 | `CAM_WIDTH` / `CAM_HEIGHT` | `512` | **shm-raw only** — must match the camera geometry |
 | `CAM_FORMAT` | `GRAY8` | **shm-raw only** — mono raw format when not debayering |
 | `CAM_FPS` | `25` | **shm-raw** geometry; on headered shm a caps rate **hint** (the header carries no rate; feeds the H.264 level derivation) |
@@ -259,6 +262,11 @@ Brings up a `rmw_zenohd` router + core + bridge, and a Zenoh probe
   `bayer2rgb` still runs at sensor resolution upstream of the scaler (a Bayer-aware 2×2 decimation
   would cut that too — not built). Forcing NVENC (above) is the other half; both compose. The auto
   H.264 level tracks the streamed size. Watch `lat[cap->enc]` in the heartbeat when A/B-ing.
+- **Nobody watching still costs the full chain.** `webrtcsink` only skips the *encoder* without
+  viewers; the header pump, debayer, convert and scale ahead of it run at the endpoint rate regardless.
+  `CAM_WEBRTC_IDLE_FPS` (default 1) trickles at ingress until a viewer connects, and
+  `CAM_WEBRTC_MAX_FPS` caps the preview rate below the shared endpoint rate. `CAM_WEBRTC_STATUS_THREADS`
+  shows where the bridge's CPU goes, per element, on the heartbeat.
 - **Build on-device:** gst-plugins-rs builds against the Jetson's GStreamer (≥ the 1.20 floor); arm64
   builds are RAM-bound — the Dockerfile already uses LTO-off + limited jobs.
 

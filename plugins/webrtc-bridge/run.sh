@@ -35,6 +35,11 @@
 # CAM_WEBRTC_NORMALIZE (16-bit mono preview stretch: off | auto | "lo:hi" percentiles -- see below),
 # CAM_WEBRTC_LATENCY_OVERLAY (burn capture->now latency into the video -- see below),
 # CAM_WEBRTC_MAX_SIZE (WxH | N: downscale the preview to fit BEFORE convert/encode -- see below),
+# CAM_WEBRTC_IDLE_FPS (default 1: while no viewer is connected the chain runs at this trickle rate
+# instead of the endpoint rate -- it otherwise runs for nobody; 0 = full rate always) +
+# CAM_WEBRTC_IDLE_GRACE_S (default 10: full rate after boot so codec discovery completes),
+# CAM_WEBRTC_MAX_FPS (preview rate cap, dropped at ingress), CAM_WEBRTC_STATUS_THREADS (N busiest
+# threads on the heartbeat; python launcher),
 # CAM_WIDTH/HEIGHT/FORMAT (shm-raw only), CAM_FPS (shm-raw geometry; caps rate HINT on headered shm),
 # SIGNALLING_PORT, VIDEO_CAPS (e.g. "video/x-h264" to pin the codec), RUN_SIGNALLING (1=start the
 # bundled signalling server, default 1), CAM_WEBRTC_{MIN,MAX,START}_BITRATE (bit/sec; bound

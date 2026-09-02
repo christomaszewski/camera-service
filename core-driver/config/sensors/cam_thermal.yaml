@@ -39,6 +39,13 @@ recording:
   name_prefix: cam_thermal # -> cam_thermal-<UTCstamp>-00000.mkv + .csv/.json (run-stamped; restarts
   #                          start a NEW run beside the old one rather than overwriting)
   segment_seconds: 60
+  # FFV1 speed vs size (this IS the CPU path -- no HW lossless above 8 bits). Defaults = FFV1's best
+  # compression; if the core's health line (health.threads) shows the avenc_ffv1 threads saturating,
+  # trade a few percent of file size for ~1.5-2x cheaper encoding (still bit-exact lossless):
+  # ffv1_coder: golomb         # range (default) | golomb
+  # ffv1_context: false
+  # ffv1_slices: 4             # parallel slices = cores the encoder can use
+  # ffv1_slicecrc: false
   # keyframe_interval_s/bframes don't apply to FFV1 (intra-only) -- omitted so they don't log "ignored".
   # NB sustained write for 60fps 640x512 16-bit FFV1 of noisy thermal data is ~25-30 MB/s; if the core
   # logs "camsrc queue full" with FFV1 threading already in the image, the data_dir disk is the ceiling

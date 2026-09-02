@@ -189,7 +189,18 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
     # camera (the tee blocks, consumers starve, the feeder drops half the frames). FFV1 parallelizes
     # across slices (version 3 of the bitstream), so slices=4 + threads=0 (auto) restores real-time
     # with headroom. slicecrc protects each slice; lossless fidelity is unaffected by slicing.
+    # Speed/size knobs (recording.ffv1_*): range coder + context modelling is FFV1's best-compression
+    # shape and its slowest; golomb without context is ~1.5-2x cheaper for a few percent larger files.
+    coder_name = str(getattr(cfg, "ffv1_coder", "range") or "range").lower()
+    coder = {"range": 1, "golomb": 0}.get(coder_name)
+    if coder is None:
+        log.warning("recorder: ffv1_coder=%r is not range|golomb; using range", coder_name)
+        coder_name, coder = "range", 1
+    slices = min(64, max(1, int(getattr(cfg, "ffv1_slices", 4) or 4)))
+    ctx = 1 if getattr(cfg, "ffv1_context", True) else 0
+    crc = 1 if getattr(cfg, "ffv1_slicecrc", True) else 0
+    log.info("recorder: ffv1 coder=%s context=%d slices=%d slicecrc=%d", coder_name, ctx, slices, crc)
     return (
         f"queue max-size-buffers=12 name=rec_q ! {vconv} ! "
-        "avenc_ffv1 coder=1 context=1 threads=0 slices=4 slicecrc=1 ! " + sink
+        f"avenc_ffv1 coder={coder} context={ctx} threads=0 slices={slices} slicecrc={crc} ! " + sink
     ), enc
