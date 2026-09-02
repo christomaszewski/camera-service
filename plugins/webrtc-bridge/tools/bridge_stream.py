@@ -33,10 +33,14 @@ from zenoh_advertiser import StreamAdvertiser
 from h264_level import h264_level_for, level_covers, LEVELS as H264_LEVELS
 from format_adapt import adapt_for_input, debayer_enabled
 from scale_plan import fit_within, parse_max_size, scale_caps
+from threadcpu import ThreadCpu, format_top
 from header_transport import (HeaderError, PtsTracker, TS_SOURCE_SHORT,
                               caps_for_frame, parse_header)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+# Idle throttle floor: buffers that must have reached webrtcsink before the trickle may start.
+_IDLE_MIN_ENC_FRAMES = 30
 log = logging.getLogger("bridge_stream")
 
 # A crash inside a native GStreamer element (a platform-injected encoder is the prime suspect on
@@ -264,11 +268,17 @@ def _configure_live_encoder(encoder):
             break
     setp("b-adapt", False)                            # x264enc: don't auto-insert B-frames
     if name == "x264enc":
+        # `tune` is a GFlags: set_property() with the nick string raises, so it silently never
+        # applied -- and without zerolatency x264 sits on rc-lookahead=40 frames before emitting its
+        # FIRST output, which starves webrtcsink's startup codec discovery at a low input rate (a
+        # 5 fps preview cap = 8 s of frames before discovery can complete). util_set_object_arg
+        # parses the nick; rc-lookahead=0 pins it even where the tune doesn't reach.
         try:
-            encoder.set_property("tune", "zerolatency")    # flags enum, set by nick
+            Gst.util_set_object_arg(encoder, "tune", "zerolatency")
             done.append("tune=zerolatency")
         except Exception as e:                        # noqa: BLE001
             log.debug("x264enc tune set failed: %s", e)
+        setp("rc-lookahead", 0)
     elif name == "nvv4l2h264enc":
         setp("maxperf-enable", True)
         setp("insert-sps-pps", True)                  # mid-stream joiners get SPS/PPS at every IDR
@@ -321,6 +331,47 @@ class Bridge:
         self._status_zero = 0           # consecutive heartbeats with zero frames received
         self._consumers = 0             # webrtcsink consumers currently connected
         self._warn_last = {}            # bus-warning throttle: message -> monotonic s
+        # Ingress throttle (probe on cam_src, ahead of the header pump / debayer / convert / scale):
+        #   idle  -- while no viewer is connected the chain runs at CAM_WEBRTC_IDLE_FPS (default 1)
+        #            instead of the endpoint rate. A TRICKLE, not a stop: webrtcsink's startup codec
+        #            discovery needs real buffers to finish (an encoder with lookahead needs dozens),
+        #            and a viewer must never be able to starve behind a closed gate -- at worst it
+        #            sees 1 fps until the count catches up. Full rate for the first
+        #            CAM_WEBRTC_IDLE_GRACE_S (default 10) so discovery completes fast after boot.
+        #   fps   -- CAM_WEBRTC_MAX_FPS caps the preview rate (the endpoint rate is shared with ROS).
+        self._idle_interval_ns = 0
+        raw_idle = _env("CAM_WEBRTC_IDLE_FPS", "1")
+        try:
+            idle_fps = float(raw_idle)
+            if idle_fps > 0:
+                self._idle_interval_ns = int(1e9 / idle_fps)
+        except ValueError:
+            log.warning("CAM_WEBRTC_IDLE_FPS=%r is not a rate; idle throttle off", raw_idle)
+        self._idle_fps = 1e9 / self._idle_interval_ns if self._idle_interval_ns else 0.0
+        try:
+            grace = float(_env("CAM_WEBRTC_IDLE_GRACE_S", "10"))
+        except ValueError:
+            grace = 10.0
+        self._idle_grace_ns = time.monotonic_ns() + int(grace * 1e9)
+        self._enc_frames = 0            # buffers that reached webrtcsink; discovery needs a few dozen
+        self._gate_ok = False           # consumer-added/removed both connected (else: no throttle)
+        self._idle_active = False       # current state (for transition logs)
+        self._idle_last_ns = 0
+        self._idle_dropped = 0
+        self._viewer_pending_ns = 0     # signaller saw a session request: full rate before consumer-added
+        self._max_fps = 0.0
+        self._fps_interval_ns = 0
+        self._fps_last_ns = 0
+        self._fps_dropped = 0
+        raw_fps = _env("CAM_WEBRTC_MAX_FPS")
+        if raw_fps:
+            try:
+                self._max_fps = float(raw_fps)
+                if self._max_fps > 0:
+                    self._fps_interval_ns = int(1e9 / self._max_fps)
+            except ValueError:
+                log.warning("CAM_WEBRTC_MAX_FPS=%r is not a rate; ignoring", raw_fps)
+        self._thread_cpu = None         # CAM_WEBRTC_STATUS_THREADS: per-thread CPU in the heartbeat
 
     def build(self):
         Gst.init(None)
@@ -407,12 +458,29 @@ class Bridge:
             except Exception as e:
                 log.warning("could not connect webrtcsink encoder signals: %s", e)
             # Viewer visibility for the status heartbeat (signature varies by build -> defensive).
+            connected = 0
             for sig_name, handler in (("consumer-added", self._on_consumer_added),
                                       ("consumer-removed", self._on_consumer_removed)):
                 try:
                     sink.connect(sig_name, handler)
+                    connected += 1
                 except Exception as e:                # noqa: BLE001
                     log.debug("no %s signal on this webrtcsink: %s", sig_name, e)
+            self._gate_ok = connected == 2
+            # A viewer's session REQUEST arrives at the signaller before the consumer exists; go to
+            # full rate on it so the stream is producing by the time webrtcsink builds the consumer.
+            try:
+                self._signaller = sink.get_property("signaller")
+                self._signaller.connect("session-requested", self._on_session_requested)
+            except Exception as e:                    # noqa: BLE001 -- defensive; the poll covers it
+                log.debug("no session-requested signal on the signaller: %s", e)
+            if self._idle_interval_ns and not self._gate_ok:
+                log.warning("idle throttle disabled: this webrtcsink lacks the consumer-added/removed "
+                            "signals, so viewers could not be counted")
+            log.info("ingress: idle throttle %s, fps cap %s",
+                     ("%g fps while no viewer" % self._idle_fps)
+                     if (self._idle_interval_ns and self._gate_ok) else "off",
+                     ("%g fps" % self._max_fps) if self._fps_interval_ns else "off")
             # capture->encode latency probe: buffers reaching webrtcsink still carry the absolute
             # capture ns in offset_end (unixfd natively; headered shm via the pump; basetransform
             # elements -- bayer2rgb/videoconvert/textoverlay -- copy offsets through). The sink pad
@@ -442,6 +510,12 @@ class Bridge:
         self._status_iv = self._status_interval()
         if self._status_iv:
             GLib.timeout_add_seconds(self._status_iv, self._status_tick)
+            try:
+                top = int(_env("CAM_WEBRTC_STATUS_THREADS", "0") or 0)
+            except ValueError:
+                top = 0
+            if top > 0:
+                self._thread_cpu = ThreadCpu(top=top)
         bus = self.pipeline.get_bus()
         bus.add_signal_watch()
         bus.connect("message", self._on_message)
@@ -501,7 +575,60 @@ class Bridge:
             lat = self._capture_lat_ms(buf.offset_end)
             if lat is not None:
                 self._lat_rx.append(lat)
+        if self._ingress_drop():
+            return Gst.PadProbeReturn.DROP
         return Gst.PadProbeReturn.OK
+
+    def _ingress_drop(self) -> bool:
+        """Decide, per received frame, whether it goes any further. Runs on the source thread ahead
+        of the leaky queue, so a dropped frame costs nothing downstream: no header strip, no
+        debayer, no convert, no scale, no encoder. Two throttles:
+          idle   -- no viewer connected: pass CAM_WEBRTC_IDLE_FPS, drop the rest (webrtcsink would
+                    discard the encoded output anyway; the CPU ahead of it is what this saves). A
+                    trickle keeps codec discovery and a late-counted viewer alive. Full rate during
+                    the startup grace, on a session request, and while any viewer is connected.
+          fps    -- above the preview rate cap: the plugin endpoint's rate is shared with the ROS
+                    bridge, so this is the only way to run the preview slower than it."""
+        now = time.monotonic_ns()
+        viewer = self._consumers > 0 or now < self._viewer_pending_ns
+        # ...and never before a few dozen buffers have reached webrtcsink: its startup codec
+        # discovery feeds on them, and a zero-latency encoder still wants more than one.
+        if self._idle_interval_ns and self._gate_ok and not viewer \
+                and now >= self._idle_grace_ns and self._enc_frames >= _IDLE_MIN_ENC_FRAMES:
+            if not self._idle_active:
+                self._idle_active = True
+                log.info("ingress: idle (no viewers) -- trickling %g fps ahead of the debayer/convert "
+                         "chain until a viewer connects", self._idle_fps)
+            if now - self._idle_last_ns < self._idle_interval_ns * 9 // 10:
+                self._idle_dropped += 1
+                return True
+            self._idle_last_ns = now
+            return False
+        if self._idle_active:
+            self._idle_active = False
+            log.info("ingress: viewer present (%d) -- full rate; %d frame(s) skipped while idle",
+                     self._consumers, self._idle_dropped)
+        if self._fps_interval_ns:
+            # 10% tolerance so source jitter around the cap's period doesn't halve the rate
+            if now - self._fps_last_ns < self._fps_interval_ns * 9 // 10:
+                self._fps_dropped += 1
+                return True
+            self._fps_last_ns = now
+        return False
+
+    def _ingress_seg(self) -> str:
+        """Heartbeat segment: gate state + cap accounting (+ per-thread CPU when enabled)."""
+        seg = ""
+        if self._idle_interval_ns and self._gate_ok:
+            seg += " idle=%s(dropped %d)" % (("%gfps" % self._idle_fps) if self._idle_active else "off",
+                                             self._idle_dropped)
+        if self._fps_interval_ns:
+            seg += " fps-cap=%g(dropped %d)" % (self._max_fps, self._fps_dropped)
+        if self._thread_cpu is not None:
+            cpu = format_top(self._thread_cpu.tick())
+            if cpu:
+                seg += " " + cpu
+        return seg
 
     # ---- capture->now latency (offset_end = absolute capture ns; unixfd + headered shm) --------
     @staticmethod
@@ -523,6 +650,7 @@ class Bridge:
         brackets everything upstream of the encoder (core + transport hop + queue/debayer/convert);
         the WebRTC network/receiver legs are a per-consumer matter it cannot see."""
         buf = info.get_buffer()
+        self._enc_frames += 1
         if buf is not None:
             lat = self._capture_lat_ms(buf.offset_end)
             if lat is not None:
@@ -564,6 +692,7 @@ class Bridge:
         """The status heartbeat (every CAM_WEBRTC_STATUS seconds; default 10, 0 = off)."""
         if self._stopping:
             return False
+        self._sync_consumers()
         delta = self._rx_frames - self._status_prev
         self._status_prev = self._rx_frames
         src = self.pipeline.get_by_name("cam_src") if self.pipeline is not None else None
@@ -584,6 +713,7 @@ class Bridge:
         lat_seg = self._lat_fmt("cap->rx", lat_rx) + self._lat_fmt("cap->enc", lat_enc)
         if lat_seg and self._ts_source:
             lat_seg += " ts_src=" + self._ts_source
+        lat_seg += self._ingress_seg()
         _ok, state, pending = self.pipeline.get_state(0)
         log.info("status: state=%s%s in=%d frames (+%d/%ds, %.1f MB) caps=%s consumers=%d%s",
                  Gst.Element.state_get_name(state),
@@ -612,6 +742,27 @@ class Bridge:
         else:
             self._status_zero = 0
         return True
+
+    def _on_session_requested(self, _signaller, *args):
+        """A viewer asked the signaller for a session: full rate for 10 s so the stream is producing
+        by the time webrtcsink adds the consumer (consumer-added then takes over)."""
+        self._viewer_pending_ns = time.monotonic_ns() + 10_000_000_000
+
+    def _sync_consumers(self):
+        """Safety net for the throttle: re-derive the viewer count from webrtcsink's own session
+        list (the `get-sessions` action) on each heartbeat, so a missed consumer-added/removed can
+        neither leave a viewer at the idle trickle nor keep full rate for nobody."""
+        sink = self.pipeline.get_by_name("cam_webrtcsink") if self.pipeline is not None else None
+        if sink is None:
+            return
+        try:
+            sessions = sink.emit("get-sessions")
+        except Exception:                             # noqa: BLE001 -- older builds: keep the signals' count
+            return
+        n = len(sessions) if sessions is not None else 0
+        if n != self._consumers:
+            log.info("consumer count resynced from get-sessions: %d -> %d", self._consumers, n)
+            self._consumers = n
 
     def _on_consumer_added(self, _sink, peer_id, _webrtcbin):
         self._consumers += 1

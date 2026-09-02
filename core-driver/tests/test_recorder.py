@@ -149,6 +149,22 @@ def test_resolved_encoder_reflects_availability_fallback():
     assert enc == "ffv1"
 
 
+
+def test_ffv1_speed_knobs_land_in_the_fragment():
+    # the software lossless path (thermal 16-bit) is the one CPU codec in the system; its speed
+    # shape must be configurable, and the defaults must stay FFV1's best-compression shape
+    rec.Gst = _FakeGst(_DEV)
+    cfg = RecordingConfig(encoder="ffv1", ffv1_coder="golomb", ffv1_context=False,
+                          ffv1_slices=8, ffv1_slicecrc=False)
+    d, enc = rec.build_recorder_description(cfg, 16, "/data/recordings/t", 60.0, False, None)
+    assert enc == "ffv1"
+    assert "avenc_ffv1 coder=0 context=0 threads=0 slices=8 slicecrc=0" in d
+    assert "avenc_ffv1 coder=1 context=1 threads=0 slices=4 slicecrc=1" in _desc(_DEV, encoder="ffv1")
+    bad = RecordingConfig(encoder="ffv1", ffv1_coder="turbo", ffv1_slices=999)
+    d, _ = rec.build_recorder_description(bad, 16, "/data/recordings/t", 60.0, False, None)
+    assert "coder=1" in d and "slices=64" in d       # unknown coder -> range; slices clamped
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

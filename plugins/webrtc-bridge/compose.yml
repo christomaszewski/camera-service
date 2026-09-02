@@ -58,6 +58,14 @@ services:
       # run at the reduced size: THE CPU lever for a 5MP color preview. Planned at runtime from the
       # stream's own caps, so it needs no geometry env. PREVIEW-ONLY -- recording/ROS keep full res.
       - CAM_WEBRTC_MAX_SIZE=${CAM_WEBRTC_MAX_SIZE:-}
+      # Ingress throttle: with no viewer connected the debayer/convert/scale chain runs for nobody
+      # (NVENC only made the encoder cheap) -- run it at a 1 fps trickle until a viewer connects
+      # (a trickle, not a stop: codec discovery and a late-counted viewer stay alive; 0 = off). Plus
+      # an optional preview rate cap, dropped at ingress too: the plugin endpoint's rate is shared
+      # with the ROS bridge, so this is how the preview runs slower than it.
+      - CAM_WEBRTC_IDLE_FPS=${CAM_WEBRTC_IDLE_FPS:-}
+      - CAM_WEBRTC_IDLE_GRACE_S=${CAM_WEBRTC_IDLE_GRACE_S:-}
+      - CAM_WEBRTC_MAX_FPS=${CAM_WEBRTC_MAX_FPS:-}
       # Geometry: only the LEGACY shm-raw path needs it (raw shm carries no caps; must match the
       # camera frame). The plugin-endpoint transports self-describe -- CAM_FPS alone still serves as
       # the caps rate HINT on headered shm (the header carries no rate; feeds the H.264 level math).
@@ -123,6 +131,7 @@ services:
       # params (UPPERCASE passthrough).
       - CAM_WEBRTC_STATUS=${CAM_WEBRTC_STATUS:-}
       - CAM_WEBRTC_LATENCY_OVERLAY=${CAM_WEBRTC_LATENCY_OVERLAY:-}
+      - CAM_WEBRTC_STATUS_THREADS=${CAM_WEBRTC_STATUS_THREADS:-}   # N busiest threads on the heartbeat (per-element CPU)
       - GST_DEBUG=${GST_DEBUG:-}
       - GST_DEBUG_NO_COLOR=1
     command: ["bash", "run.sh"]

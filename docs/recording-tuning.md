@@ -101,7 +101,12 @@ The one thing that matters for FFV1 is **throughput**, and it has a real cliff: 
 `avenc_ffv1` caps around **27 fps for 16-bit 640×512 on an Orin core**, so a 60 fps thermal camera
 stalls the recorder (the tee backpressures, consumers starve, the feeder drops frames with
 `enqueue_failures` climbing). The recorder therefore runs FFV1 **multi-threaded across slices**
-(`threads=auto slices=4`), which restores real-time with headroom — no config knob, it's automatic.
+(`threads=auto slices=4`), which restores real-time with headroom. Its speed/size shape is
+configurable under `recording:` — `ffv1_coder` (`range`, the default and smallest, or `golomb`,
+~1.5–2× cheaper), `ffv1_context` (context modelling; off = faster), `ffv1_slices` (parallel slices, i.e.
+how many cores the encoder can use) and `ffv1_slicecrc` (per-slice corruption CRC; off = slightly
+faster). All of them stay bit-exact lossless; when a 60 fps 16-bit camera's `avenc_ffv1` threads
+saturate the `health:` line (`health.threads`), `golomb` without context is the trade to make first.
 Once the encoder keeps up, the next ceiling is **sustained disk write** (~25–30 MB/s for 60 fps 16-bit
 640×512 — noisy thermal data barely compresses): if `camsrc queue full` warnings persist with the CPU
 idle, the `recording.output_dir` storage is the bottleneck — drop the frame rate or point it at faster

@@ -45,6 +45,7 @@ from gi.repository import GLib, Gst
 from . import recorder as rec
 from . import transport
 from .dropstats import DropStats
+from .threadcpu import ThreadCpu, format_top
 from .formats import bytes_per_frame, parse_pixel_format
 from .sidecar import SidecarHeader, SidecarWriter
 from .sources.base import SourceConfigChanged
@@ -130,6 +131,10 @@ class CapturePipeline:
         self._image_size = 0
         self._stopping = False
         self._fatal = False                # pipeline ERROR / fatal source change -> non-zero exit
+        # health.threads: per-thread CPU breakdown on the health line (see threadcpu.py); getattr so a
+        # SimpleNamespace cfg in the unit tests needs no health block.
+        top = int(getattr(getattr(cfg, "health", None), "threads", 0) or 0)
+        self._thread_cpu = ThreadCpu(top=top) if top > 0 else None
         self._have_unixfd = False          # JP7 (GStreamer 1.24): unixfd transport available
         self._unixfd_path = None
         self._fd_alloc = None              # GstAllocators.FdAllocator -> memfd buffers for unixfd
@@ -680,18 +685,23 @@ class CapturePipeline:
         if self._stopping:
             return False
         s = self.drops.summary()
+        cpu = ""
+        if self._thread_cpu is not None:               # health.threads: where the CPU went this interval
+            seg = format_top(self._thread_cpu.tick())
+            cpu = (" " + seg) if seg else ""
         # An active reconnect is a KNOWN gap, already logged by the watchdog -- don't double-report.
         if self._n_pushed == self._last_health_frames and not self._reconnecting:
             log.error("health: NO frames in the last %ds (total=%d) -- the pipeline is still PLAYING "
-                      "but capture is stalled, not idle", _HEALTH_INTERVAL_S, self._n_pushed)
+                      "but capture is stalled, not idle%s", _HEALTH_INTERVAL_S, self._n_pushed, cpu)
             return True
         self._last_health_frames = self._n_pushed
+        s = {**s, "cpu": cpu}
         if s["source_gaps"] or s["enqueue_failures"] or s["publish_drops"] or s["pts_rebases"]:
             log.warning("health: frames=%(frames)d source_gaps=%(source_gaps)d "
                         "frames_missing=%(frames_missing)d enqueue_failures=%(enqueue_failures)d "
-                        "publish_drops=%(publish_drops)d pts_rebases=%(pts_rebases)d", s)
+                        "publish_drops=%(publish_drops)d pts_rebases=%(pts_rebases)d%(cpu)s", s)
         else:
-            log.info("health: frames=%(frames)d, no drops", s)
+            log.info("health: frames=%(frames)d, no drops%(cpu)s", s)
         return True
 
     def _watchdog(self) -> bool:

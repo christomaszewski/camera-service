@@ -158,3 +158,10 @@ plugins:
   #   params:
   #     topic: image_raw
   #     # frame_id: my_frame
+
+# ---- health line (every 30 s in the core's log) ------------------------------------------------
+health:
+  # threads: 6             # append the N busiest threads (percent of one core): GStreamer names its
+  #                          streaming threads after the element, so this is a per-element CPU
+  #                          breakdown -- videoconvert vs encoder vs the Python feeder -- from the
+  #                          logs alone (Linux /proc; 0 = off)
