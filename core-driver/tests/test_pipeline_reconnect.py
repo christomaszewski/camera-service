@@ -63,7 +63,7 @@ class _FlakySource:
 def _pipe(source):
     cfg = SimpleNamespace(camera=SimpleNamespace(reconnect_backoff_s=0.001,
                                                  reconnect_backoff_max_s=0.002))
-    p = CapturePipeline(cfg, source, SimpleNamespace())
+    p = CapturePipeline(cfg, source)
     p._reconnecting = True          # the watchdog sets this before spawning the worker
     return p
 

@@ -13,6 +13,7 @@ Where the project is, what's validated, what's left, and how to resume. Pair wit
 | **P3** | Transport (JP7 `unixfd` / JP6 shm+header, + optional raw endpoint), C++ `rclcpp` ros2-bridge (both consumers; raw + lazy compressed `Image`), per-sensor supervisor | ✅ done |
 | **P4** | **WebRTC** consumer (`webrtcsink`, lossy low-latency, remote viewing) | ✅ done (headless loopback validated in containers **and on an R39 Orin with HW NVENC**; browser viewing still to try; webrtcsink pins H.264 constrained-baseline ≤ gst-plugins-rs 0.15) |
 | **P5** | Hardening (reconnect, disk-full, NVENC session budget, NIC/PTP tuning) + on-Jetson / on-camera validation | ⏳ in progress — **source reconnect/backoff done** (GigE, USB hotplug, RTSP re-probe); **JP7 bring-up done**; disk-full + NVENC budget next |
+| **P6** | **Lifecycle control plane** — standby (`inactive`) / `active`; the recorder as a per-session pipeline opened/finalized at runtime; SIGUSR1/2 local control; zenoh control plane (`fleet/<vehicle>/svc/<instance>/lifecycle…`, peer mode, router optional) | ⏳ in progress — **session-scoped recorder + lifecycle + signals done** (validated in containers); zenoh adapter next |
 
 ## Validated by actually running it (containers, no hardware)
 
@@ -43,8 +44,14 @@ shm both work.
 - `tools/gvsp-chunk-emitter/reconnect_test.sh` — camera reconnect/backoff: kill the GVSP emitter
   mid-stream + restart it; assert the core detects, backs off, reconnects, resumes, stays alive, and
   finalizes a non-corrupt lossless recording
+- `core-driver/tools/lifecycle_test.sh` — standby/active: boot `inactive` (consumers fed, nothing
+  recorded) → SIGUSR1/SIGUSR2 recording sessions, each a finalized run (threshold-split segments, CSV
+  rows, self-attesting JSON), a second prefix on re-activate, KILL → the restart resumes `active`;
+  `usb_test.sh` adds a mid-stream H.264 session gated to its first keyframe
 - `python3 core-driver/tests/test_*.py` — pure-logic unit tests (transport wire format, config incl. the
-  run-stamped recording prefix, timestamp ladder, drop accounting, pixel formats, recorder selection/fallback)
+  run-stamped recording prefix, timestamp ladder, drop accounting, pixel formats, recorder selection/fallback,
+  the keyframe gate, the lifecycle state machine + remembered state, the recording session's close ordering,
+  the pipeline's session mechanism + stop budget)
 
 ## Validated on the Orin (hardware)
 
@@ -102,3 +109,8 @@ shm both work.
   Compose projects; shm shared as an external named volume + `ipc:host` (not pod-scoped). No generated
   compose. Podman/pods rejected (would wall off the shm). `service:` tag reserved for a future fleet launcher.
 - Zenoh kept as the future data-fabric transport (swappable in).
+- Lifecycle = `inactive`/`active` (ROS-lifecycle naming); the recorder is a per-SESSION `Gst.Pipeline`
+  (private appsrc, own prefix/sidecar, delta drop counters; process PTS base untouched; H.26x sessions
+  gate on a keyframe) — never a removable tee bin. Synchronous bounded finalize inside the stop budget.
+  Boot state from config (default active); crash restart resumes the last command, clean stop forgets.
+  SIGUSR1/2 = local control; zenoh control plane on the same policy object.

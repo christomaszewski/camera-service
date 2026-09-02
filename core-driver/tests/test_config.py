@@ -7,7 +7,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from cam_driver.config import parse_config, resolve_recording_dir, unique_run_prefix  # noqa: E402
+from cam_driver.config import (lifecycle_state_file, parse_config, resolve_recording_dir,  # noqa: E402
+                               unique_run_prefix)
 from cam_driver.sources import make_source  # noqa: E402
 
 
@@ -276,6 +277,35 @@ def test_unique_run_prefix():
         assert unique_run_prefix(d, "cam", _now=1700000001) == "cam-20231114-221321"
     # output dir not created yet -> nothing to collide with
     assert unique_run_prefix("/nonexistent-dir-for-test", "cam", _now=1700000000) == "cam-20231114-221320"
+
+
+def test_control_defaults_boot_active_and_remember():
+    # Every existing config (no `control:` block) must behave exactly as before: record from frame one.
+    c = parse_config({})
+    assert c.control.initial_state == "active"
+    assert c.control.resume_state is True
+    assert c.control.state_file == ""
+
+
+def test_control_initial_state_is_validated():
+    assert parse_config({"control": {"initial_state": "inactive"}}).control.initial_state == "inactive"
+    assert parse_config({"control": {"initial_state": " Active\n"}}).control.initial_state == "active"
+    try:
+        parse_config({"control": {"initial_state": "activ"}})
+    except ValueError as e:
+        assert "initial_state" in str(e) and "activ" in str(e)
+    else:
+        raise AssertionError("a typo'd initial_state must fail at parse time, not boot the wrong way")
+
+
+def test_lifecycle_state_file_sits_next_to_the_transport_sockets():
+    # The socket volume is external and per-sensor, so it outlives the container: the right place for
+    # a state a crash restart should find.
+    assert lifecycle_state_file(parse_config({})) == "/tmp/cam/lifecycle.state"
+    c = parse_config({"transport": {"plugin_endpoint": {"socket_path": "/run/x/frames"}}})
+    assert lifecycle_state_file(c) == "/run/x/lifecycle.state"
+    c = parse_config({"control": {"state_file": "/var/lib/cam/state"}})
+    assert lifecycle_state_file(c) == "/var/lib/cam/state"
 
 
 def _main():

@@ -69,4 +69,35 @@ docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
   grep -qi "got eos" /tmp/decode.log || { echo "FAIL: decode never reached EOS"; exit 1; }
   echo "color FFV1 native-I420 decode OK"
 '
+
+echo
+echo "########## H.264 stream-copy SESSION opened mid-stream (keyframe gate) ##########"
+docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
+  set -e
+  mkdir -p /data/recordings /tmp/cam
+  echo "=== fake USB H264 producer booting INACTIVE; activate at ~3s, deactivate, stop ==="
+  python3 main.py -c config/usb-fake-h264-session.yaml >/tmp/h.log 2>&1 &
+  CORE=$!
+  sleep 3
+  kill -USR1 "$CORE"; sleep 4
+  kill -USR2 "$CORE"; sleep 1
+  kill -INT "$CORE"; wait "$CORE" 2>/dev/null || true; echo "core done"
+  grep -q "recorder: stream-copy" /tmp/h.log || { echo "FAIL: auto did not pick stream-copy for H264"; tail -20 /tmp/h.log; exit 1; }
+  J=$(ls /data/recordings/usbh264-*.json) || { echo "FAIL: no sidecar JSON"; exit 1; }
+  python3 - "$J" <<EOF
+import json, sys
+d = json.load(open(sys.argv[1]))
+s = d["session"]
+assert 0 <= s["skipped_awaiting_keyframe"] <= 14, s   # x264 key-int-max=15: at most one GOP waited out
+assert s["frames_recorded"] > 0 and s["error"] is None and s["truncated"] is False, s
+print("keyframe gate:", {k: s[k] for k in ("skipped_awaiting_keyframe", "frames_recorded", "segments")})
+EOF
+  echo "-- the first segment decodes from its FIRST frame (it starts on the IDR the gate waited for) --"
+  M=$(ls /data/recordings/usbh264-*-00000.mkv) || { echo "FAIL: no recording segment"; exit 1; }
+  gst-launch-1.0 -v filesrc location="$M" ! matroskademux ! h264parse ! avdec_h264 ! fakesink >/tmp/decode.log 2>&1 \
+    || { echo "FAIL: mkv decode errored"; tail -5 /tmp/decode.log; exit 1; }
+  grep -q "video/x-h264" /tmp/decode.log || { echo "FAIL: recording is not H.264 (stream-copy broken)"; exit 1; }
+  grep -qi "got eos" /tmp/decode.log || { echo "FAIL: decode never reached EOS"; exit 1; }
+  echo "mid-stream H.264 session: stream-copied, gated to a keyframe, decodes OK"
+'
 echo "PASS: usb_test"

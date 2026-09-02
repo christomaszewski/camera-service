@@ -208,6 +208,39 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
   `GstReferenceTimestampMeta` on a `webrtcsrc` consumer) is the remaining future upgrade — the
   in-bridge half (capture time on the buffers) is done.
 
+- **Lifecycle: standby / active, with the recorder as a per-session pipeline.** Rig services come up
+  in a *ready* state and are switched *active* by an orchestrator, so the core has two steady states,
+  named after ROS 2 managed-node lifecycle so a ROS-side proxy is a mechanical translation: **inactive**
+  (camera streaming, plugin transport + preview live, recorder off) and **active** (+ an open recording
+  session). What made this cheap is that the recorder was already fed by a private `appsrc` in two of
+  its three wirings (CFA-tiled, stream-copy); it is now *always* fed that way, from **a separate
+  `Gst.Pipeline` built per session** (`session.py`) and finalized with exactly the process-shutdown
+  sequence scoped to one object (stop feeding → EOS → wait for *that* bus's EOS → NULL). The main
+  pipeline is never touched by a transition — no tee request pads, no blocking probes: EOS on one tee
+  branch is swallowed by the bin's aggregation (the socket sinks never EOS), so a removable recorder
+  *bin* would need probes inside splitmuxsink plus a blocking probe + release + removal in PLAYING —
+  the class of "what is still running, who joins it" code #47 exists to close. Each session gets its
+  own run-stamped prefix, `SidecarWriter` (single-use thread; truncates on open) and a **delta** of the
+  process drop counters (the process counters never reset — they are the live link-health signal and
+  must keep seeing gaps while inactive); `_pts_for`'s process-wide time base is untouched, so a session
+  opened an hour in starts at PTS≈3600 s — what segment 00001 of every run already looks like — and
+  the CSV↔mkv join stays exact (the header records `first_pts_ns`; `offset-to-zero` would break the
+  join). Stream-copy H.264/H.265 sessions **gate on a sync point** (`keyframe.py`, a byte-level
+  IDR/IRAP check on the delivered bytes + caps string): a parser does not drop pre-IDR data, so an
+  ungated session's segment 00000 would start on P-frames no decoder can render. Finalization is a
+  bounded *synchronous* drain on the main loop (data flow lives in GStreamer threads, so the
+  transport never stalls) — it removes the quit-vs-drain race instead of coordinating it, and keeps the
+  clean-stop chain inside the supervisor's `CORE_STOP_GRACE_S`. A recorder ERROR ends the *session*,
+  not the process — unless the deployment has no control plane and booted active, where nothing could
+  ever re-activate it and today's "disk full must not look clean" non-zero exit is kept. Boot state:
+  `control.initial_state` (default `active`, so every existing config and smoke is unchanged);
+  a **crash restart resumes the last commanded state** (a file in the per-sensor socket volume, which
+  outlives the container) while a **deliberate stop forgets it** (`down`/`up` boots from config).
+  SIGUSR1/SIGUSR2 are the permanent zero-dependency local control; the zenoh control plane rides on
+  the same `Lifecycle` policy object. Validated by `lifecycle_test.sh` (inactive boot feeds consumers
+  and records nothing; two USR1/USR2 cycles → two finalized runs, the first split on splitmuxsink's
+  threshold, not per keyframe; KILL → resumed active) and `usb_test.sh`'s mid-stream H.264 session.
+
 - **Zenoh as the future data fabric.** Eclipse Zenoh (mature, v1.x; pub/sub, same-host SHM with
   transparent network fallback, per-message "attachments" ideal for ts+frame_id; `rmw_zenoh` is a
   Tier-1 ROS2 RMW). It slots into the plugin contract as just-another-transport (replacing shm+header)

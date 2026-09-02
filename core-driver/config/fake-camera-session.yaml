@@ -1,0 +1,38 @@
+# Test config: the fake Aravis camera booting INACTIVE -- streaming to consumers, recorder OFF until a
+# lifecycle activate (SIGUSR1 / the zenoh control plane). tools/lifecycle_test.sh drives it through
+# activate/deactivate cycles and asserts each recording SESSION finalizes its own run.
+#
+# Run:  docker compose run --rm core-driver main.py -c config/fake-camera-session.yaml
+camera:
+  type: gige
+  frame_rate: 25.0
+
+gige:
+  fake: true
+  camera_id: Fake_1
+  pixel_format: Mono8
+
+recording:
+  enabled: true
+  encoder: auto               # no NVENC in cam-dev -> ffv1 (warned), as fake-camera.yaml
+  name_prefix: fake
+  segment_seconds: 2          # short segments: a session opened mid-stream must split on the THRESHOLD
+                              # (2-4 files for ~5 s), not per keyframe -- the check that its non-zero
+                              # first PTS isn't misread by splitmuxsink as an overrun
+
+control:
+  initial_state: inactive     # boot standby; SIGUSR1 = activate, SIGUSR2 = deactivate
+  resume_state: true          # a crash restart resumes the last commanded state; a clean stop forgets
+
+preview:
+  enabled: false
+
+transport:
+  plugin_endpoint:
+    enabled: true
+    socket_path: /tmp/cam/frames
+  raw_endpoint:
+    enabled: false
+    socket_path: /tmp/cam/raw
+
+plugins: []

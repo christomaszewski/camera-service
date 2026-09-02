@@ -120,6 +120,8 @@ class Supervisor:
     def run(self) -> int:
         signal.signal(signal.SIGTERM, self._on_signal)
         signal.signal(signal.SIGINT, self._on_signal)
+        signal.signal(signal.SIGUSR1, self._forward_to_core)
+        signal.signal(signal.SIGUSR2, self._forward_to_core)
         self._build_services()
         for s in self.services:
             if self._stopping:
@@ -146,6 +148,16 @@ class Supervisor:
     def _on_signal(self, signum, _frame) -> None:
         log.info("signal %s received; stopping sensor", signal.Signals(signum).name)
         self._stopping = True
+
+    def _forward_to_core(self, signum, _frame) -> None:
+        """Lifecycle transitions (SIGUSR1 = activate recording, SIGUSR2 = deactivate) are the core's:
+        `docker kill -s USR1 <sensor>` lands here (via tini), so hand them on."""
+        for s in self.services:
+            if s.critical and s.alive():
+                try:
+                    s.proc.send_signal(signum)
+                except ProcessLookupError:
+                    pass
 
     def _monitor(self) -> None:
         while not self._stopping:

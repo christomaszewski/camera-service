@@ -90,6 +90,17 @@ recording:
   # nvenc_maxperf: true    # high GPU clocks for encoder throughput
   # videoconvert_threads: 4  # parallelize the recorder's CPU format convert (the 5MP bottleneck); 0 = all cores
 
+# ---- lifecycle: standby / active ----------------------------------------------------------------
+# The camera streams to consumers (ros2/webrtc) in EITHER state; a transition switches the lossless
+# RECORDER, which runs as a session with its own run prefix + sidecar. Transitions at runtime:
+# SIGUSR1 = activate, SIGUSR2 = deactivate (`docker kill -s USR1 <container>`).
+# control:
+#   initial_state: active  # active (default: record from the first frame) | inactive (standby: wait for
+#   #                        an activate). A `recording.enabled: false` config is always inactive.
+#   resume_state: true     # a CRASH restart resumes the last commanded state (kept in the sensor's socket
+#   #                        volume); a clean stop forgets it, so `down`/`up` boots from initial_state
+#   # state_file: ""       # where that state lives; default <transport socket dir>/lifecycle.state
+
 # ---- local debug preview (headless by default) ---------------------------------------------------
 # preview:
 #   enabled: false

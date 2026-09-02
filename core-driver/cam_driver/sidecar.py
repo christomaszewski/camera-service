@@ -49,6 +49,16 @@ class SidecarHeader:
     cfa_tile_mode: str = "off"
     pts_convention: str = "pts_ns = timestamp_ns - base_timestamp_ns"
     absolute_time: str = "absolute_ns = pts_ns + base_timestamp_ns (epoch per timestamp_source)"
+    # A process records in SESSIONS (lifecycle activate/deactivate), each with its own prefix and
+    # sidecar. base_timestamp_ns stays the PROCESS base so pts_convention holds across sessions: a
+    # session opened later simply starts at a larger pts_ns (first_pts_ns). pts_offset_ns is a
+    # session-local rebase applied before the muxer, 0 unless a platform needed it.
+    session_index: int = 0
+    session_prefix: str = ""
+    first_pts_ns: int = 0
+    first_frame_id: int = 0
+    first_timestamp_ns: int = 0
+    pts_offset_ns: int = 0
 
 
 class SidecarWriter:
@@ -62,21 +72,32 @@ class SidecarWriter:
         self._dropped = 0
         self._failed = False    # writer thread died on an I/O error (see _run)
 
+    @property
+    def csv_path(self) -> str:
+        return self._csv_path
+
+    @property
+    def json_path(self) -> str:
+        return self._json_path
+
     def write_header(self, header: SidecarHeader) -> None:
         os.makedirs(os.path.dirname(self._json_path) or ".", exist_ok=True)
         with open(self._json_path, "w") as f:
             json.dump(asdict(header), f, indent=2)
         log.info("wrote sidecar header %s", self._json_path)
 
-    def write_summary(self, summary: dict) -> None:
-        """Merge a final summary (e.g. drop counters) into the JSON sidecar on stop, so the
-        recording's metadata attests how faithful the log is to what was received."""
+    def write_summary(self, summary: dict, extra: Optional[dict] = None) -> None:
+        """Merge a final summary (the drop counters, plus any `extra` top-level attestation such as
+        the recording session's own counters) into the JSON sidecar on stop, so the recording's
+        metadata attests how faithful the log is to what was received."""
         try:
             data = {}
             if os.path.exists(self._json_path):
                 with open(self._json_path) as f:
                     data = json.load(f)
             data["drops"] = summary
+            if extra:
+                data.update(extra)
             if self._failed:
                 # Self-attesting: the CSV is truncated, so a consumer must not read a missing
                 # frame_id as "this frame was never captured".
