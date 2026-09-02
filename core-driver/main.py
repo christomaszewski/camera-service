@@ -1,9 +1,10 @@
 """Entry point for the camera core driver (capture + timestamp + record).
 
-Pipeline phase status: P0 (bring-up) + P1 (timestamp spine) + P2 (recorder).
-Transport publish (shm/unixfd) and WebRTC are wired in as later phases via the tee
-attach point in pipeline.py. The capture frontend is selected by `source.type`
-(default gige); see cam_driver.sources.
+Pipeline phase status: P0 (bring-up) + P1 (timestamp spine) + P2 (recorder) + P6 (lifecycle: the
+recorder is a per-SESSION pipeline opened / finalized at runtime -- SIGUSR1 / SIGUSR2 here, the zenoh
+control plane on top). Transport publish (shm/unixfd) and WebRTC are wired in as later phases via the
+tee attach point in pipeline.py. The capture frontend is selected by `source.type` (default gige);
+see cam_driver.sources.
 """
 from __future__ import annotations
 
@@ -24,9 +25,9 @@ except (ImportError, ValueError):
     class CameraError(Exception):
         pass
 
-from cam_driver.config import load_config, resolve_recording_dir, unique_run_prefix
+from cam_driver.config import lifecycle_state_file, load_config, resolve_recording_dir
+from cam_driver.lifecycle import ACTIVE, Lifecycle
 from cam_driver.pipeline import CapturePipeline
-from cam_driver.sidecar import SidecarWriter
 from cam_driver.sources import make_source
 
 
@@ -58,12 +59,12 @@ def main(argv=None) -> int:
     # under the managed recordings root (see docker-compose.yml's `recordings` bind).
     cfg.recording.output_dir = resolve_recording_dir(
         cfg.recording.output_dir, os.environ.get("RIG_DATA_DIR", ""), os.environ.get("CAM_INSTANCE", ""))
-    # Per-RUN prefix: a restart (e.g. compose restarting a crashed core) must never overwrite the
-    # previous run -- splitmuxsink restarts at -00000.mkv and the sidecar truncates its files.
-    cfg.recording.name_prefix = unique_run_prefix(cfg.recording.output_dir, cfg.recording.name_prefix)
-    log.info("config: source=%s frame_rate=%s recording=%s->%s/%s-* encoder=%s",
+    # The per-run prefix stamp lives in the recording SESSION (pipeline.activate): the boot session,
+    # every later activate and a restart each get their own, so nothing ever overwrites a run.
+    log.info("config: source=%s frame_rate=%s recording=%s->%s/%s-* encoder=%s boot_state=%s",
              cfg.camera.type, cfg.camera.frame_rate, cfg.recording.enabled,
-             cfg.recording.output_dir, cfg.recording.name_prefix, cfg.recording.encoder)
+             cfg.recording.output_dir, cfg.recording.name_prefix, cfg.recording.encoder,
+             cfg.control.initial_state)
 
     # The source owns the frontend: device + timestamp policy + feeder (here: GigE/Aravis,
     # incl. chunk/PTP setup). Everything downstream (pipeline) is source-agnostic.
@@ -75,10 +76,7 @@ def main(argv=None) -> int:
         log.error("%s", e)
         return 2
 
-    sidecar = SidecarWriter(os.path.join(cfg.recording.output_dir, cfg.recording.name_prefix))
-    sidecar.start()
-
-    pipe = CapturePipeline(cfg, source, sidecar)
+    pipe = CapturePipeline(cfg, source)
     try:
         pipe.build()
     except (GLib.Error, RuntimeError, OSError) as e:
@@ -87,17 +85,44 @@ def main(argv=None) -> int:
         # legible line + a non-zero exit. Uncaught, it's a raw traceback that compose restart-loops
         # with no hint of which element/path is missing.
         log.error("pipeline build failed: %s", e)
-        sidecar.stop()
         return 2
+
+    # Lifecycle policy over the pipeline's sessions: boot state (config / crash-resume), legal
+    # transitions, the state descriptor. SIGUSR1/2 are the zero-dependency local control.
+    lifecycle = Lifecycle(
+        pipe, recording_enabled=cfg.recording.enabled, initial_state=cfg.control.initial_state,
+        state_file=lifecycle_state_file(cfg), resume=cfg.control.resume_state,
+        instance=os.environ.get("CAM_INSTANCE") or "camera",
+        segment_seconds=cfg.recording.segment_seconds)
+    boot_state, _reason = lifecycle.resolve_boot_state()
+    # With no control plane, nothing could ever re-activate a recorder that died: keep today's
+    # non-zero exit for that shape (disk full must not look clean).
+    pipe.session_error_fatal = (boot_state == ACTIVE and not getattr(cfg.control, "enabled", False))
 
     def _stop(_signum, _frame):
         log.info("signal received, stopping")
+        lifecycle.forget()      # a DELIBERATE stop: the next boot follows the config, not the last command
         pipe.request_stop()
+
+    def _run_transition(transition):
+        r = lifecycle.request(transition)
+        log.info("lifecycle: %s (signal) -> ok=%s state=%s%s", transition, r.get("ok"), r.get("state"),
+                 f" error={r['error']}" if r.get("error") else "")
+        return False   # one-shot idle callback
+
+    def _transition(transition):
+        # Python signal handlers run between bytecodes on the main thread; the transition itself runs
+        # on the GLib loop (GLib.idle_add), where the pipeline's session hooks are safe.
+        def handler(_signum, _frame):
+            GLib.idle_add(_run_transition, transition)
+        return handler
 
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGUSR1, _transition("activate"))
+    signal.signal(signal.SIGUSR2, _transition("deactivate"))
 
-    pipe.run()
+    pipe.run(on_playing=lifecycle.boot)
     if pipe.had_error:
         log.error("exited after a pipeline error")   # disk full / encoder failure / fatal source change
         return 1

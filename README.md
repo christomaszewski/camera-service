@@ -252,6 +252,27 @@ Docker Compose **profiles**, and brings up that sensor's stack:
 ./core-driver/tools/supervisor_test.sh   # validate the in-image supervisor path
 ```
 
+### Standby / active (lifecycle control)
+
+The camera streams to consumers in **either** state; a transition switches the lossless **recorder**,
+which runs as a *session* with its own run prefix + sidecar (`<prefix>-00000.mkv` + `.csv/.json`),
+finalized on every deactivate — any number of times per process. `control.initial_state` picks the
+boot state (`active`, the default: record from the first frame; `inactive`: standby until told); a
+**crash restart resumes the last commanded state**, a clean stop forgets it. Local control needs
+nothing but signals (the supervisor forwards them to the core):
+
+```bash
+docker kill -s USR1 <core container>     # activate: open a recording session
+docker kill -s USR2 <core container>     # deactivate: finalize it (files closed within ~5 s)
+```
+
+Sessions are named `<prefix>-<UTCstamp>` (an orchestrator's `run_id` is folded in), a stream-copy
+H.264/H.265 session waits for the next keyframe before muxing (attested as
+`session.skipped_awaiting_keyframe` in the JSON), and the JSON sidecar carries the session's own
+counters (`session.*`) beside the drop summary — which is the session's *delta* of the process
+counters. See [DESIGN.md](docs/DESIGN.md) ("Lifecycle") and `control:` in
+[camera.example.yaml](core-driver/config/sensors/camera.example.yaml).
+
 ## Status & roadmap
 
 - [x] **P0** project scaffold + container
@@ -275,12 +296,17 @@ Docker Compose **profiles**, and brings up that sensor's stack:
   **JetPack 7 bring-up** ✅ (JP7.2 Orin: CDI injection, `unixfd` transport shipped —
   [docs/jetpack7-bringup.md](docs/jetpack7-bringup.md)); disk-full + NVENC session budget next, then
   Thor portability (`nvunixfd` zero-copy, sm_110 is Thor-only).
+- [ ] **P6** lifecycle control plane *(in progress)* — **standby/active with a per-session recorder** ✅
+  (`inactive` boots streaming-only; SIGUSR1/SIGUSR2 open and finalize recording sessions; a crash
+  restart resumes the last commanded state — [`lifecycle_test.sh`](core-driver/tools/lifecycle_test.sh));
+  the **zenoh control plane** (`fleet/<vehicle>/svc/<instance>/lifecycle…`, peer mode, router optional) next.
 
 ### Testing tools (no Jetson, no camera)
 The data path is validated by actually running it in containers — including the **real Aravis
 chunk-parse path** via a patched chunk-emitting GV camera:
 - [core-driver/tools/dev_test.sh](core-driver/tools/dev_test.sh) — producer: capture → timestamp → encoder-fallback probe → FFV1 → shm
-- [core-driver/tools/usb_test.sh](core-driver/tools/usb_test.sh) — USB source: raw, **MJPEG stream-copy** (dual-output), and color/FFV1 paths
+- [core-driver/tools/lifecycle_test.sh](core-driver/tools/lifecycle_test.sh) — **standby/active lifecycle**: boot `inactive` (consumers fed, nothing recorded) → SIGUSR1/SIGUSR2 recording sessions as finalized runs (threshold-split segments, CSV rows, self-attesting JSON) → KILL + restart resumes `active`
+- [core-driver/tools/usb_test.sh](core-driver/tools/usb_test.sh) — USB source: raw, **MJPEG stream-copy** (dual-output), color/FFV1, and a mid-stream **H.264 session gated to its first keyframe**
 - [core-driver/tools/rtsp_test.sh](core-driver/tools/rtsp_test.sh) — RTSP source: local fake server → stream-copy record + **RTCP→NTP provenance** (CSV-checked)
 - [core-driver/tools/rtsp_reconnect_test.sh](core-driver/tools/rtsp_reconnect_test.sh) — RTSP stall/recovery: kill + restart the server, assert detect → reopen → frames resume
 - [plugins/ros2-bridge/tools/bridge_test.sh](plugins/ros2-bridge/tools/bridge_test.sh) — full chain → ROS2 raw + compressed `Image`

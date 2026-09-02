@@ -10,8 +10,8 @@ The `camera.frame_rate` + reconnect knobs are general; parse_config overlays the
 source's effective config, so the source code reads them from its own block while the YAML sets them
 ONCE under `camera:`.
 
-One file, two consumers: the `camera`/`<source>`/`recording`/`preview`/`transport` sections drive the
-core pipeline; the `plugins` list is for the per-sensor supervisor / cam-up (spawns each enabled plugin).
+One file, two consumers: the `camera`/`<source>`/`recording`/`preview`/`transport`/`control` sections
+drive the core pipeline; the `plugins` list is for the per-sensor supervisor / cam-up (spawns each enabled plugin).
 """
 from __future__ import annotations
 
@@ -196,6 +196,25 @@ class PluginConfig:
     params: dict = field(default_factory=dict)   # plugin-specific (e.g. ROS params); consumed by the supervisor
 
 
+LIFECYCLE_STATES = ("active", "inactive")
+
+
+@dataclass
+class ControlConfig:
+    """Lifecycle control: the state the core BOOTS into and how a restart remembers it. The camera
+    streams to consumers in EITHER state; what a transition switches is the high-fidelity recorder
+    (a recording SESSION with its own prefix + sidecar). Runtime transitions arrive as SIGUSR1
+    (activate) / SIGUSR2 (deactivate) on the core process."""
+    # active   = record from the first frame -- today's behaviour, and the default so every existing
+    #            config is unchanged. inactive = stream only; the recorder waits for an activate.
+    #            A `recording.enabled: false` config boots inactive regardless (nothing can activate it).
+    initial_state: str = "active"
+    # A CRASH restart resumes the last commanded state (kept in a file in the socket volume, which
+    # outlives the container); a graceful stop forgets it, so `down`/`up` boots from initial_state.
+    resume_state: bool = True
+    state_file: str = ""      # default: <dir of transport.plugin_endpoint.socket_path>/lifecycle.state
+
+
 @dataclass
 class AppConfig:
     camera: CameraConfig = field(default_factory=CameraConfig)   # GENERAL settings + source `type`
@@ -205,6 +224,7 @@ class AppConfig:
     recording: RecordingConfig = field(default_factory=RecordingConfig)
     preview: PreviewConfig = field(default_factory=PreviewConfig)
     transport: TransportConfig = field(default_factory=TransportConfig)
+    control: ControlConfig = field(default_factory=ControlConfig)
     plugins: list = field(default_factory=list)   # list[PluginConfig], for the plugin supervisor
 
 
@@ -302,6 +322,13 @@ def parse_config(raw: dict) -> AppConfig:
             isolation=str(p.get("isolation", "process")),
             params={**flat, **nested}))
 
+    control = _build(ControlConfig, raw.get("control"))
+    # _coerce only checks numeric fields; a typo'd state would otherwise boot the wrong way silently.
+    control.initial_state = str(control.initial_state or "active").strip().lower()
+    if control.initial_state not in LIFECYCLE_STATES:
+        raise ValueError(f"ControlConfig.initial_state: expected one of {LIFECYCLE_STATES}, "
+                         f"got {control.initial_state!r}")
+
     return AppConfig(
         camera=camera,
         gige=gige,
@@ -310,8 +337,18 @@ def parse_config(raw: dict) -> AppConfig:
         recording=_build(RecordingConfig, raw.get("recording")),
         preview=_build(PreviewConfig, raw.get("preview")),
         transport=transport_cfg,
+        control=control,
         plugins=plugins,
     )
+
+
+def lifecycle_state_file(cfg: AppConfig) -> str:
+    """Where the last commanded lifecycle state is remembered across a crash restart: next to the
+    transport sockets by default (the external per-sensor socket volume outlives the container)."""
+    if cfg.control.state_file:
+        return cfg.control.state_file
+    sock_dir = os.path.dirname(cfg.transport.plugin_endpoint.socket_path) or "/tmp/cam"
+    return os.path.join(sock_dir, "lifecycle.state")
 
 
 def resolve_recording_dir(output_dir: str, rig_data_dir: str = "", instance: str = "") -> str:
