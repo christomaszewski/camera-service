@@ -92,14 +92,19 @@ recording:
 
 # ---- lifecycle: standby / active ----------------------------------------------------------------
 # The camera streams to consumers (ros2/webrtc) in EITHER state; a transition switches the lossless
-# RECORDER, which runs as a session with its own run prefix + sidecar. Transitions at runtime:
-# SIGUSR1 = activate, SIGUSR2 = deactivate (`docker kill -s USR1 <container>`).
+# RECORDER, which runs as a session with its own run prefix + sidecar. Transitions at runtime: the
+# zenoh control plane (docs/LIFECYCLE.md -- fleet/<VEHICLE_ID>/svc/<name>/lifecycle, what the
+# dashboard/orchestrator drives) or SIGUSR1 = activate / SIGUSR2 = deactivate on the container.
 # control:
 #   initial_state: active  # active (default: record from the first frame) | inactive (standby: wait for
 #   #                        an activate). A `recording.enabled: false` config is always inactive.
 #   resume_state: true     # a CRASH restart resumes the last commanded state (kept in the sensor's socket
 #   #                        volume); a clean stop forgets it, so `down`/`up` boots from initial_state
 #   # state_file: ""       # where that state lives; default <transport socket dir>/lifecycle.state
+#   enabled: true          # the zenoh control plane; best-effort (no binding / no router = signals only)
+#   # zenoh_connect: tcp/localhost:7447   # endpoints, comma-separated; "" = multicast scouting only.
+#   #                        Unset -> the ZENOH_CONNECT env (compose: the vehicle's rmw_zenohd), which
+#   #                        rmw_zenohd needs (it disables scouting); a stock zenohd is scouted anyway.
 
 # ---- local debug preview (headless by default) ---------------------------------------------------
 # preview:
