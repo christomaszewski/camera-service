@@ -91,4 +91,49 @@ EOF
   kill -INT "$CORE"; wait "$CORE"
   echo "resumed session finalized; runs on disk:"; ls "$R"
 '
+
+echo
+echo "########## zenoh control plane, peer-to-peer -- NO router anywhere (docs/LIFECYCLE.md) ##########"
+docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
+  set -e
+  mkdir -p /data/recordings /tmp/cam
+  export VEHICLE_ID=testveh CAM_INSTANCE=cam_fake
+  R=/data/recordings/$CAM_INSTANCE          # CAM_INSTANCE also namespaces the recording dir (main.py)
+  KEY=fleet/testveh/svc/cam_fake/lifecycle
+  python3 main.py -c config/fake-camera-session.yaml >/tmp/core.log 2>&1 &
+  CORE=$!
+  echo "=== the probe LISTENS on the core default endpoint (tcp/localhost:7447), standing in for a router ==="
+  # The core connects to it (its connector retries until it does); no zenohd exists in this container.
+  python3 tools/lifecycle_probe.py --listen tcp/127.0.0.1:7447 --timeout 60 \
+      --steps wait-put get:inactive bad activate wait-state:active sleep:5 deactivate wait-state:inactive get:inactive \
+      >/tmp/probe.log 2>&1 || { echo "FAIL: probe steps"; cat /tmp/probe.log; tail -30 /tmp/core.log; exit 1; }
+  grep -E "EVENT|DESCRIPTOR|REPLY|STATE|STEP|SUMMARY" /tmp/probe.log
+  grep -q "EVENT PUT $KEY" /tmp/probe.log || { echo "FAIL: presence at the wrong key"; exit 1; }
+  grep -q "REPLY activate ok=True state=active" /tmp/probe.log || { echo "FAIL: activate reply"; exit 1; }
+  grep -q "REPLY reboot ok=False" /tmp/probe.log || { echo "FAIL: a bad transition must be a refusal reply"; exit 1; }
+  grep -q "REPLY deactivate ok=True state=inactive" /tmp/probe.log || { echo "FAIL: deactivate reply"; exit 1; }
+  grep -q "STATE $KEY/state active" /tmp/probe.log || { echo "FAIL: no state publication observed"; exit 1; }
+  P1=$(ls "$R"/fake-*.json | head -1); P1=${P1%.json}; P1=${P1##*/}
+  [ -n "$P1" ] || { echo "FAIL: no recording from the zenoh-activated session"; ls "$R"; exit 1; }
+  python3 - "$R/$P1.json" <<EOF
+import json, sys
+d = json.load(open(sys.argv[1]))
+s = d["session"]
+assert s["frames_recorded"] > 0 and s["truncated"] is False and s["error"] is None, s
+print("zenoh-driven session attests:", {k: s[k] for k in ("frames_recorded", "segments", "truncated")})
+EOF
+  [ "$(cat /tmp/cam/lifecycle.state)" = inactive ] || { echo "FAIL: state file after deactivate"; exit 1; }
+  grep -q "control plane: activate -> ok=True" /tmp/core.log || { echo "FAIL: core did not log the zenoh transition"; exit 1; }
+
+  echo "=== presence DELETE on a graceful stop (a second probe reconnects, then the core stops) ==="
+  python3 tools/lifecycle_probe.py --listen tcp/127.0.0.1:7447 --timeout 60 --steps wait-put wait-delete \
+      >/tmp/probe2.log 2>&1 &
+  PROBE=$!
+  for _ in $(seq 1 30); do grep -q "EVENT PUT" /tmp/probe2.log && break; sleep 1; done
+  grep -q "EVENT PUT" /tmp/probe2.log || { echo "FAIL: the second probe never saw the token"; cat /tmp/probe2.log; exit 1; }
+  kill -INT "$CORE"; wait "$CORE"
+  wait "$PROBE" || { echo "FAIL: DELETE not observed"; cat /tmp/probe2.log; exit 1; }
+  grep -E "EVENT|STEP|SUMMARY" /tmp/probe2.log
+  echo "zenoh control plane: presence, descriptor, change_state, state publications, DELETE on stop -- no router"
+'
 echo "PASS: lifecycle_test"

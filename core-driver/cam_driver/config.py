@@ -201,10 +201,11 @@ LIFECYCLE_STATES = ("active", "inactive")
 
 @dataclass
 class ControlConfig:
-    """Lifecycle control: the state the core BOOTS into and how a restart remembers it. The camera
-    streams to consumers in EITHER state; what a transition switches is the high-fidelity recorder
-    (a recording SESSION with its own prefix + sidecar). Runtime transitions arrive as SIGUSR1
-    (activate) / SIGUSR2 (deactivate) on the core process."""
+    """Lifecycle control: the state the core BOOTS into, how a restart remembers it, and the zenoh
+    control plane that switches it at runtime (docs/LIFECYCLE.md). The camera streams to consumers in
+    EITHER state; what a transition switches is the high-fidelity recorder (a recording SESSION with
+    its own prefix + sidecar). SIGUSR1 (activate) / SIGUSR2 (deactivate) on the core process always
+    work too, control plane or not."""
     # active   = record from the first frame -- today's behaviour, and the default so every existing
     #            config is unchanged. inactive = stream only; the recorder waits for an activate.
     #            A `recording.enabled: false` config boots inactive regardless (nothing can activate it).
@@ -213,6 +214,13 @@ class ControlConfig:
     # outlives the container); a graceful stop forgets it, so `down`/`up` boots from initial_state.
     resume_state: bool = True
     state_file: str = ""      # default: <dir of transport.plugin_endpoint.socket_path>/lifecycle.state
+    # The zenoh control plane: presence + state + change_state at fleet/<VEHICLE_ID>/svc/<CAM_INSTANCE>/
+    # lifecycle. Best-effort -- a missing binding or an unreachable router never stops capture.
+    enabled: bool = True
+    # Zenoh endpoints to connect to, comma-separated; "" = multicast scouting only. None (unset) defers
+    # to the ZENOH_CONNECT env, then tcp/localhost:7447 (the vehicle's rmw_zenohd). A stock zenohd /
+    # zenoh-bridge-remote-api on the same segment is also found by scouting, router or not.
+    zenoh_connect: Optional[str] = None
 
 
 @dataclass

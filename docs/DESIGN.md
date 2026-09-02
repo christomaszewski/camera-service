@@ -240,6 +240,23 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
   the same `Lifecycle` policy object. Validated by `lifecycle_test.sh` (inactive boot feeds consumers
   and records nothing; two USR1/USR2 cycles → two finalized runs, the first split on splitmuxsink's
   threshold, not per keyframe; KILL → resumed active) and `usb_test.sh`'s mid-stream H.264 session.
+  **The control plane is a native Zenoh keyspace** ([LIFECYCLE.md](LIFECYCLE.md):
+  `fleet/<vehicle>/svc/<instance>/lifecycle` = liveliness token + descriptor queryable,
+  `…/change_state` queryable, `…/state` publisher; JSON payloads), lifted from the media-discovery
+  advertiser's fail-safe session discipline. Zenoh because the dashboard already speaks plain Zenoh
+  (`zenoh-ts`) and the ROS graph rides `rmw_zenoh`, so one wire reaches both; a *native* keyspace rather
+  than impersonating an `rmw_zenoh` lifecycle node because rmw_zenoh's key-expression / attachment /
+  liveliness formats are unversioned internals (the ROS *names* are kept so an `rclpy` proxy is
+  mechanical); rather than a unix socket or HTTP because those reach neither the dashboard nor the
+  fleet. **Peer mode, no router required**: multicast scouting finds a stock `zenohd` /
+  `zenoh-bridge-remote-api` (the dashboard's backend), the explicit default endpoint reaches
+  `rmw_zenohd` (which disables scouting), and `connect/timeout_ms` is made finite — the stock peer
+  default (`-1`) would block `open()` until a router appeared; with it finite the endpoints retry in the
+  background and any start-up order works. `change_state` queries are marshalled onto the GLib main
+  loop and answered when the transition *completes*, so an orchestrator's ack means the files are
+  closed. Validated peer-to-peer in a container with no zenohd anywhere (the probe stands in for the
+  router at `tcp/localhost:7447`): presence, descriptor, activate/deactivate round-trips with a
+  recorded + finalized session, a refused bad transition, state publications, DELETE on a clean stop.
 
 - **Zenoh as the future data fabric.** Eclipse Zenoh (mature, v1.x; pub/sub, same-host SHM with
   transparent network fallback, per-message "attachments" ideal for ts+frame_id; `rmw_zenoh` is a

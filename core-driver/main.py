@@ -26,6 +26,7 @@ except (ImportError, ValueError):
         pass
 
 from cam_driver.config import lifecycle_state_file, load_config, resolve_recording_dir
+from cam_driver.control_zenoh import ZenohControl, lifecycle_key, vehicle_id, zenoh_connect_endpoints
 from cam_driver.lifecycle import ACTIVE, Lifecycle
 from cam_driver.pipeline import CapturePipeline
 from cam_driver.sources import make_source
@@ -88,20 +89,31 @@ def main(argv=None) -> int:
         return 2
 
     # Lifecycle policy over the pipeline's sessions: boot state (config / crash-resume), legal
-    # transitions, the state descriptor. SIGUSR1/2 are the zero-dependency local control.
+    # transitions, the state descriptor. SIGUSR1/2 are the zero-dependency local control; the zenoh
+    # control plane (docs/LIFECYCLE.md) rides the same object.
+    instance = os.environ.get("CAM_INSTANCE") or "camera"
     lifecycle = Lifecycle(
         pipe, recording_enabled=cfg.recording.enabled, initial_state=cfg.control.initial_state,
         state_file=lifecycle_state_file(cfg), resume=cfg.control.resume_state,
-        instance=os.environ.get("CAM_INSTANCE") or "camera",
-        segment_seconds=cfg.recording.segment_seconds)
+        instance=instance, segment_seconds=cfg.recording.segment_seconds)
     boot_state, _reason = lifecycle.resolve_boot_state()
     # With no control plane, nothing could ever re-activate a recorder that died: keep today's
     # non-zero exit for that shape (disk full must not look clean).
-    pipe.session_error_fatal = (boot_state == ACTIVE and not getattr(cfg.control, "enabled", False))
+    pipe.session_error_fatal = (boot_state == ACTIVE and not cfg.control.enabled)
+    control = ZenohControl(lifecycle, lifecycle_key(vehicle_id(), instance),
+                           connect=zenoh_connect_endpoints(cfg.control.zenoh_connect),
+                           enabled=cfg.control.enabled)
+
+    def _on_playing() -> bool:
+        if not lifecycle.boot():
+            return False
+        control.start()    # presence only once PLAYING + the lifecycle is initialised; retries until reachable
+        return True
 
     def _stop(_signum, _frame):
         log.info("signal received, stopping")
         lifecycle.forget()      # a DELIBERATE stop: the next boot follows the config, not the last command
+        control.close()         # withdraw presence now, not after the drain
         pipe.request_stop()
 
     def _run_transition(transition):
@@ -122,7 +134,8 @@ def main(argv=None) -> int:
     signal.signal(signal.SIGUSR1, _transition("activate"))
     signal.signal(signal.SIGUSR2, _transition("deactivate"))
 
-    pipe.run(on_playing=lifecycle.boot)
+    pipe.run(on_playing=_on_playing)
+    control.close()   # the error/EOS paths that never went through _stop
     if pipe.had_error:
         log.error("exited after a pipeline error")   # disk full / encoder failure / fatal source change
         return 1
