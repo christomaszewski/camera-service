@@ -40,6 +40,8 @@ _ENV_KEY = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 _RESERVED_KEYS = {
     "COMPOSE_PROJECT_NAME", "COMPOSE_PROFILES", "CAM_INSTANCE", "CAM_SOCK_VOLUME",
     "CAM_SOURCE_TYPE", "CAM_DEVICE", "CAM_CONFIG", "CAM_NETWORK", "CAM_PLATFORM",
+    "CAM_INPUT_SRC", "CAM_INPUT_DST", "CAM_INPUT_ROOT", "CAM_INPUT_DIR",   # the playback input
+    #                              bind -- a YAML param must never be able to mount a host path
     "PATH", "HOME", "SHELL", "IFS", "TMPDIR", "PYTHONPATH", "LD_LIBRARY_PATH", "LD_PRELOAD",
 }
 _RESERVED_PREFIXES = ("RIG_",)   # rig-owned host facts (data dir, image tag) -- never per-sensor YAML
@@ -192,6 +194,38 @@ def main() -> int:
     # CAM_DEVICE to apply docker-compose.usb.yml (gige/rtsp need no device, so it's absent for them).
     if stype == "usb" and not src.get("fake", False):
         env["CAM_DEVICE"] = str(src.get("device", "/dev/video0"))
+    # A playback source (pcap/replay) reads its data from the host -- cam-up reads CAM_INPUT_SRC to
+    # apply docker-compose.input.yml. Two shapes, matching config.resolve_input_path:
+    #   ABSOLUTE path in the config -> bind that exact path to ITSELF (host == container), so the
+    #     config names one true path and `rig bake` leaves it literal. Same self-mapping trick as
+    #     the usb device overlay, and for the same reason: no host probing, no readlink at bake.
+    #   BARE/relative name -> bind the deployment's input FOLDER; only the folder is
+    #     deployment-specific, so the config stays portable. Host side from CAM_INPUT_DIR (dev
+    #     default ./input); container side is that same path when it's absolute (self-mapped
+    #     again), else /input -- the mount point the README has always documented by hand.
+    # Pure string work: whether the path EXISTS is a runtime fact on the target, never probed here.
+    if stype in ("pcap", "replay"):
+        ipath = str(src.get("path") or "").strip()
+        if ipath.startswith("/"):
+            # ALREADY COVERED? The data root is bind-mounted read-write by the base compose
+            # (${RIG_DATA_DIR:-./recordings} -> ${RIG_DATA_DIR:-/data/recordings}), and the
+            # documented replay shape (`replay.path: /data/recordings`) points straight into it.
+            # Compose merges volumes BY TARGET, so a second, read-only bind on that same target
+            # REPLACES the first -- which would both flip the recordings dir read-only (breaking a
+            # replay that re-records) and swap its host side to a path that need not exist. Emit
+            # nothing and let the existing mount serve it.
+            droot = (os.environ.get("RIG_DATA_DIR") or "/data/recordings").strip().rstrip("/")
+            if ipath == droot or ipath.startswith(droot + "/"):
+                pass
+            else:
+                # Self-pinned: no input ROOT is exported, because none is consulted -- an absolute
+                # config path resolves to itself. Leaving CAM_INPUT_ROOT unset keeps the
+                # container's CAM_INPUT_DIR empty rather than showing a "root" that is really a file.
+                env["CAM_INPUT_SRC"] = env["CAM_INPUT_DST"] = ipath
+        else:
+            idir = (os.environ.get("CAM_INPUT_DIR") or "").strip().rstrip("/")
+            env["CAM_INPUT_SRC"] = idir or "./input"
+            env["CAM_INPUT_DST"] = env["CAM_INPUT_ROOT"] = idir if idir.startswith("/") else "/input"
 
     ros = by_name.get("ros2-bridge") or by_name.get("ros1-bridge")   # same topic/frame_id/encoding/debayer params
     if ros is not None:

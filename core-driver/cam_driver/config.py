@@ -442,6 +442,34 @@ def resolve_recording_dir(output_dir: str, rig_data_dir: str = "", instance: str
     return f"{base}/{inst}" if inst else base
 
 
+def resolve_input_path(path: str, input_dir: str = "") -> str:
+    """Resolve a playback source's input path (pcap.path / replay.path) for a deploy.
+
+    Semantics follow the SHAPE of the path, mirroring resolve_recording_dir -- no magic values:
+      ""        -> "" (untouched; camera.type: pcap already errors on an unset path at load)
+      absolute  -> a VERBATIM pin. cam-up bind-mounts that exact host path into the core at the
+                   SAME path (docker-compose.input.yml), so the config names ONE path that is
+                   true on the host and in the container, and a `rig bake` leaves it literal
+                   instead of pulling a host layout into the deployment artifact.
+      relative  -> resolved under the input mount: <input_dir>/<path>. A bare `thermal.pcapng`
+                   is the common shape -- the capture is one of several in a shared captures
+                   directory, and only the FOLDER is deployment-specific.
+
+    cam-up exports CAM_INPUT_DIR into the container as the container-side path of that mount
+    (/input by default, or the host dir self-mapped when CAM_INPUT_DIR is an absolute host path).
+    Without it -- a bare `docker run` -- a relative path falls back to /input, which is the mount
+    point the README and config/pcap-thermal.yaml have always documented by hand.
+
+    No filesystem probing here: existence is a RUNTIME fact on the target (the source fails
+    legibly naming the resolved path), never a bake-box probe -- same rule as the usb device
+    overlay."""
+    p = (path or "").strip()
+    if not p or p.startswith("/"):
+        return p
+    root = (input_dir or "").strip().rstrip("/") or "/input"
+    return f"{root}/{p}"
+
+
 def unique_run_prefix(output_dir: str, name_prefix: str, _now=None) -> str:
     """Return a per-RUN recording prefix `<name_prefix>-<UTC stamp>` that collides with nothing
     already in `output_dir`.

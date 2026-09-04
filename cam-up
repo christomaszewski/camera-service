@@ -164,6 +164,15 @@ if [ -n "${CAM_DEVICE:-}" ]; then
   export CAM_DEVICE
   FILES+=(-f "$REPO/docker-compose.usb.yml")
 fi
+# Playback source (camera.type pcap/replay): bind the capture / recorded run in from the host.
+# sensor_env derives BOTH ends from the config's path -- an absolute path self-maps, a bare name
+# rides the deployment's input folder (docker-compose.input.yml documents the two shapes). Rendered
+# from the config alone, like the usb overlay: whether the file exists is the TARGET's runtime
+# check, not a probe of the bake box.
+if [ -n "${CAM_INPUT_SRC:-}" ]; then
+  export CAM_INPUT_SRC CAM_INPUT_DST CAM_INPUT_ROOT
+  FILES+=(-f "$REPO/docker-compose.input.yml")
+fi
 # Registry deploy (no per-vehicle build): CAM_REGISTRY points every image at <registry>/<name>:<tag>,
 # tag following the detected platform (matches tools/build-images.sh) so one var pulls the whole stack.
 # Per-image vars still override individually. Then `cam-up <cfg> pull` + `up -d` runs the pulled images.

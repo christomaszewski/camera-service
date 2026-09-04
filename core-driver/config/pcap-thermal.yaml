@@ -11,11 +11,17 @@
 # Run (dev container):
 #   docker run --rm -v "$PWD/core-driver:/app" -v /path/to/captures:/input cam-dev \
 #     python3 main.py -c config/pcap-thermal.yaml
+# Run (cam-up -- the mount is derived from `path` below, nothing to remember):
+#   CAM_INPUT_DIR=/path/to/captures ./cam-up --dev config/pcap-thermal.yaml up
 camera:
   type: pcap
 
 pcap:
-  path: /input/thermal.pcapng
+  # BARE NAME -> resolved under the deployment's input folder (CAM_INPUT_DIR on the host,
+  # /input in the container by default), so this config travels between boxes unchanged.
+  # An ABSOLUTE path instead (/data/captures/thermal.pcapng) is bound to ITSELF, host ==
+  # container -- pick that when the capture has one true home. See docker-compose.input.yml.
+  path: thermal.pcapng
   # Pin what the camera actually streamed (like usb: for the live camera). Frame size is
   # validated: a mismatch fails at startup naming the size the capture really carries.
   pixel_format: GRAY16_LE    # UVC Y16 -> GRAY16_LE. MJPEG captures: set MJPEG (recording

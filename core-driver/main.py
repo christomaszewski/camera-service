@@ -24,7 +24,8 @@ except (ImportError, ValueError):
     class CameraError(Exception):
         pass
 
-from cam_driver.config import load_config, resolve_recording_dir, unique_run_prefix
+from cam_driver.config import (load_config, resolve_input_path, resolve_recording_dir,
+                               unique_run_prefix)
 from cam_driver.pipeline import CapturePipeline
 from cam_driver.sidecar import SidecarWriter
 from cam_driver.sources import make_source
@@ -50,6 +51,13 @@ def main(argv=None) -> int:
         # downstream transport/bridge failure (a dead core never serves its socket).
         log.error("config error: %s", e)
         return 2
+    # Playback input from the deploy env, mirroring the recording dir below: an ABSOLUTE pcap/replay
+    # path pins verbatim (cam-up self-maps it host->container, so one path is true on both sides); a
+    # BARE/relative one resolves under the input mount, whose container-side path cam-up passes as
+    # CAM_INPUT_DIR (/input by default). Live sources have no input path and are untouched.
+    if cfg.camera.type in ("pcap", "replay"):
+        blk = cfg.pcap if cfg.camera.type == "pcap" else cfg.replay
+        blk.path = resolve_input_path(blk.path, os.environ.get("CAM_INPUT_DIR", ""))
     # Recording dir from the deploy env: rig sets RIG_DATA_DIR (absolute host data root, bind-mounted at
     # the same path) to keep recordings OFF the repo; cam-up sets CAM_INSTANCE to namespace per sensor.
     # When the root carries rig's run registry, this also PINS the open run (current -> runs/<id>) --

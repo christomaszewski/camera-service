@@ -181,6 +181,31 @@ docker run --rm -v "$PWD/core-driver:/app" -v /path/to/captures:/input cam-dev \
   python3 main.py -c config/pcap-thermal.yaml
 ```
 
+**Through `cam-up`** the input mount is derived from the config -- no `-v` to remember. A
+playback source (`camera.type: pcap` or `replay`) makes cam-up apply
+[`docker-compose.input.yml`](docker-compose.input.yml), which binds the data in **read-only**.
+The path in the YAML picks the shape:
+
+```yaml
+pcap:
+  path: /data/captures/thermal.pcapng   # ABSOLUTE -> bound to ITSELF (host path == container
+  #                                       path), so one path is true on both sides and `rig bake`
+  #                                       leaves it literal. Same self-mapping as the usb overlay.
+  path: thermal.pcapng                  # BARE NAME -> resolved under the deployment's input
+  #                                       FOLDER, so the config travels between boxes unchanged.
+```
+
+For a bare name the folder comes from **`CAM_INPUT_DIR`** (an absolute host path is self-mapped;
+unset falls back to `./input` -> `/input`, the mount point above):
+
+```bash
+CAM_INPUT_DIR=/data/captures ./cam-up config/sensors/cam_thermal_pcap.yaml up
+```
+
+A `replay.path` already inside the data root (`/data/recordings`, or `$RIG_DATA_DIR`) needs no
+extra mount -- the base compose already binds that root read-write, so cam-up leaves it alone
+rather than shadowing it with a read-only bind.
+
 Both pace to the data's own timestamps (`speed`, `loop`, `retime: wall` knobs), exit
 cleanly at end-of-data (the recording finalizes; `loop: true` makes a long-lived fake
 camera for plugin development), and fail legibly — the pcap parser can even tell you the
