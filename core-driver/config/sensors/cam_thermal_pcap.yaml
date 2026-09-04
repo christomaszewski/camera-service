@@ -1,0 +1,87 @@
+# Playback -> record -> stream: run a captured USB thermal camera through the whole service,
+# with no camera and no Jetson. A usbmon/Wireshark capture drives the pipeline, the frames are
+# recorded losslessly to disk, and the webrtc-bridge serves a live operator preview in a browser.
+#
+#   CAM_INPUT_DIR=/path/to/captures ./cam-up config/sensors/cam_thermal_pcap.yaml up
+#
+# Viewing: :8443 is the WebSocket SIGNALLING server, not a web page -- this webrtcsink build ships
+# no web server (plugins/webrtc-bridge/README.md "Viewing"). Point the gst-plugins-rs gstwebrtc-api
+# JS client at ws://<host>:8443 and pick the producer `<hostname>-thermal_pcap`.
+# On a vehicle that port is reachable as-is (host networking). Under `--dev` the stack moves to
+# bridge networking and docker-compose.dev.yml publishes the port for you -- signalling then
+# works from the host, but WebRTC MEDIA rides ephemeral ICE/UDP ports that nothing publishes:
+# routable from a Linux host, NOT from a Docker Desktop VM (macOS/Windows), where a viewer needs
+# host networking or a TURN server. See README "Playback sources", docker-compose.input.yml.
+service: camera-service
+name: thermal_pcap          # -> compose project cam_thermal_pcap, shm volume cam_thermal_pcap_sock
+
+camera:
+  type: pcap
+
+pcap:
+  # BARE NAME -> resolved under the mounted input folder: CAM_INPUT_DIR on the host (unset ->
+  # ./input), /input in the container. Use an ABSOLUTE path instead to bind that one file to
+  # itself, host == container. cam-up derives the mount either way -- no `-v` to remember.
+  path: thermal.pcapng
+  # Pin what the camera actually streamed, exactly as for a live UVC device. The reassembled
+  # frames are validated against this: a mismatch is a legible startup error, and if the capture
+  # includes the device enumeration the parser names the real format/geometry back to you.
+  pixel_format: GRAY16_LE   # UVC Y16 radiometric thermal. An MJPEG capture: MJPEG.
+  width: 640
+  height: 512
+
+  # STREAM PIN -- normally unnecessary: the probe auto-detects the busiest UVC-looking IN
+  # endpoint, at any frame size. Pin it when ONE capture holds TWO cameras and the wrong one
+  # wins. A partial pin (just `device:`) constrains the search rather than replacing it, and
+  # the startup error lists every endpoint it saw, with its geometry, to copy from.
+  # bus: 1
+  # device: 5
+  # endpoint: 0x81
+
+  speed: 1.0                # pace to the capture's own timestamps (realtime). 0 = as fast as the
+  #                           pipeline drains -- lossless, but useless for a live preview.
+  loop: true                # restart at EOF with monotonic stamps, so the stream stays up for
+  #                           viewers. WITHOUT this a finite capture ends, the core exits 0, and
+  #                           compose's `restart: unless-stopped` starts the whole run again --
+  #                           a new recording every cycle instead of one continuous stream.
+  retime: wall              # rebase onto NOW at start. `original` keeps the capture's historical
+  #                           stamps (forensically faithful), but then the bridge's capture->encode
+  #                           latency percentiles measure the age of the CAPTURE, not the pipeline.
+  #                           Streaming live -> wall; archival reprocessing -> original.
+
+recording:
+  enabled: true
+  encoder: auto             # 16-bit -> ffv1 (the HW HEVC lossless path is 8-bit only, and there is
+  #                           no NVENC off-Jetson anyway); 8-bit on a Jetson -> hw-hevc-lossless.
+  name_prefix: thermal
+  segment_seconds: 60
+
+preview:
+  enabled: false            # the operator preview is the webrtc bridge below, not a local sink
+
+transport:
+  plugin_endpoint:
+    enabled: true           # the bridge rides THIS: [36-byte CAMF header][pixels], so geometry and
+    socket_path: /tmp/cam/frames   # format self-describe and the capture timestamp survives
+  raw_endpoint:
+    enabled: false          # legacy headerless path; not needed
+
+plugins:
+  - name: webrtc-bridge
+    enabled: true
+    isolation: container    # -> its own container, activated as a compose profile by cam-up
+    params:
+      port: 8443            # signalling; one port per sensor under host networking
+      fps: 60               # caps rate HINT (the header carries no rate); feeds the H.264 level math
+      width: 640            # only the legacy shm-raw path needs geometry -- harmless here, and it
+      height: 512           #   keeps the descriptor honest if you ever switch transports
+      format: GRAY16_LE
+      role: thermal-pcap    # human label in the advertised stream descriptor (docs/DISCOVERY.md)
+      # Any UPPERCASE key passes through verbatim as an env var on the bridge:
+      CAM_WEBRTC_NORMALIZE: auto   # REQUIRED for 16-bit: percentile-stretch GRAY16 -> GRAY8 before
+      #                              the 8-bit convert. Without it videoconvert keeps only the TOP
+      #                              byte -- a near-black picture for an LSB-aligned radiometric
+      #                              core. Preview only: the recording stays raw 16-bit.
+      CAM_WEBRTC_STATUS: 10        # heartbeat: pipeline state, frames in, caps, viewers, latency
+      # CAM_WEBRTC_MAX_SIZE: 640   # encode-side downscale (WxH or N) -- the CPU lever on big frames
+      # CAM_WEBRTC_LATENCY_OVERLAY: true   # burn capture->encode latency into the video itself
