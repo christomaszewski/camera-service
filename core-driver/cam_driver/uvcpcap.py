@@ -230,20 +230,41 @@ class ProbeResult:
         return "; ".join(s.describe() for s in self.streams)
 
 
+# The two signals behind uvc_score settle at VERY different rates, so each gets its own window.
+# "Do these payloads carry UVC headers?" is decided within a couple of hundred payloads. The FID
+# TOGGLE only appears once the scan crosses a FRAME boundary -- and a frame is as many payloads as
+# it is bytes: a 640x512 Y16 frame is ~3400 ISO packets. Sharing one 200-payload cap meant every
+# high-resolution stream -- exactly the radiometric thermal case this parser exists for -- saw a
+# single FID, scored frac*0.5 = 0.50 against probe()'s 0.9 gate, and was rejected outright as "no
+# UVC-looking IN stream found". The toggle watch therefore runs far longer; it costs only a header
+# parse per payload, on a scan that already walks every URB, and stops early once both settle.
+_SCORE_SAMPLES = 200            # enough to settle the UVC-shaped fraction
+_SCORE_FID_PAYLOADS = 200_000   # toggle-watch bound: dozens of frames even at 4K-class geometry
+
+
 class _ScoreState:
     """UVC-plausibility sampling for one candidate stream (first ~200 non-empty payloads)."""
 
     def __init__(self) -> None:
-        self.sampled = 0
+        self.sampled = 0        # payloads counted toward the "are these UVC-shaped?" fraction
         self.plausible = 0
+        self.seen = 0           # payloads examined for the FID toggle (a much wider window)
         self.fids = set()
 
+    @property
+    def _settled(self) -> bool:
+        """Both signals decided; nothing more to learn from this stream."""
+        return self.sampled >= _SCORE_SAMPLES and len(self.fids) > 1
+
     def feed(self, payload: bytes) -> None:
-        if self.sampled >= 200 or not payload:
+        if not payload or self._settled or self.seen >= _SCORE_FID_PAYLOADS:
             return
-        self.sampled += 1
-        if _parse_uvc_header(payload) is not None:
-            self.plausible += 1
+        self.seen += 1
+        plausible = _parse_uvc_header(payload) is not None
+        if self.sampled < _SCORE_SAMPLES:
+            self.sampled += 1
+            self.plausible += int(plausible)
+        if plausible:
             self.fids.add(payload[1] & _FID)
 
     @property

@@ -12,9 +12,10 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from cam_driver.pcapio import PcapFormatError  # noqa: E402
-from cam_driver.uvcpcap import UvcFrameExtractor, iter_frames, probe  # noqa: E402
+from cam_driver.uvcpcap import (  # noqa: E402
+    _SCORE_SAMPLES, _ScoreState, UvcFrameExtractor, iter_frames, probe)
 from uvcpcap_fixture import (  # noqa: E402
-    PcapWriter, build_bulk_capture, build_mjpeg_capture, build_y16_capture,
+    PcapWriter, build_bulk_capture, build_mjpeg_capture, build_y16_capture, uvc_payload,
 )
 
 _TMP = tempfile.mkdtemp(prefix="uvcpcap_test_")
@@ -82,6 +83,36 @@ def test_probe_ranks_video_over_noise():
     assert pr.best.uvc_score >= 0.9
     # noise streams (HID interrupt) are visible but never selected
     assert any(s.xfer == "intr" for s in pr.streams)
+
+
+def test_probe_detects_a_high_resolution_stream():
+    """A frame spanning far more payloads than the UVC-shape sample window must still be found.
+
+    REGRESSION: the score sampled 200 payloads and halved itself unless the UVC frame-ID bit
+    TOGGLED inside that window. A frame is as many payloads as it is bytes, so anything above
+    ~200 payloads/frame never toggled, scored 1.00*0.5 = 0.50 against probe()'s 0.9 gate, and was
+    rejected as "no UVC-looking IN stream found" -- measured on a real 640x512 Y16 capture
+    (~3400 payloads/frame), i.e. exactly the radiometric thermal case this parser exists for.
+    Frames here are 256x128 = 341 payloads at the fixture's 192-byte packets: past the window,
+    small enough to stay a unit test."""
+    blob, _ = build_y16_capture(frames=4, width=256, height=128, fmt="pcapng")
+    pr = probe(_path(blob, "y16-highres.pcapng"))
+    assert pr.best is not None, "high-resolution stream was not auto-detected"
+    assert pr.best.uvc_score >= 0.9, f"score {pr.best.uvc_score} -- the FID toggle was missed"
+    assert (pr.best.bus, pr.best.dev, pr.best.ep) == (1, 5, 1)
+
+
+def test_score_still_penalises_a_stream_whose_fid_never_toggles():
+    # The halving is the guard against mistaking a steady non-video IN stream for UVC; widening
+    # the toggle window must not have removed it. Driven directly, because every fixture capture
+    # opens mid-stream with a partial frame and so always toggles.
+    st = _ScoreState()
+    for _ in range(_SCORE_SAMPLES * 2):
+        st.feed(uvc_payload(b"\x00" * 64, fid=0))     # plausible UVC, but the FID never moves
+    assert st.sampled == _SCORE_SAMPLES and st.plausible == _SCORE_SAMPLES
+    assert st.score == 0.5, "a single-FID stream must stay under probe()'s 0.9 gate"
+    st.feed(uvc_payload(b"\x00" * 64, fid=1))         # ... and recovers the moment it toggles
+    assert st.score == 1.0
 
 
 def test_probe_negotiated_and_described():
