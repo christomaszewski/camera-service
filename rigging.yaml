@@ -19,9 +19,14 @@ tier: sensor                             # rig bring-up tier (infra -> sensors -
 
 platform:                                # JP6 vs JP7 is a HOST fact; cam-up auto-detects it per host
   auto_detect: /etc/nv_tegra_release     #   R36 -> jp6 (l4t + nvidia runtime); R38+ -> jp7 (runc + CDI)
-  override_env: CAM_PLATFORM            #   rig may set this per host to {jp6|jp7} to pin instead of detect
+  override_env: CAM_PLATFORM            #   rig may set this per host to {jp6|jp7|dev} to pin instead of detect
   #                                        (cam-up also honors rig's standard RIG_TARGET_PLATFORM, from
   #                                         vehicle.yaml `platform:`; CAM_PLATFORM wins when both are set)
+  #                                      `dev` is a NON-vehicle target: an arm64/x86 bench box with no
+  #                                      Jetson (bench rig, CI, laptop). It selects cam-dev + runc +
+  #                                      bridge net and mirrors JP6 userspace, so bench runs exercise
+  #                                      the same shm+header transport a JP6 vehicle does. Never
+  #                                      auto-detected -- a host must ask for it.
 
 images:                                  # pull-based deploy: cam-up points images at a registry (docs/deploy-without-rig.md)
   registry_env: CAM_REGISTRY            #   set -> <registry>/<name>:<platform> for every image; then `pull` + `up`
@@ -31,15 +36,20 @@ images:                                  # pull-based deploy: cam-up points imag
   #                                          <version>-<platform> pull refs to match the published matrix.
   #                                          Legacy platform-valued tags (jp7) still work verbatim.
   tag_env: CAM_IMAGE_TAG                #   default tag = detected platform (jp6/jp7); set to pin a release
-  per_image_env: [CAM_CORE_IMAGE, CAM_ROS2_IMAGE, CAM_ROS1_IMAGE, CAM_WEBRTC_IMAGE]   # override a single image
+  per_image_env: [CAM_CORE_IMAGE, CAM_DEV_IMAGE, CAM_ROS2_IMAGE, CAM_ROS1_IMAGE, CAM_WEBRTC_IMAGE]  # override a single image
+  #                                        (CAM_DEV_IMAGE is the core on the `dev` platform, where
+  #                                         cam-dev replaces cam-core)
 
 build:                                   # rig's BUILD phase: how to (re)build + push this stack's images to the
                                          # fleet registry. See docs/fleet-build-contract.md for the rig loop.
   command: tools/build-images.sh         #   builds + pushes; reads $RIG_IMAGE_REGISTRY (or arg $1); tag = arg $2
   arch: arm64                            #   build NATIVELY on an arm64 host (Aravis + colcon compiles; no qemu)
-  platforms: [jp7, jp6]                  #   platform tags this stack publishes -- rig builds the ones the fleet uses
-  images: [cam-core, ros2-bridge, ros1-bridge, webrtc-bridge]   # produced as <registry>/<image>:<platform>
-                                         #   (ros1-bridge is Noetic / jp6-class; built into the jp6 set)
+  platforms: [jp7, jp6, dev]             #   platform tags this stack publishes -- rig builds the ones the fleet uses
+                                         #   (`dev` only gets built when a target actually declares it,
+                                         #    so listing it here costs a normal fleet build nothing)
+  images: [cam-core, cam-dev, ros2-bridge, ros1-bridge, webrtc-bridge]   # produced as <registry>/<image>:<platform>
+                                         #   (ros1-bridge is Noetic / jp6-class; built into the jp6 set.
+                                         #    cam-dev is the `dev` set's core, replacing cam-core there)
 
 examples:                                # repo-relative example configs. [0] is special: `rig pkg add`
   #                                        seeds a bare (profile-less) instance's editable config from it,

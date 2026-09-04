@@ -7,7 +7,7 @@
 # It SELECTS + PARAMETERIZES — it never generates a compose file.
 #
 #   cam-up config/sensors/cam_a.yaml             # prod: auto-detects the JP6/JP7 host, host net (foreground up)
-#   cam-up --dev config/sensors/cam_a.yaml       # dev (no Jetson): cam-dev core, bridge net
+#   cam-up --dev config/sensors/cam_a.yaml       # dev/bench (no Jetson): cam-dev core, bridge net
 #   cam-up --jp7 config/sensors/cam_a.yaml up -d # force JetPack 7 (Orin): runc + CDI NVENC device
 #   cam-up --jp6 config/sensors/cam_a.yaml up -d # force JetPack 6: l4t base + nvidia runtime (CSV)
 #   cam-up --dev config/sensors/cam_a.yaml up -d # detached
@@ -20,16 +20,23 @@
 # Multiple cameras = run it per config; each is its own compose project + shm volume + ports.
 # Another stack reads a sensor's frames by mounting its volume (cam_<name>_sock) + --ipc=host.
 #
-# Platform (JP6/JP7) is auto-detected per host from /etc/nv_tegra_release; override with --jp6/--jp7
-# or CAM_PLATFORM={jp6,jp7}. It's a HOST fact (same for every sensor on the box), so rig pins it
+# Platform is auto-detected per host from /etc/nv_tegra_release; override with --jp6/--jp7/--dev or
+# CAM_PLATFORM={jp6,jp7,dev}. It's a HOST fact (same for every sensor on the box), so rig pins it
 # per host (env), never per sensor.
+#
+# `dev` is a THIRD platform, not a side channel: a non-Jetson arm64/x86 bench box (a laptop, CI, a
+# bench Orin running plain Ubuntu). It selects cam-dev (distro GStreamer, no NVIDIA stack) + runc +
+# bridge networking, and mirrors JP6 userspace (gst 1.20 -> the shm+header transport), so the bench
+# exercises the same transport a JP6 vehicle does. --dev is sugar for it; rig selects it the same
+# way it selects a vehicle -- RIG_TARGET_PLATFORM=dev or a -dev image tag -- which is what lets a
+# bench box PULL tools/build-images.sh's `dev` image set instead of rebuilding it locally.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")" && pwd)"
 PYTHON="${CAM_PYTHON:-python3}"
 
-DEV=0; ZENOHD=0; ROSCORE=0; PLATFORM="${CAM_PLATFORM:-auto}"   # auto -> detect JP6/JP7; jp6|jp7 to pin
+DEV=0; ZENOHD=0; ROSCORE=0; PLATFORM="${CAM_PLATFORM:-auto}"   # auto -> detect; jp6|jp7|dev to pin
 while :; do case "${1:-}" in
-  --dev) DEV=1; shift;;
+  --dev) PLATFORM=dev; shift;;   # non-Jetson bench box: cam-dev + runc + bridge net (DEV is derived below)
   --jp7) PLATFORM=jp7; shift;;   # force JetPack 7 (Orin): runc + the CDI NVENC device overlay
   --jp6) PLATFORM=jp6; shift;;   # force JetPack 6: l4t base + nvidia runtime (CSV mounts)
   --zenohd) ZENOHD=1; shift;;    # bring up the shared host zenoh router first (standalone; rig owns it in prod)
@@ -67,8 +74,7 @@ eval "$("$PYTHON" "$REPO/tools/sensor_env.py" "$CONFIG" | sed 's/^/export /')"
 # baked /app/config still serves a bare `docker compose up` with the default CAM_CONFIG.
 export CAM_CONFIG_HOST="$CONFIG_ABS"
 export CAM_CONFIG="/run/cam-sensor.yaml"   # absolute in-container path, outside the /app tree
-export CAM_NETWORK="${CAM_NETWORK:-host}"
-[ "$DEV" = 1 ] && export CAM_NETWORK=bridge
+export CAM_NETWORK="${CAM_NETWORK:-host}"   # dev -> bridge, applied once the platform resolves below
 # ROS 2 middleware: rmw_zenoh_cpp is the default across the stack (discovers via a shared host
 # `rmw_zenohd` router; see --zenohd / tools/zenohd.sh). FastDDS stays selectable via RMW_IMPLEMENTATION.
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
@@ -91,28 +97,30 @@ if [ "$VERB" != config ] && [ -n "${CAM_ZENOH_SHM_POOL_SIZE:-}" ] && [ -d /dev/s
 fi
 
 # Resolve auto -> the target platform (drives BOTH the image tag selection AND the runtime overlay
-# docker-compose.<platform>.yml). Precedence: CAM_PLATFORM/--jp6/--jp7 > RIG_TARGET_PLATFORM (rig's
+# docker-compose.<platform>.yml). Precedence: CAM_PLATFORM/--jp6/--jp7/--dev > RIG_TARGET_PLATFORM (rig's
 # standard per-host platform var, from vehicle.yaml `platform:`) > a legacy platform-VALUED
 # RIG_IMAGE_TAG (images.tag: jp7 -- deprecated on the rig side) > /etc/nv_tegra_release detection.
 # rig's DECLARED target wins over host detection because rig bakes on a dev box that often isn't a
 # Jetson -- host-detecting THERE picks the wrong platform (jp6 on a Mac), pinning the wrong image tag
 # AND omitting the target's NVENC/CDI overlay. Standalone (no rig env): the L4T release line
-# (R36 = JP6; R38+ = JP7). Skipped under --dev; a missing release file -> jp6 (conservative).
-if [ "$DEV" = 0 ] && [ "$PLATFORM" = auto ]; then
+# (R36 = JP6; R38+ = JP7). Skipped whenever the platform is already pinned (--dev included); a
+# missing release file -> jp6 (conservative), so a bench box must ASK for dev rather than be guessed
+# into it -- detection can't tell "arm64 Linux bench box" from "Jetson with no release file".
+if [ "$PLATFORM" = auto ]; then
   if [ -n "${RIG_TARGET_PLATFORM:-}" ]; then
     case "$RIG_TARGET_PLATFORM" in
-      jp6|jp7) PLATFORM="$RIG_TARGET_PLATFORM";;
-      *) echo "cam-up: RIG_TARGET_PLATFORM='$RIG_TARGET_PLATFORM' is not a platform (jp6|jp7); ignoring it" >&2;;
+      jp6|jp7|dev) PLATFORM="$RIG_TARGET_PLATFORM";;
+      *) echo "cam-up: RIG_TARGET_PLATFORM='$RIG_TARGET_PLATFORM' is not a platform (jp6|jp7|dev); ignoring it" >&2;;
     esac
   fi
   if [ "$PLATFORM" = auto ] && [ -n "${RIG_IMAGE_TAG:-}" ]; then
     case "$RIG_IMAGE_TAG" in
-      jp6|jp7) PLATFORM="$RIG_IMAGE_TAG";;   # legacy: platform-valued images.tag
+      jp6|jp7|dev) PLATFORM="$RIG_IMAGE_TAG";;   # legacy: platform-valued images.tag
       # A fleet tag that isn't a platform (e.g. v2.1) must NOT silently pick the wrong runtime
       # overlay/transport (all containers "up", no frames). Warn and fall through to detection.
       # (With RIG_TARGET_PLATFORM or CAM_PLATFORM set this branch never runs -- a version-valued
       # images.tag is then the NORMAL fleet shape, not a mistake.)
-      *) echo "cam-up: RIG_IMAGE_TAG='$RIG_IMAGE_TAG' is not a platform (jp6|jp7) and no RIG_TARGET_PLATFORM/CAM_PLATFORM is set; ignoring it for platform selection" >&2;;
+      *) echo "cam-up: RIG_IMAGE_TAG='$RIG_IMAGE_TAG' is not a platform (jp6|jp7|dev) and no RIG_TARGET_PLATFORM/CAM_PLATFORM is set; ignoring it for platform selection" >&2;;
     esac
   fi
   if [ "$PLATFORM" = auto ] && [ "$VERB" != config ]; then
@@ -128,6 +136,13 @@ fi
 # ros2-bridge picks the matching consumer (CamUnixfdBridge on jp7, CamHeaderBridge otherwise) -- the
 # core selects its transport the same way (unixfd exactly when GStreamer >= 1.24 / jp7).
 [ "$PLATFORM" = auto ] && PLATFORM=jp6
+# ONE fact, two consequences: whichever way `dev` arrived (--dev, CAM_PLATFORM, RIG_TARGET_PLATFORM,
+# a -dev tag), it drives the dev overlay AND bridge networking. Deriving DEV here instead of setting
+# it in the flag parser is what makes rig's platform tag reach the bench box.
+[ "$PLATFORM" = dev ] && DEV=1
+[ "$DEV" = 1 ] && export CAM_NETWORK=bridge
+# CAM_PLATFORM is also the bridges' transport selector; every consumer picks unixfd iff jp7 and the
+# header transport otherwise, so `dev` lands on shm+header -- the JP6 shape, as intended.
 export CAM_PLATFORM="$PLATFORM"
 
 FILES=(-f "$REPO/docker-compose.yml")
@@ -155,7 +170,7 @@ fi
 # rig injects RIG_IMAGE_REGISTRY fleet-wide; honor it here so cam's PLATFORM-TAGGED refs (cam-core:jp7)
 # come out right -- the raw ${RIG_IMAGE_REGISTRY}/cam-core prefix in the composes would resolve :latest.
 CAM_REGISTRY="${CAM_REGISTRY:-${RIG_IMAGE_REGISTRY:-}}"
-if [ "$DEV" = 0 ] && [ -n "${CAM_REGISTRY:-}" ]; then
+if [ -n "${CAM_REGISTRY:-}" ]; then
   # The PULL TAG and the runtime PLATFORM are separate concerns. Platform is the standalone fallback
   # when no fleet tag is set; CAM_IMAGE_TAG pins an EXACT tag over everything (never suffixed).
   IMG_TAG="${CAM_IMAGE_TAG:-${RIG_IMAGE_TAG:-$PLATFORM}}"
@@ -165,11 +180,20 @@ if [ "$DEV" = 0 ] && [ -n "${CAM_REGISTRY:-}" ]; then
   # tag (legacy) or an already-suffixed tag passes verbatim; so does an explicit CAM_IMAGE_TAG.
   if [ -z "${CAM_IMAGE_TAG:-}" ] && [ -n "${RIG_IMAGE_TAG:-}" ]; then
     case "$IMG_TAG" in
-      jp6|jp7|*-jp6|*-jp7) ;;
+      jp6|jp7|dev|*-jp6|*-jp7|*-dev) ;;
       *) IMG_TAG="${IMG_TAG}-${PLATFORM}";;
     esac
   fi
-  export CAM_CORE_IMAGE="${CAM_CORE_IMAGE:-$CAM_REGISTRY/cam-core:$IMG_TAG}"
+  # The CORE image is the only per-platform swap: on dev, cam-dev REPLACES cam-core (a different
+  # image name, so it needs its own var -- docker-compose.dev.yml reads CAM_DEV_IMAGE). The bridges
+  # are the same images everywhere and keep resolving below. Before this, --dev ignored the registry
+  # entirely while docker-compose.dev.yml still honored RIG_IMAGE_REGISTRY/RIG_IMAGE_TAG on its own
+  # -- so a bench box got a registry ref from one path and not the other; now both agree.
+  if [ "$DEV" = 1 ]; then
+    export CAM_DEV_IMAGE="${CAM_DEV_IMAGE:-$CAM_REGISTRY/cam-dev:$IMG_TAG}"
+  else
+    export CAM_CORE_IMAGE="${CAM_CORE_IMAGE:-$CAM_REGISTRY/cam-core:$IMG_TAG}"
+  fi
   export CAM_ROS2_IMAGE="${CAM_ROS2_IMAGE:-$CAM_REGISTRY/ros2-bridge:$IMG_TAG}"
   export CAM_ROS1_IMAGE="${CAM_ROS1_IMAGE:-$CAM_REGISTRY/ros1-bridge:$IMG_TAG}"   # Noetic; ros1-bridge is jp6-class
   export CAM_WEBRTC_IMAGE="${CAM_WEBRTC_IMAGE:-$CAM_REGISTRY/webrtc-bridge:$IMG_TAG}"
@@ -184,6 +208,6 @@ if [ "$ROSCORE" = 1 ]; then CAM_ROS1_IMAGE="${CAM_ROS1_IMAGE:-ros1-bridge}" "$RE
 FILES+=(-f "$REPO/docker-compose.external-config.yml")
 
 ARGS=("$@"); [ ${#ARGS[@]} -eq 0 ] && ARGS=(up)
-PLAT_LABEL="$([ "$DEV" = 1 ] && echo dev || echo "$PLATFORM")"
+PLAT_LABEL="$PLATFORM"   # dev is now a platform value, not a separate axis
 echo "cam-up: project=$COMPOSE_PROJECT_NAME platform=$PLAT_LABEL${CAM_REGISTRY:+ registry=$CAM_REGISTRY} profiles=[${COMPOSE_PROFILES:-<none>}] sock=$CAM_SOCK_VOLUME net=$CAM_NETWORK rmw=$RMW_IMPLEMENTATION config=$CAM_CONFIG_HOST (-> $CAM_CONFIG)" >&2
 exec docker compose "${FILES[@]}" "${ARGS[@]}"
