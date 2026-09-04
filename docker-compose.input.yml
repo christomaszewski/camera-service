@@ -1,0 +1,33 @@
+# Playback input overlay. cam-up applies this whenever the sensor config is a PLAYBACK source
+# (`camera.type` pcap or replay) -- the capture/run lives on the HOST, so the core container needs
+# it bound in. Live sources (gige/usb/rtsp) never see this file.
+#
+# sensor_env derives the two ends from the config's `<block>.path`, in the same two shapes
+# config.resolve_input_path understands:
+#
+#   ABSOLUTE path (pcap.path: /data/captures/thermal.pcapng)
+#     -> CAM_INPUT_SRC = CAM_INPUT_DST = that path: bound to ITSELF, so the path in the YAML is
+#        true on the host AND in the container. Same self-mapping as the usb device overlay and
+#        RIG_DATA_DIR, and for the same reason -- `rig bake` leaves an absolute path literal
+#        instead of freezing a host layout into the artifact, and nothing has to readlink or
+#        stat the bake box. Binds a FILE for pcap, a run DIRECTORY for replay; Docker handles both.
+#
+#   BARE name (pcap.path: thermal.pcapng)
+#     -> the deployment's input FOLDER is bound instead, and the core joins the name onto it
+#        (CAM_INPUT_DIR below). Only the folder is deployment-specific, so one config travels
+#        between a bench box and a vehicle unchanged. Host side = CAM_INPUT_DIR (dev default
+#        ./input, the dir already in the repo); container side = the same path when CAM_INPUT_DIR
+#        is absolute, else /input -- the mount point README.md and config/pcap-thermal.yaml have
+#        documented by hand for `docker run` since the playback sources landed.
+#
+# READ-ONLY on purpose: playback never writes its input, and a captured run is not reproducible.
+# Existence is a RUNTIME check on the target -- if the path is absent at `up`, Docker errors out
+# (and a bad path inside the mount fails legibly in the parser, naming the resolved path).
+services:
+  core-driver:
+    volumes:
+      - "${CAM_INPUT_SRC:-./input}:${CAM_INPUT_DST:-/input}:ro"
+    environment:
+      # The container-side root a BARE path resolves against (config.resolve_input_path). Empty
+      # when the config's path is absolute: it pins itself, so there is no root to consult.
+      - CAM_INPUT_DIR=${CAM_INPUT_ROOT:-}

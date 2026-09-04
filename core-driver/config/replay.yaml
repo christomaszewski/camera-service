@@ -1,0 +1,41 @@
+# Recorded-run playback: re-run the service against a run it previously recorded --
+# at-desk repro of field captures, plugin/bridge development against real data, and
+# lossless roundtrip testing. The replay source reads the run's .mkv parts + sidecar
+# CSV/JSON and re-delivers every frame with its ORIGINAL stamp (frame_id, timestamps,
+# provenance), so recording/transport/plugins downstream behave as if the camera were live.
+#
+# The recorded codec/geometry/format all come from the run itself -- nothing to configure:
+#   lossless runs (ffv1 / hevc-lossless) decode back to the exact recorded bytes
+#   (CFA-tiled runs are un-tiled automatically); stream-copy runs (USB-MJPEG / RTSP)
+#   re-deliver the original bitstream: recording again is byte-faithful.
+#
+# Run (dev container):
+#   docker run --rm -v "$PWD/core-driver:/app" -v /path/to/data:/replay cam-dev \
+#     python3 main.py -c config/replay.yaml
+# Or with the full stack: point replay.path under your RIG_DATA_DIR and use cam-up as usual.
+camera:
+  type: replay
+
+replay:
+  path: /replay              # a run directory (newest run inside is picked, replay.run pins
+  #                            one) or a run prefix path like /replay/cam-20260827-041627
+  # run: cam-20260827-041627 # pin a specific run when the directory holds several
+  speed: 1.0                 # 1.0 = realtime by the sidecar timestamps; 2.0 = 2x; 0 = as
+  #                            fast as the pipeline drains (batch reprocessing -- note the
+  #                            recorder may drop frames if it can't keep up at 0)
+  loop: false                # keep replaying (timestamps shifted to stay monotonic) --
+  #                            useful as a long-lived fake camera for plugin development
+  retime: original           # original = faithful historical stamps | wall = rebase the
+  #                            run onto NOW at start (live consumers see fresh timestamps)
+
+recording:
+  enabled: false             # flip on to re-record the replay (lossless roundtrip testing);
+  #                            output_dir/name_prefix work as for any camera
+  name_prefix: replay
+
+transport:
+  plugin_endpoint:
+    enabled: true            # plugins (ros2/webrtc/...) consume the replay like a live camera
+    socket_path: /tmp/cam/frames
+
+plugins: []

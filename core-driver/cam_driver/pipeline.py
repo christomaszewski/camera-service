@@ -201,7 +201,9 @@ class CapturePipeline:
             log.warning("pixel format %s appears PACKED; fed as %s and will misinterpret data. "
                         "Use Mono8/Mono16/Bayer*8 or add an unpack step.", pf, self._gst_format)
 
-        fps = self.cfg.camera.frame_rate
+        # a playback source knows its real delivered rate (e.g. replay: sidecar median);
+        # an explicit camera.frame_rate still wins
+        fps = self.cfg.camera.frame_rate or self.source.delivered_frame_rate
         framerate = f"{int(round(fps))}/1" if fps else "0/1"
         self._frame_interval_ns = int(1_000_000_000 / fps) if fps else 1_000_000
         caps = (f"video/x-raw,format={self._gst_format},width={self._width},"
@@ -210,7 +212,7 @@ class CapturePipeline:
         frame_bytes = self._image_size
 
         main = [
-            f'appsrc name=camsrc is-live=true do-timestamp=false format=time '
+            f'appsrc name=camsrc is-live=true do-timestamp=false format=time{self._feed_appsrc_props()} '
             f'max-bytes={_REC_QUEUE_FRAMES * frame_bytes} caps="{caps}"',
             "queue max-size-buffers=8 name=src_q",
             "tee name=t",
@@ -276,7 +278,7 @@ class CapturePipeline:
         # AND temporal compression. numpy is imported lazily (only when tiling is actually enabled).
         if self._tile_rec:
             chains.append(
-                f'appsrc name=recsrc is-live=true do-timestamp=false format=time '
+                f'appsrc name=recsrc is-live=true do-timestamp=false format=time{self._feed_appsrc_props()} '
                 f'max-bytes={_REC_QUEUE_FRAMES * frame_bytes} caps="{caps}" '
                 f'! {rec_desc}')
             log.info("recorder: CFA-tiling 8-bit Bayer (%s) mode=%s before encode", self._bayer, self._tile_mode)
@@ -288,7 +290,7 @@ class CapturePipeline:
             # max-bytes uses the RAW frame size: encoded frames are (much) smaller, so the bound
             # is roomy in frames while still hard-capping memory.
             chains.append(
-                f'appsrc name=encsrc is-live=true do-timestamp=false format=time '
+                f'appsrc name=encsrc is-live=true do-timestamp=false format=time{self._feed_appsrc_props()} '
                 f'max-bytes={_REC_QUEUE_FRAMES * frame_bytes} '
                 f'caps="{self.source.encoded_caps}" ! {rec_desc}')
 
@@ -369,11 +371,27 @@ class CapturePipeline:
         self.drops.note_enqueue_failure()
         return self.drops.enqueue_failures
 
+    def _feed_appsrc_props(self) -> str:
+        """Extra properties for the appsrcs that FEED THE RECORDING (camsrc / recsrc / encsrc).
+
+        A live camera keeps them block=false: a stalled encoder must drop frames (counted, attested)
+        rather than back-pressure the capture thread and grow RAM. A FINITE (playback) source is the
+        opposite case -- the data is already on disk, there is nothing to lose by waiting, and a batch
+        reprocess at `speed: 0` promises "as fast as the pipeline drains", which block=false quietly
+        turned into "as fast as the reader runs, dropping whatever the encoder can't keep up with".
+        block=true makes push-buffer wait for room, so every frame lands. The best-effort publish
+        feeds (transport / unixfd) stay non-blocking either way."""
+        return " block=true" if getattr(self.source, "finite", False) else ""
+
     def _queue_full(self, src, nbytes: int, what: str, publish: bool = False) -> bool:
         """True (recording the drop) if `src`'s internal queue can't take nbytes more. appsrc with
         block=false ignores its own max-bytes for queueing purposes (push still returns OK), so this
         check IS the bound: a full queue means downstream stalled -- drop this frame, count it, and
-        keep the service alive instead of growing RAM until the OOM killer ends the recording."""
+        keep the service alive instead of growing RAM until the OOM killer ends the recording.
+        A block=true appsrc (finite source, see _feed_appsrc_props) is never "full" here: its
+        push-buffer waits for room instead, which is the whole point."""
+        if src.get_property("block"):
+            return False
         max_bytes = src.get_property("max-bytes")
         if max_bytes and src.get_property("current-level-bytes") + nbytes > max_bytes:
             n = self._note_push_drop(publish)
@@ -660,7 +678,7 @@ class CapturePipeline:
         self.loop = GLib.MainLoop()
         self.pipeline.set_state(Gst.State.PLAYING)
         self.source.start(self._on_frame, self._on_encoded)
-        if self.source.reconnect_enabled:
+        if self.source.reconnect_enabled or self.source.finite:
             GLib.timeout_add_seconds(1, self._watchdog)
         GLib.timeout_add_seconds(_HEALTH_INTERVAL_S, self._log_health)
         log.info("running")
@@ -696,11 +714,22 @@ class CapturePipeline:
 
     def _watchdog(self) -> bool:
         """Runs on the main loop ~1 Hz: ask the source whether it's disconnected and, if so,
-        kick off a reconnect in its own thread (so backoff doesn't block the pipeline)."""
+        kick off a reconnect in its own thread (so backoff doesn't block the pipeline). For a
+        finite (playback) source, also notice EOF and finalize cleanly."""
         if self._stopping:
             return False   # remove the watchdog
+        if self.source.finite and self.source.finished:
+            if self.source.finished_error:
+                log.error("playback ended on an error -> finalizing recording, exiting non-zero")
+                self._fatal = True   # a truncated reprocess must not look like a complete one
+            else:
+                log.info("playback finished -> finalizing recording and exiting")
+            self.request_stop()
+            return False
         if self._reconnecting:
             return True
+        if not self.source.reconnect_enabled:
+            return True    # finite-only watchdog: nothing to reconnect
         if self.source.is_disconnected():
             log.warning("source reports disconnect -> reconnecting")
             self._reconnecting = True

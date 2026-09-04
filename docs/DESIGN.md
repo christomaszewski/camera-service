@@ -251,3 +251,17 @@ hard part — exercising the real Aravis **chunk-parse** path — the stock fake
 support). So `tools/gvsp-chunk-emitter/` **patches Aravis** to emit real GVSP chunk data and to replay
 known frames+timestamps, enabling a full **input→output round-trip** that proves lossless recording
 (random-noise frames, bit-exact) + timestamp fidelity. See ROADMAP for the test inventory.
+
+- **Playback sources: frame-level replay at the `Source` seam, not device emulation.** Two sources
+  re-run the service against previously captured data: `replay` (a recorded run — splitmuxsrc over the
+  `.mkv` parts + the sidecar CSV re-stamping every frame with its ORIGINAL FrameStamp, so provenance
+  survives and lossless runs roundtrip bit-exact; stream-copy runs re-deliver the original bitstream)
+  and `pcap` (a Wireshark/usbmon capture of a USB UVC camera, reassembled by a pure-stdlib parser —
+  pcap/pcapng containers, ISO/bulk URBs, the UVC payload FID/EOF state machine — into frames stamped
+  with the capture timestamps). Device-level alternatives (v4l2loopback, USB gadget emulation) were
+  declined: they need kernel modules and root, don't run in the dev container, and lose per-frame
+  timestamp fidelity — while everything downstream of the `Source` seam is already the *real* code
+  under test. GVSP *packet*-level replay stays the chunk emitter's job (it exercises the Aravis
+  receive path, which frame-level replay deliberately bypasses). Both sources pace to the data's own
+  timeline (`speed`/`loop`/`retime`), and a finite source ends the run cleanly: the pipeline watchdog
+  sees `finished`, EOSes, finalizes the recording, exits 0.

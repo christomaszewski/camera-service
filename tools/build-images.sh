@@ -3,18 +3,25 @@
 # instead of building per-vehicle. Jetsons are arm64, so run this on an arm64 host (an Orin is
 # perfect) for a native build, or cross-build from x86 with PLATFORM_FLAG (slow; needs qemu binfmt).
 #
+# The `dev` variant is the same mechanism pointed at a NON-Jetson arm64 box (a bench machine, an
+# arm64 Mac, CI): it builds cam-dev (core-driver/Dockerfile.dev -- distro GStreamer, no NVIDIA
+# stack) instead of cam-core, so a bench box PULLS the same image the vehicles' tag matrix was cut
+# from instead of rebuilding it locally. It mirrors JP6 userspace (ubuntu:22.04 = gst 1.20), which
+# is what makes the shm+header transport the one under test there, same as a JP6 vehicle.
+#
 #   tools/build-images.sh [registry[:port]] [tag]
 #     registry   your local registry, e.g. registry.lan:5000. Falls back to $RIG_IMAGE_REGISTRY (the
 #                fleet registry rig injects), so rig's build phase sets ONE var for build + deploy.
 #     tag        pushed EXACTLY as given: a bare platform (jp7 -- the legacy shape, and the default)
 #                or a composed <version>-<platform> (v1.4.0-jp7 -- the fleet matrix shape; rig invokes
-#                once per platform in `build.platforms`). The jp6/jp7 BUILD VARIANT (base image,
+#                once per platform in `build.platforms`). The jp6/jp7/dev BUILD VARIANT (base image,
 #                image set) comes from $RIG_TARGET_PLATFORM when set, else is derived from the tag
-#                (bare platform or its -jp6/-jp7 suffix).
+#                (bare platform or its -jp6/-jp7/-dev suffix).
 #
 #   env knobs:
 #     IMAGES="cam-core ros2-bridge webrtc-bridge"   subset to build (default: all three)
-#     BASE_IMAGE=...                 cam-core base; defaults from the tag (jp6 -> l4t-base, else ubuntu:24.04)
+#     BASE_IMAGE=...                 core base; defaults from the tag (jp6 -> l4t-base, dev -> ubuntu:22.04,
+#                                    else ubuntu:24.04). Feeds cam-core's BASE_IMAGE arg, or cam-dev's BASE.
 #     ROS_DISTRO=lyrical             ros2-bridge ROS 2 distro
 #     PUSH=1                         set 0 to build+tag locally without pushing
 #     PLATFORM_FLAG=                 e.g. --platform=linux/arm64 to cross-build from x86
@@ -30,6 +37,8 @@
 #     tools/build-images.sh registry.lan:5000 jp6                  # JP6 -> auto slim l4t-base, tag jp6
 #     tools/build-images.sh registry.lan:5000 v1.4.0-jp6           # fleet matrix tag (variant from suffix)
 #     RIG_TARGET_PLATFORM=jp6 tools/build-images.sh reg v1.4.0-jp6 # what `rig build` invokes per platform
+#     PUSH=0 IMAGES=cam-dev tools/build-images.sh reg dev          # local arm64 bench image, no push
+#     tools/build-images.sh registry.lan:5000 v1.4.0-dev           # bench image on the fleet matrix tag
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
@@ -38,26 +47,33 @@ cd "$REPO"
 REGISTRY="${1:-${RIG_IMAGE_REGISTRY:-}}"
 : "${REGISTRY:?usage: build-images.sh [registry[:port]] [tag], or set RIG_IMAGE_REGISTRY  (e.g. registry.lan:5000 jp7)}"
 TAG="${2:-${RIG_TARGET_PLATFORM:-jp7}}"
-# Build VARIANT (jp6 vs jp7) selects the cam-core base + the default image set: jp6 -> slim l4t-base +
-# the Noetic ros1-bridge (ROS 1 is jp6-class); jp7 -> ubuntu:24.04, no ros1-bridge. RIG_TARGET_PLATFORM
+# Build VARIANT (jp6 | jp7 | dev) selects the core base + the default image set: jp6 -> slim l4t-base +
+# the Noetic ros1-bridge (ROS 1 is jp6-class); jp7 -> ubuntu:24.04, no ros1-bridge; dev -> cam-dev on
+# ubuntu:22.04 (JP6-mirroring userspace) for a non-Jetson arm64 bench box. RIG_TARGET_PLATFORM
 # (rig's standard per-target platform var) wins; else derive from the tag -- a bare platform (legacy)
 # or a composed <version>-<platform> suffix. The TAG is pushed verbatim either way. Override
 # BASE_IMAGE / IMAGES individually as before.
 VARIANT=""
 case "${RIG_TARGET_PLATFORM:-}" in
-  jp6|jp7) VARIANT="$RIG_TARGET_PLATFORM" ;;
+  jp6|jp7|dev) VARIANT="$RIG_TARGET_PLATFORM" ;;
   "") ;;
-  *) echo "build-images: RIG_TARGET_PLATFORM='${RIG_TARGET_PLATFORM}' is not jp6|jp7; deriving the variant from the tag" >&2 ;;
+  *) echo "build-images: RIG_TARGET_PLATFORM='${RIG_TARGET_PLATFORM}' is not jp6|jp7|dev; deriving the variant from the tag" >&2 ;;
 esac
 if [ -z "$VARIANT" ]; then
   case "$TAG" in
     jp6|*-jp6) VARIANT=jp6 ;;
+    dev|*-dev) VARIANT=dev ;;
     *)         VARIANT=jp7 ;;
   esac
 fi
 case "$VARIANT" in
   jp6) BASE_IMAGE="${BASE_IMAGE:-nvcr.io/nvidia/l4t-base:r36.2.0}"
        IMAGES="${IMAGES:-cam-core ros2-bridge ros1-bridge webrtc-bridge}" ;;
+  # dev: cam-dev REPLACES cam-core (no l4t base, no NVENC -- ffv1 record, x264enc preview). The two
+  # bridges are not l4t-based and build unchanged off-Jetson, so the bench box can run the whole
+  # stack; IMAGES=cam-dev alone is the fast path when only the core bench tests matter.
+  dev) BASE_IMAGE="${BASE_IMAGE:-ubuntu:22.04}"
+       IMAGES="${IMAGES:-cam-dev ros2-bridge webrtc-bridge}" ;;
   *)   BASE_IMAGE="${BASE_IMAGE:-ubuntu:24.04}"
        IMAGES="${IMAGES:-cam-core ros2-bridge webrtc-bridge}" ;;
 esac
@@ -83,10 +99,11 @@ build_one() {                      # build_one <image-name> <dockerfile> [extra 
 for img in $IMAGES; do
   case "$img" in
     cam-core)     build_one cam-core     core-driver/Dockerfile           --build-arg "BASE_IMAGE=$BASE_IMAGE" ;;
+    cam-dev)      build_one cam-dev      core-driver/Dockerfile.dev       --build-arg "BASE=$BASE_IMAGE" ;;   # NB: the dev image's arg is BASE, not BASE_IMAGE
     ros2-bridge)   build_one ros2-bridge   plugins/ros2-bridge/Dockerfile   --build-arg "ROS_DISTRO=$ROS_DISTRO" ;;
     ros1-bridge)   build_one ros1-bridge   plugins/ros1-bridge/Dockerfile ;;   # Noetic (ROS_DISTRO baked in)
     webrtc-bridge) build_one webrtc-bridge plugins/webrtc-bridge/Dockerfile ;;
-    *) echo "build-images: unknown image '$img' (want: cam-core|ros2-bridge|ros1-bridge|webrtc-bridge)" >&2; exit 1 ;;
+    *) echo "build-images: unknown image '$img' (want: cam-core|cam-dev|ros2-bridge|ros1-bridge|webrtc-bridge)" >&2; exit 1 ;;
   esac
 done
 
@@ -94,7 +111,13 @@ echo
 echo "built$([ "$PUSH" = 1 ] && echo ' + pushed') ${#REFS[@]} image(s):"
 printf '  %s\n' "${REFS[@]}"
 echo
-echo "On a JP$([ "$VARIANT" = jp6 ] && echo 6 || echo 7) vehicle (after cloning the repo there):"
-echo "  export CAM_REGISTRY=$REGISTRY"
-echo "  ./cam-up config/sensors/<sensor>.yaml pull"
-echo "  ./cam-up config/sensors/<sensor>.yaml up -d"
+case "$VARIANT" in
+  dev) echo "On an arm64 bench box (no Jetson; after cloning the repo there):"
+       echo "  export CAM_REGISTRY=$REGISTRY"
+       echo "  ./cam-up --dev config/sensors/<sensor>.yaml pull"
+       echo "  ./cam-up --dev config/sensors/<sensor>.yaml up -d" ;;
+  *)   echo "On a JP$([ "$VARIANT" = jp6 ] && echo 6 || echo 7) vehicle (after cloning the repo there):"
+       echo "  export CAM_REGISTRY=$REGISTRY"
+       echo "  ./cam-up config/sensors/<sensor>.yaml pull"
+       echo "  ./cam-up config/sensors/<sensor>.yaml up -d" ;;
+esac

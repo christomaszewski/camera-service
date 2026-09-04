@@ -30,6 +30,10 @@ shm both work.
 - `core-driver/tools/usb_test.sh` — USB source: raw, MJPEG stream-copy (dual-output), color/FFV1
 - `core-driver/tools/rtsp_test.sh` — RTSP source: local fake server → stream-copy + RTCP→NTP provenance (CSV-checked)
 - `core-driver/tools/rtsp_reconnect_test.sh` — RTSP stall/recovery: kill + restart the server; assert detect → reopen → resume
+- `core-driver/tools/replay_test.sh` — replay source roundtrips: record (GRAY8/GRAY16 FFV1, MJPEG
+  stream-copy) → replay → re-record; sidecar CSV identical, frames/bitstream bit-identical
+- `core-driver/tools/pcap_test.sh` — pcap source: synthetic usbmon capture (known Y16 ramps + noise +
+  ERR/truncated URBs) → full service → FFV1 recording bit-exact, capture timestamps in the CSV
 - `plugins/ros2-bridge/tools/bridge_test.sh` — full chain → ROS2 raw + compressed `Image`
 - `core-driver/tools/supervisor_test.sh` — supervisor spawn / manage / teardown
 - `tools/gvsp-chunk-emitter/gvsp_test.sh` — real GVSP + chunk-timestamp extraction (patched Aravis)
@@ -89,6 +93,10 @@ shm both work.
 - SEI declined (use the CSV sidecar; RTP header extension for the streaming path).
 - WebRTC egress = gst-plugins-rs `webrtcsink` (built from source), sibling container on the raw shm
   endpoint; encodes internally; needs `gstreamer1.0-nice` + `shmsrc do-timestamp` + I420 conversion.
+- Playback sources at the `Source` seam (2026-08): `camera.type: replay` (recorded run → original
+  stamps/provenance, bit-exact) and `camera.type: pcap` (usbmon/UVC capture, pure-stdlib parser) —
+  frame-level replay, not v4l2loopback/gadget emulation (kernel-module-free, container-friendly,
+  timestamp-faithful); GVSP packet-level replay stays the chunk emitter's job.
 - ROS2 standardized on **Lyrical Luth** (LTS, May 2026 → 2031). `ament_target_dependencies` was removed
   in Lyrical → use modern `target_link_libraries` with exported targets (works on Jazzy too). The bridge
   Dockerfile takes a `ROS_DISTRO` build-arg (`--build-arg ROS_DISTRO=jazzy` for a fallback). Note:

@@ -1,16 +1,44 @@
-# Dev override (no Jetson) — applied by `cam-up --dev`. Runs the core from the cam-dev image
-# (Ubuntu + GStreamer + Aravis, NO NVIDIA stack) instead of the l4t image, with the source
-# mounted for live iteration. The ros2-bridge isn't an l4t image and runs unchanged; the
-# webrtc-bridge just gets its JP6 nvidia runtime swapped back to runc (no NVENC off-Jetson —
-# webrtcsink falls back to x264enc). cam-up --dev also sets CAM_NETWORK=bridge.
+# The `dev` PLATFORM overlay (no Jetson) — applied by `cam-up --dev`, and equally by
+# CAM_PLATFORM=dev / RIG_TARGET_PLATFORM=dev / a -dev image tag, so a bench box is selected the
+# same way a vehicle is. Runs the core from the cam-dev image (Ubuntu + GStreamer + Aravis, NO
+# NVIDIA stack) instead of the l4t image, with the source mounted for live iteration. The
+# ros2-bridge isn't an l4t image and runs unchanged; the webrtc-bridge just gets its JP6 nvidia
+# runtime swapped back to runc (no NVENC off-Jetson — webrtcsink falls back to x264enc). cam-up
+# also sets CAM_NETWORK=bridge whenever the resolved platform is dev.
 services:
   webrtc-bridge:
     runtime: runc                       # no nvidia runtime on a laptop / CI; x264enc fallback
+    # Publish the signalling port. A vehicle rides HOST networking, where the port is already
+    # reachable and a `ports:` key would just be discarded with a warning -- so this belongs
+    # here and nowhere else: the overlay is applied only when cam-up resolves platform=dev,
+    # which is also the only platform that DEFAULTS CAM_NETWORK to bridge. One fact, one place.
+    # The port follows the sensor config: sensor_env maps the webrtc-bridge plugin's `port`
+    # param to CAM_SIGNALLING_PORT, so two sensors on one laptop don't collide.
+    # NOTE: this publishes SIGNALLING (and with it the gstwebrtc-api page). WebRTC MEDIA is
+    # negotiated over ICE on ephemeral UDP ports, which nothing publishes -- on Linux the
+    # container's bridge IP is routable from the host so the media flows anyway, but on a Docker
+    # Desktop VM (macOS/Windows) it is not. There, set CAM_NETWORK=host: an explicit value beats
+    # the dev bridge default, every container joins the VM's namespace, and Docker Desktop both
+    # forwards those ports to the host's localhost and exposes them on the vmnet bridge -- so ICE
+    # finds a routable pair without a TURN server. (`ports:` below is then discarded with a
+    # warning, which is exactly what a vehicle does.) The core + recording are unaffected either
+    # way.
+    ports:
+      - "${CAM_SIGNALLING_PORT:-8443}:${CAM_SIGNALLING_PORT:-8443}"
   core-driver:
-    image: ${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}cam-dev:${RIG_IMAGE_TAG:-latest}
+    # cam-up sets CAM_DEV_IMAGE from CAM_REGISTRY/RIG_IMAGE_REGISTRY + the resolved tag, mirroring
+    # CAM_CORE_IMAGE on the vehicle platforms -- so `pull` on a bench box fetches the same cam-dev
+    # image tools/build-images.sh published for the `dev` variant instead of rebuilding it. The
+    # RIG_* fallback keeps a bare `docker compose` (no cam-up) resolving as it always did.
+    image: ${CAM_DEV_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}cam-dev:${RIG_IMAGE_TAG:-latest}}
     build:
       context: .
       dockerfile: core-driver/Dockerfile.dev
+      args:
+        # Pinned to the SAME default build-images.sh uses for the dev variant, so a locally built
+        # cam-dev and a pulled one are the same userspace: ubuntu:22.04 = gst 1.20, mirroring JP6
+        # (and therefore the shm+header transport). CAM_DEV_BASE=ubuntu:24.04 to bench gst 1.24.
+        BASE: ${CAM_DEV_BASE:-ubuntu:22.04}
     runtime: runc                       # no nvidia runtime on a laptop / CI
     entrypoint: ["python3"]             # cam-dev's default CMD is main.py; force the supervisor
     command: ["supervisor.py"]

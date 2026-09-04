@@ -17,6 +17,8 @@ service: camera-service
 # ---- general (shared by every source type) -------------------------------------------------------
 camera:
   type: gige               # gige (GVSP/Aravis) | usb (v4l2) | rtsp — selects the matching block below
+  #                          (playback types for dev/repro: replay | pcap — see config/replay.yaml
+  #                           and config/pcap-thermal.yaml; not sensor deployments)
   frame_rate: 25.0         # gige: requested on the camera; usb: SET TO WHAT THE DEVICE DELIVERS
   #                          (advisory to v4l2 — mislabeling timing, not throttling); rtsp: informational
   # Source watchdog: reopen a dropped/stalled source with backoff while the pipeline (and any open

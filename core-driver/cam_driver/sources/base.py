@@ -99,6 +99,31 @@ class Source(ABC):
         deterministically (e.g. GigE control privilege) rather than relying on interpreter-exit
         GC. Default: nothing to release beyond stop()."""
 
+    # ---- finite playback (optional; a live camera never finishes) ----------
+    @property
+    def finite(self) -> bool:
+        """True for a playback source that can END (replay/pcap without loop). The
+        pipeline then polls `finished` and finalizes the recording cleanly at EOF."""
+        return False
+
+    @property
+    def finished(self) -> bool:
+        """Playback exhausted (finite sources only) -> the pipeline EOSes and exits 0."""
+        return False
+
+    @property
+    def finished_error(self) -> bool:
+        """True when playback ended on a FAILURE (decode error, bad capture) rather than
+        clean end-of-data -- the run still finalizes, but exits non-zero so a truncated
+        reprocess is never mistaken for a complete one."""
+        return False
+
+    @property
+    def delivered_frame_rate(self) -> Optional[float]:
+        """The fps this source will actually deliver, when it knows better than the config
+        (replay: derived from the sidecar CSV). None = use the configured frame_rate."""
+        return None
+
     # ---- reconnect (optional; default = unsupported) -----------------------
     # The pipeline parks its shutdown event here (CapturePipeline.__init__). Any long wait inside
     # reopen() MUST poll it and bail out early: shutdown() joins the reconnect worker for only
