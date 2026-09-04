@@ -30,6 +30,10 @@
 # exercises the same transport a JP6 vehicle does. --dev is sugar for it; rig selects it the same
 # way it selects a vehicle -- RIG_TARGET_PLATFORM=dev or a -dev image tag -- which is what lets a
 # bench box PULL tools/build-images.sh's `dev` image set instead of rebuilding it locally.
+#
+# CAM_NETWORK={host,bridge} overrides the networking half of that. Bridge is only the dev DEFAULT:
+# on a Docker Desktop VM (macOS/Windows) the bridge subnet is unreachable from the host, so a bench
+# box there sets CAM_NETWORK=host and gets the vehicle's shape -- see the note at the assignment.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")" && pwd)"
 PYTHON="${CAM_PYTHON:-python3}"
@@ -74,7 +78,10 @@ eval "$("$PYTHON" "$REPO/tools/sensor_env.py" "$CONFIG" | sed 's/^/export /')"
 # baked /app/config still serves a bare `docker compose up` with the default CAM_CONFIG.
 export CAM_CONFIG_HOST="$CONFIG_ABS"
 export CAM_CONFIG="/run/cam-sensor.yaml"   # absolute in-container path, outside the /app tree
-export CAM_NETWORK="${CAM_NETWORK:-host}"   # dev -> bridge, applied once the platform resolves below
+# Was CAM_NETWORK asked for EXPLICITLY? The dev platform defaults it to bridge below, and that
+# default has to be overridable -- so record the distinction before the fallback erases it.
+CAM_NETWORK_EXPLICIT="${CAM_NETWORK:+1}"
+export CAM_NETWORK="${CAM_NETWORK:-host}"   # dev -> bridge by default, applied once the platform resolves below
 # ROS 2 middleware: rmw_zenoh_cpp is the default across the stack (discovers via a shared host
 # `rmw_zenohd` router; see --zenohd / tools/zenohd.sh). FastDDS stays selectable via RMW_IMPLEMENTATION.
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
@@ -140,7 +147,12 @@ fi
 # a -dev tag), it drives the dev overlay AND bridge networking. Deriving DEV here instead of setting
 # it in the flag parser is what makes rig's platform tag reach the bench box.
 [ "$PLATFORM" = dev ] && DEV=1
-[ "$DEV" = 1 ] && export CAM_NETWORK=bridge
+# ...but bridge is only the dev DEFAULT. An explicit CAM_NETWORK wins: on a Docker Desktop VM
+# (macOS/Windows) the bridge subnet is unreachable from the host, which cuts the bridges off
+# from BOTH ends of the mesh -- the vehicle's zenoh router at localhost:7447, and the browser
+# that has to reach WebRTC media on ephemeral ICE/UDP ports nothing publishes. There,
+# CAM_NETWORK=host is the working shape (Docker Desktop forwards the VM's ports to the Mac).
+[ "$DEV" = 1 ] && [ -z "$CAM_NETWORK_EXPLICIT" ] && export CAM_NETWORK=bridge
 # CAM_PLATFORM is also the bridges' transport selector; every consumer picks unixfd iff jp7 and the
 # header transport otherwise, so `dev` lands on shm+header -- the JP6 shape, as intended.
 export CAM_PLATFORM="$PLATFORM"

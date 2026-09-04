@@ -10,8 +10,10 @@
 # On a vehicle that port is reachable as-is (host networking). Under `--dev` the stack moves to
 # bridge networking and docker-compose.dev.yml publishes the port for you -- signalling then
 # works from the host, but WebRTC MEDIA rides ephemeral ICE/UDP ports that nothing publishes:
-# routable from a Linux host, NOT from a Docker Desktop VM (macOS/Windows), where a viewer needs
-# host networking or a TURN server. See README "Playback sources", docker-compose.input.yml.
+# routable from a Linux host, NOT from a Docker Desktop VM (macOS/Windows). On a Mac/Windows
+# bench, run the stack with CAM_NETWORK=host instead -- an explicit value beats the dev bridge
+# default and the media flows without a TURN server. See README "Playback sources",
+# docker-compose.input.yml.
 service: camera-service
 name: thermal_pcap          # -> compose project cam_thermal_pcap, shm volume cam_thermal_pcap_sock
 

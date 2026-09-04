@@ -11,14 +11,18 @@ services:
     # Publish the signalling port. A vehicle rides HOST networking, where the port is already
     # reachable and a `ports:` key would just be discarded with a warning -- so this belongs
     # here and nowhere else: the overlay is applied only when cam-up resolves platform=dev,
-    # which is also the only platform that forces CAM_NETWORK=bridge. One fact, one place.
+    # which is also the only platform that DEFAULTS CAM_NETWORK to bridge. One fact, one place.
     # The port follows the sensor config: sensor_env maps the webrtc-bridge plugin's `port`
     # param to CAM_SIGNALLING_PORT, so two sensors on one laptop don't collide.
     # NOTE: this publishes SIGNALLING (and with it the gstwebrtc-api page). WebRTC MEDIA is
     # negotiated over ICE on ephemeral UDP ports, which nothing publishes -- on Linux the
     # container's bridge IP is routable from the host so the media flows anyway, but on a Docker
-    # Desktop VM (macOS/Windows) it is not, and a viewer there needs host networking or a TURN
-    # server. The core + recording are unaffected either way.
+    # Desktop VM (macOS/Windows) it is not. There, set CAM_NETWORK=host: an explicit value beats
+    # the dev bridge default, every container joins the VM's namespace, and Docker Desktop both
+    # forwards those ports to the host's localhost and exposes them on the vmnet bridge -- so ICE
+    # finds a routable pair without a TURN server. (`ports:` below is then discarded with a
+    # warning, which is exactly what a vehicle does.) The core + recording are unaffected either
+    # way.
     ports:
       - "${CAM_SIGNALLING_PORT:-8443}:${CAM_SIGNALLING_PORT:-8443}"
   core-driver:
