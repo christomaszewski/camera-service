@@ -55,6 +55,12 @@ services:
       - CAM_CONFIG=${CAM_CONFIG:-config/sensors/camera.yaml}
       - RIG_DATA_DIR=${RIG_DATA_DIR:-}     # absolute host data root (rig) -> recording dir rooted here, off-repo
       - CAM_INSTANCE=${CAM_INSTANCE:-}     # sensor name (cam-up) -> main.py namespaces recordings per sensor
+      # Lifecycle control plane (docs/LIFECYCLE.md): presence + state + change_state on zenoh at
+      # fleet/<VEHICLE_ID>/svc/<CAM_INSTANCE>/lifecycle. VEHICLE_ID empty -> the container hostname.
+      # ZENOH_CONNECT = the vehicle's local zenohd (rmw_zenohd); set empty to scout only. A YAML
+      # `control.zenoh_connect` wins over this env. Peer mode: works with no router at all.
+      - VEHICLE_ID=${VEHICLE_ID:-}
+      - ZENOH_CONNECT=${ZENOH_CONNECT:-tcp/localhost:7447}
     healthcheck:
       # `rig status` (docker compose ps) then reports real health, not "n/a": the core reached
       # PLAYING and its shm transport socket exists (a stack that feeds consumers has one enabled).

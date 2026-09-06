@@ -102,6 +102,10 @@ session.liveliness().declare_subscriber("fleet/*/media/*", on_sample, history=Tr
 | webrtc-bridge | **implemented** | advertises its WebRTC stream; see [plugins/webrtc-bridge/README.md](../plugins/webrtc-bridge/README.md). Reference implementation: a generic advertiser (`tools/zenoh_advertiser.py`) + a stack-specific descriptor builder (`tools/bridge_stream.py`). |
 | sensors / recordings / ros2-bridge | _future_ | each self-advertises at its own `fleet/<vehicle>/media/<id>` key, same shape. |
 
+The sibling convention for **control** — a service's standby/active lifecycle (presence, state,
+`change_state`) at `fleet/<vehicle_id>/svc/<instance>/lifecycle` — is [LIFECYCLE.md](LIFECYCLE.md);
+camera-service's core implements it with the same session discipline as the advertiser above.
+
 The reference advertiser is intentionally split into a **generic** half (session + liveliness token +
 descriptor queryable + fail-safe lifecycle) and a **producer-specific** half (builds the descriptor).
 The generic half is liftable, but the binding contract is *this document* — a new producer in another

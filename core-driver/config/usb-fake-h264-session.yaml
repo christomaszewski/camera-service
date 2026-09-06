@@ -1,0 +1,37 @@
+# Test config: FAKE encoded USB source (videotestsrc -> x264, key-int-max=15) booting INACTIVE.
+#
+# Exercises the stream-copy KEYFRAME GATE: a recording session opened mid-stream on an H.264 source
+# must wait for the next IDR before muxing (a parser does not drop pre-IDR data; segment 00000 would
+# otherwise start on P-frames no decoder can render). The sidecar JSON attests how many frames were
+# skipped waiting (at most one GOP).
+camera:
+  type: usb
+  frame_rate: 25.0
+
+usb:
+  fake: true
+  pixel_format: H264           # encoded delivery -> stream-copy recording + decode-for-consumers
+  width: 512
+  height: 512
+
+recording:
+  enabled: true
+  encoder: auto                # encoded source -> stream-copy
+  name_prefix: usbh264
+  segment_seconds: 30
+
+control:
+  initial_state: inactive
+
+preview:
+  enabled: false
+
+transport:
+  plugin_endpoint:
+    enabled: true
+    socket_path: /tmp/cam/frames
+  raw_endpoint:
+    enabled: false
+    socket_path: /tmp/cam/raw
+
+plugins: []

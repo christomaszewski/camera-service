@@ -26,7 +26,7 @@ v4l2 SOF on USB, RTCP→NTP on RTSP — with a graceful provenance-tracked fallb
 records a **lossless, temporally-compressed** video file, and fans the stream out to consumer
 "plugins" (ROS2, ROS1, WebRTC, MQTT, ...).
 
-> **Design & decisions** → [docs/DESIGN.md](docs/DESIGN.md) · **Status & roadmap** → [docs/ROADMAP.md](docs/ROADMAP.md) · **PTP experiment** → [docs/ptp-timestamp-experiment.md](docs/ptp-timestamp-experiment.md) · **JetPack 7 (Orin) bring-up** → [docs/jetpack7-bringup.md](docs/jetpack7-bringup.md)
+> **Design & decisions** → [docs/DESIGN.md](docs/DESIGN.md) · **Status & roadmap** → [docs/ROADMAP.md](docs/ROADMAP.md) · **Lifecycle control (standby/active over Zenoh)** → [docs/LIFECYCLE.md](docs/LIFECYCLE.md) · **PTP experiment** → [docs/ptp-timestamp-experiment.md](docs/ptp-timestamp-experiment.md) · **JetPack 7 (Orin) bring-up** → [docs/jetpack7-bringup.md](docs/jetpack7-bringup.md)
 
 ## Why it's built this way
 
@@ -313,6 +313,42 @@ Docker Compose **profiles**, and brings up that sensor's stack:
 ./core-driver/tools/supervisor_test.sh   # validate the in-image supervisor path
 ```
 
+### Standby / active (lifecycle control)
+
+The camera streams to consumers in **either** state; a transition switches the lossless **recorder**,
+which runs as a *session* with its own run prefix + sidecar (`<prefix>-00000.mkv` + `.csv/.json`),
+finalized on every deactivate — any number of times per process. `control.initial_state` picks the
+boot state (`active`, the default: record from the first frame; `inactive`: standby until told); a
+**crash restart resumes the last commanded state**, a clean stop forgets it. Local control needs
+nothing but signals (the supervisor forwards them to the core):
+
+```bash
+docker kill -s USR1 <core container>     # activate: open a recording session
+docker kill -s USR2 <core container>     # deactivate: finalize it (files closed within ~5 s)
+```
+
+Sessions are named `<prefix>-<UTCstamp>` (an orchestrator's `run_id` is folded in), a stream-copy
+H.264/H.265 session waits for the next keyframe before muxing (attested as
+`session.skipped_awaiting_keyframe` in the JSON), and the JSON sidecar carries the session's own
+counters (`session.*`) beside the drop summary — which is the session's *delta* of the process
+counters. See [DESIGN.md](docs/DESIGN.md) ("Lifecycle") and `control:` in
+[camera.example.yaml](core-driver/config/sensors/camera.example.yaml).
+
+**Over Zenoh** ([docs/LIFECYCLE.md](docs/LIFECYCLE.md) — the contract the dashboard / orchestrator
+binds to; any rig service can implement the same keys): presence (a liveliness token) + the state
+descriptor at `fleet/<VEHICLE_ID>/svc/<name>/lifecycle`, transitions via a `get` on
+`…/lifecycle/change_state` with `{"transition": "activate"}` (the reply comes when the files are
+closed), and every transition published on `…/lifecycle/state`. The core's session is a **peer**:
+it connects to the vehicle's `rmw_zenohd` when there is one (`ZENOH_CONNECT`, default
+`tcp/localhost:7447`) and scouts a stock `zenohd` otherwise — it also runs with **no router at all**,
+and a router that comes up later gets linked within seconds. Best-effort by construction: no binding
+or no router means signals only, never a stopped camera.
+
+```bash
+# from any host with the python binding, e.g. the dev container: `python3 -c ...` or the probe
+python3 core-driver/tools/lifecycle_probe.py --connect tcp/<vehicle>:7447 --steps wait-put get activate wait-state:active
+```
+
 ## Status & roadmap
 
 - [x] **P0** project scaffold + container
@@ -336,12 +372,19 @@ Docker Compose **profiles**, and brings up that sensor's stack:
   **JetPack 7 bring-up** ✅ (JP7.2 Orin: CDI injection, `unixfd` transport shipped —
   [docs/jetpack7-bringup.md](docs/jetpack7-bringup.md)); disk-full + NVENC session budget next, then
   Thor portability (`nvunixfd` zero-copy, sm_110 is Thor-only).
+- [x] **P6** lifecycle control plane — **standby/active with a per-session recorder** (`inactive` boots
+  streaming-only; SIGUSR1/SIGUSR2 open and finalize recording sessions; a crash restart resumes the last
+  commanded state) and the **zenoh control plane** ([docs/LIFECYCLE.md](docs/LIFECYCLE.md):
+  `fleet/<vehicle>/svc/<instance>/lifecycle…`, peer mode, no router required). Validated in containers —
+  [`lifecycle_test.sh`](core-driver/tools/lifecycle_test.sh) incl. router-less zenoh round-trips; the
+  `rmw_zenohd` + dashboard path is the remaining on-vehicle check.
 
 ### Testing tools (no Jetson, no camera)
 The data path is validated by actually running it in containers — including the **real Aravis
 chunk-parse path** via a patched chunk-emitting GV camera:
 - [core-driver/tools/dev_test.sh](core-driver/tools/dev_test.sh) — producer: capture → timestamp → encoder-fallback probe → FFV1 → shm
-- [core-driver/tools/usb_test.sh](core-driver/tools/usb_test.sh) — USB source: raw, **MJPEG stream-copy** (dual-output), and color/FFV1 paths
+- [core-driver/tools/lifecycle_test.sh](core-driver/tools/lifecycle_test.sh) — **standby/active lifecycle**: boot `inactive` (consumers fed, nothing recorded) → SIGUSR1/SIGUSR2 recording sessions as finalized runs (threshold-split segments, CSV rows, self-attesting JSON) → KILL + restart resumes `active`; then the **zenoh control plane with no router** (presence, descriptor, `change_state` round-trips, state publications, DELETE on stop — the probe stands in for a router)
+- [core-driver/tools/usb_test.sh](core-driver/tools/usb_test.sh) — USB source: raw, **MJPEG stream-copy** (dual-output), color/FFV1, and a mid-stream **H.264 session gated to its first keyframe**
 - [core-driver/tools/rtsp_test.sh](core-driver/tools/rtsp_test.sh) — RTSP source: local fake server → stream-copy record + **RTCP→NTP provenance** (CSV-checked)
 - [core-driver/tools/rtsp_reconnect_test.sh](core-driver/tools/rtsp_reconnect_test.sh) — RTSP stall/recovery: kill + restart the server, assert detect → reopen → frames resume
 - [core-driver/tools/replay_test.sh](core-driver/tools/replay_test.sh) — **replay source roundtrips**: record (GRAY8/GRAY16 FFV1, MJPEG stream-copy) → replay → re-record; sidecar CSV **identical**, frames/bitstream **bit-identical**

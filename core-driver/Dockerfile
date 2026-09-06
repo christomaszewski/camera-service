@@ -37,7 +37,7 @@ FROM ${BASE_IMAGE}
 ENV DEBIAN_FRONTEND=noninteractive
 # kmod: libnvtvmr runs `lsmod` during NVENC init, else nvv4l2h26{4,5}enc aborts. Runtime libs only.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 python3-gi python3-yaml python3-numpy kmod \
+      python3 python3-gi python3-yaml python3-numpy python3-pip kmod \
       gir1.2-glib-2.0 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
       gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
       gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
@@ -49,13 +49,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /opt/aravis/usr/local /usr/local
 RUN ldconfig
 
+# eclipse-zenoh: the Python Zenoh binding for the lifecycle control plane (docs/LIFECYCLE.md). A prebuilt
+# manylinux abi3 wheel installs on arm64/x86 -- no Rust build. The SAME pin as the webrtc-bridge, so one
+# zenoh minor rides the vehicle (with rmw_zenoh's on the ROS graph). PIP_BREAK_SYSTEM_PACKAGES: the
+# JP7 base (24.04) is PEP 668 externally-managed; the JP6 base (22.04) pip ignores the variable.
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+RUN pip3 install --no-cache-dir eclipse-zenoh==1.9.0
+
 # Make the locally-installed Aravis typelib + libs + gst plugin discoverable (Jetson = aarch64).
 ENV GI_TYPELIB_PATH=/usr/local/lib/aarch64-linux-gnu/girepository-1.0:/usr/lib/aarch64-linux-gnu/girepository-1.0 \
     LD_LIBRARY_PATH=/usr/local/lib/aarch64-linux-gnu:/usr/local/lib \
     GST_PLUGIN_PATH=/usr/local/lib/aarch64-linux-gnu/gstreamer-1.0
 
 WORKDIR /app
-# Only Python dep is PyYAML (apt python3-yaml above); gi/GStreamer/Aravis are system bindings.
+# Python deps: PyYAML (apt python3-yaml) + eclipse-zenoh (pip, above); gi/GStreamer/Aravis are system bindings.
 COPY core-driver/ /app/
 
 ENV CAM_CONFIG=/app/config/camera.yaml
