@@ -81,6 +81,11 @@ class Lifecycle:
         # so the remembered state + every observer follow the real state.
         if hasattr(pipeline, "on_session_ended"):
             pipeline.on_session_ended = self._on_uncommanded_end
+        # Progress inside a session (a file boundary, the periodic tick): the state hasn't changed,
+        # so nothing is remembered -- the descriptor is simply republished, and every observer (the
+        # zenoh /state publisher) sees fresh frames / files / elapsed between transitions.
+        if hasattr(pipeline, "on_session_progress"):
+            pipeline.on_session_progress = self._notify
 
     # ---- state -------------------------------------------------------------
     @property

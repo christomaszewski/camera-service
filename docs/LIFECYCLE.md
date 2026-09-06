@@ -41,7 +41,7 @@ fleet/<vehicle_id>/svc/<instance>/lifecycle/state          publisher: the descri
 | **Liveliness token** | `…/lifecycle` | presence — the instance's control plane is up | `liveliness().get(...)` + a **liveliness subscriber** for add/remove |
 | **Queryable** | `…/lifecycle` | replies the **descriptor** (= get_state) | `get(<key>)` |
 | **Queryable** | `…/lifecycle/change_state` | runs a transition; replies when it **completes** | `get(<key>/change_state, payload=<request>)` |
-| **Publisher** | `…/lifecycle/state` | the descriptor after every transition (commanded or not) | `declare_subscriber(<pattern>/state)` |
+| **Publisher** | `…/lifecycle/state` | the descriptor after every transition (commanded or not), **and while `active`: on every recording file boundary + every 5 s** (progress — see below) | `declare_subscriber(<pattern>/state)` |
 
 ## States and transitions
 
@@ -89,6 +89,9 @@ UTF-8 **JSON**, `application/json`. The core is generic; a service adds its own 
   "recording": {                   // camera-service, present while active: the open session
     "index": 2, "prefix": "cam-20260901-120000", "output_dir": "/data/runs/42/recordings/front-left",
     "started_unix_s": 1756700000.0, "frames": 1234, "segments": 3, "skipped_awaiting_keyframe": 0,
+    "open_fragment": "/data/runs/42/recordings/front-left/cam-20260901-120000-00003.mkv",
+                                   //   the file being written RIGHT NOW (null once finalized) -- files on
+                                   //   disk = segments + (open_fragment ? 1 : 0); `segments` counts CLOSED ones
     "encoder": "hw-hevc-lossless", "segment_seconds": 60, "error": null },
   "last_error": null               // the last refusal / session error, until the next clean transition
 }
@@ -96,6 +99,22 @@ UTF-8 **JSON**, `application/json`. The core is generic; a service adds its own 
 
 Only `schema_version`, `service`, `instance`, `state`, `transitions` are **required**; the rest are
 service-specific. `instance` MUST equal the key's `<instance>` segment.
+
+## Progress publications (while `active`)
+
+A transition is not the only time a viewer needs the descriptor: "recording for 1m12s · 2 files"
+has to move. So while a session is open the producer republishes on `…/lifecycle/state`:
+
+- **on every recording file boundary** — a fragment opened or closed (`recording.open_fragment`
+  and `recording.segments` change; this is event-driven, exactly when the file count changes);
+- **every 5 s** (camera-service `PROGRESS_INTERVAL_S`) — `recording.frames`, and the elapsed time a
+  viewer derives from `since_unix_s` / `recording.started_unix_s`.
+
+These carry the same descriptor with the same `state`; nothing about them is a transition (no
+`transitions` change, nothing remembered for a crash restart). A consumer that only wants
+transitions can diff `state`. Publications are the ONLY liveness a consumer needs — no polling of
+the queryable between them. Producers without progress to report simply don't publish between
+transitions; consumers must not require the cadence.
 
 ## `change_state` request / reply
 

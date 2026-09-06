@@ -134,6 +134,9 @@ def base_descriptor():
     codec = _CODEC_FROM_CAPS.get((_env("VIDEO_CAPS", "") or "").split(",")[0].strip())
     if codec:                                               # omit unless a codec is actually pinned
         d["codec"] = codec
+    source = (_env("CAM_SOURCE_TYPE", "") or "").strip().lower()
+    if source:                                              # omit unless the launcher told us (never guess)
+        d["source"] = source                                # gige | usb | rtsp | pcap | replay
     topic = _env("CAM_ROS_TOPIC")                          # OPTIONAL config-supplied linkage
     if topic:
         d["ros_topic"] = topic if topic.startswith("/") else "/" + topic

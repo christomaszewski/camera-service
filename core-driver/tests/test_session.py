@@ -375,6 +375,32 @@ def test_fragment_closed_messages_collect_the_segment_list():
         assert info["files"] == ["/r/cam-x-00000.mkv"], "reported fragments are united with the on-disk files (none here)"
 
 
+def test_open_fragment_tracks_the_file_being_written_and_reports_boundaries():
+    # A viewer's "1 file" -> "2 files" is a fragment boundary, not a transition: the session tracks
+    # the file splitmuxsink is writing NOW (open_fragment), clears it on close, and reports each
+    # boundary through on_fragment (marshalled off the bus dispatch, like on_error).
+    with tempfile.TemporaryDirectory() as tmp:
+        hits = []
+        order = []
+        appsrc = _Appsrc(order); bus = _Bus(order, "eos"); pipe = _Pipeline(appsrc, bus, order, False)
+        s = RecordingSession(1, "cam-x", tmp, "appsrc name=recsrc ! fakesink", header_factory=_header,
+                             on_fragment=hits.append, parse_launch=lambda _d: pipe,
+                             sidecar_factory=lambda base: _Sidecar(base, order))
+        s.start(DROPS0)
+        assert s.describe()["open_fragment"] is None
+        a, b = os.path.join(tmp, "cam-x-00000.mkv"), os.path.join(tmp, "cam-x-00001.mkv")
+        bus.handler(bus, _Msg(Gst.MessageType.ELEMENT, _Structure("splitmuxsink-fragment-opened", a)))
+        assert s.describe()["open_fragment"] == a and s.describe()["segments"] == 0
+        assert hits == [s]                                          # reported off the dispatch (idle), once
+        bus.handler(bus, _Msg(Gst.MessageType.ELEMENT, _Structure("splitmuxsink-fragment-closed", a)))
+        bus.handler(bus, _Msg(Gst.MessageType.ELEMENT, _Structure("splitmuxsink-fragment-opened", b)))
+        d = s.describe()
+        assert d["open_fragment"] == b and d["segments"] == 1        # one closed, one being written
+        assert hits == [s, s, s]                                    # one report per boundary
+        bus.handler(bus, _Msg(Gst.MessageType.ELEMENT, None))     # a structure-less ELEMENT is ignored
+        assert s.describe()["open_fragment"] == b and len(hits) == 3
+
+
 def test_the_final_fragment_closed_during_the_drain_is_still_counted():
     # Seen on the bench: an 85 s session at segment_seconds=60 attested `segments: 1` over TWO files
     # on disk (frames_recorded and the sidecar were exact -- nothing lost, one file uncounted). The

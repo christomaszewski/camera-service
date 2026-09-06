@@ -88,9 +88,11 @@ class _Appsrc:
 
 
 class _FakeSession:
-    def __init__(self, index, prefix, output_dir, description, *, header_factory, encoded, on_error, **_kw):
+    def __init__(self, index, prefix, output_dir, description, *, header_factory, encoded, on_error,
+                 on_fragment=None, **_kw):
         self.index, self.prefix, self.output_dir, self.description = index, prefix, output_dir, description
         self.header_factory, self.encoded, self.on_error = header_factory, encoded, on_error
+        self.on_fragment = on_fragment
         self.path_base = os.path.join(output_dir, prefix)
         self.pipe = None                    # set by the factory
         self.events = None
@@ -332,6 +334,29 @@ def test_session_error_ends_the_session_not_the_process():
         assert p._fatal is False and ended[0]["error"] == "disk full"
         p._on_session_error(s)                    # stale: already closed
         assert s.begin_calls == 1
+
+
+def test_progress_fires_on_fragments_and_ticks_only_for_the_open_session():
+    # The lifecycle republishes on progress; the pipeline decides WHEN: a file boundary in the open
+    # session, and the periodic tick while one is open. A stale session's boundary (it already
+    # closed) and a tick with nothing open must fire nothing -- and the tick then lets its source go.
+    with tempfile.TemporaryDirectory() as tmp:
+        p, created, events = _pipe(tmp)
+        hits = []
+        p.on_session_progress = lambda: hits.append("p")
+        assert p._progress_tick() is False and hits == []          # nothing open: no fire, source released
+        p.activate()
+        s = created[-1]
+        assert s.on_fragment == p._on_session_fragment              # the session reports boundaries to the pipeline
+        assert p._progress_timer is not None
+        p._on_session_fragment(s)
+        assert hits == ["p"]
+        assert p._progress_tick() is True and hits == ["p", "p"]   # keeps ticking while open
+        p.deactivate()
+        assert p._progress_timer is None                            # removed on deactivate
+        p._on_session_fragment(s)                                   # stale: already closed
+        assert p._progress_tick() is False
+        assert hits == ["p", "p"]
 
 
 def test_session_error_is_fatal_only_when_nothing_could_reactivate():

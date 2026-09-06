@@ -98,6 +98,7 @@ _RECONNECT_JOIN_S = 5.0
 # Health-tick period. Also the window the stall check reasons over: no frames for this long, with no
 # reconnect in progress, is a stall rather than an idle.
 _HEALTH_INTERVAL_S = 30
+PROGRESS_INTERVAL_S = 5   # descriptor republish cadence while a recording session is open
 
 
 def _new_buffer(payload: bytes, pts: int, frame_id: int):
@@ -171,6 +172,9 @@ class CapturePipeline:
         # exit is kept. main.py sets this from the deploy shape.
         self.session_error_fatal = False
         self.on_session_ended = None                # lifecycle hook: an UNCOMMANDED close (error)
+        self.on_session_progress = None             # lifecycle hook: the open session moved on (a file
+        #                                             boundary, or the periodic tick) -- republish, no transition
+        self._progress_timer = None                 # GLib source id of the tick while a session is open
 
     # ---- build -------------------------------------------------------------
     @staticmethod
@@ -682,7 +686,7 @@ class CapturePipeline:
         self._session_seq += 1
         sess = self._session_factory(self._session_seq, prefix, out_dir, self._session_desc(rec_desc),
                                      header_factory=self._session_header, encoded=self._stream_copy,
-                                     on_error=self._on_session_error)
+                                     on_error=self._on_session_error, on_fragment=self._on_session_fragment)
         try:
             sess.start(self.drops.summary())
         except Exception as e:   # noqa: BLE001 -- a session that can't open is a refusal, not a crash
@@ -692,6 +696,11 @@ class CapturePipeline:
             return self._last_result
         self._session = sess
         self._lifecycle = ACTIVE
+        # Progress while active: a viewer's "recording for 1m12s - 1 file" only moves if the
+        # descriptor is republished between transitions. Files changing is event-driven (the
+        # fragment hook); frames/elapsed ride this low-rate tick. Self-cancelling once no session
+        # is open, and removed explicitly on deactivate so a quick re-activate can't double it.
+        self._progress_timer = GLib.timeout_add_seconds(PROGRESS_INTERVAL_S, self._progress_tick)
         self._last_result = {"ok": True, "state": ACTIVE, "session": sess.describe()}
         return self._last_result
 
@@ -703,11 +712,41 @@ class CapturePipeline:
             return {"ok": False, "error": "not recording", "state": self._lifecycle}
         self._lifecycle = DEACTIVATING
         self._session = None
+        self._stop_progress_timer()
         result = self._close_session_sync(sess, wait_eos)
         self._lifecycle = INACTIVE
         result["state"] = INACTIVE
         self._last_result = result
         return result
+
+    # ---- progress (between transitions) ----------------------------------
+    def _stop_progress_timer(self) -> None:
+        if self._progress_timer is not None:
+            try:
+                GLib.source_remove(self._progress_timer)
+            except Exception:   # noqa: BLE001 -- already fired its last False
+                pass
+            self._progress_timer = None
+
+    def _on_session_fragment(self, sess) -> None:
+        """A file opened or closed in the OPEN session (main loop, one iteration after the bus)."""
+        if self._session is sess:
+            self._fire_progress()
+
+    def _progress_tick(self) -> bool:
+        if self._session is None:
+            self._progress_timer = None
+            return False   # nothing open: let the source go
+        self._fire_progress()
+        return True
+
+    def _fire_progress(self) -> None:
+        if self.on_session_progress is None:
+            return
+        try:
+            self.on_session_progress()
+        except Exception as e:   # noqa: BLE001 -- a publisher must never touch the recording
+            log.warning("session-progress hook failed: %s", e)
 
     def get_state(self) -> dict:
         """A fresh dict of scalars: safe from any thread (the zenoh adapter reads it off the loop)."""

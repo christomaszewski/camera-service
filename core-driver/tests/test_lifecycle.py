@@ -23,6 +23,7 @@ class _StubPipe:
         self.session = None
         self.calls = []
         self.on_session_ended = None
+        self.on_session_progress = None
         self._activate_fails = activate_fails
         self._activate_raises = activate_raises
         self._close_error = close_error
@@ -184,6 +185,28 @@ def test_uncommanded_end_is_remembered_as_inactive():
         assert lc.last_error == "disk full"
         assert open(os.path.join(tmp, "lifecycle.state")).read().strip() == INACTIVE
         assert seen[-1]["state"] == INACTIVE and seen[-1]["last_error"] == "disk full"
+
+
+def test_session_progress_republishes_the_descriptor_without_a_transition():
+    # Between transitions the pipeline reports progress (a file boundary, the tick); the lifecycle
+    # republishes the descriptor -- fresh counters, SAME state, nothing remembered, no transition.
+    with tempfile.TemporaryDirectory() as tmp:
+        pipe, lc = _lc(tmp=tmp)
+        seen = []
+        lc.add_observer(seen.append)
+        lc.request("activate")
+        assert pipe.on_session_progress is not None
+        n = len(seen)
+        mtime = os.path.getmtime(os.path.join(tmp, "lifecycle.state"))
+        pipe.session["frames"] = 4242
+        pipe.session["open_fragment"] = "/r/cam-x-00001.mkv"
+        pipe.on_session_progress()
+        assert len(seen) == n + 1
+        d = seen[-1]
+        assert d["state"] == ACTIVE and d["transitions"] == ["deactivate"]
+        assert d["recording"]["frames"] == 4242 and d["recording"]["open_fragment"] == "/r/cam-x-00001.mkv"
+        assert os.path.getmtime(os.path.join(tmp, "lifecycle.state")) == mtime   # not re-remembered
+        assert lc.last_error is None
 
 
 def test_observers_see_every_transition_and_never_break_one():

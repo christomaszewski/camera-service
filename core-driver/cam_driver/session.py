@@ -81,8 +81,8 @@ def _blocking(appsrc) -> bool:
 class RecordingSession:
     def __init__(self, index: int, prefix: str, output_dir: str, description: str, *,
                  header_factory: Callable, encoded: bool = False,
-                 on_error: Optional[Callable] = None, parse_launch=None,
-                 sidecar_factory=SidecarWriter):
+                 on_error: Optional[Callable] = None, on_fragment: Optional[Callable] = None,
+                 parse_launch=None, sidecar_factory=SidecarWriter):
         self.index = index
         self.prefix = prefix
         self.output_dir = output_dir
@@ -91,6 +91,8 @@ class RecordingSession:
         self.sidecar = sidecar_factory(self.path_base)
         self._header_factory = header_factory     # (stamp, pts, session) -> SidecarHeader
         self._on_error = on_error                 # (session) -> None, on the main loop
+        self._on_fragment = on_fragment           # (session) -> None, on the main loop: a file opened/closed
+        self._open_fragment: Optional[str] = None  # the .mkv splitmuxsink is writing RIGHT NOW (None between)
         self._parse_launch = parse_launch or Gst.parse_launch
         self.lock = threading.Lock()
         self.closed = False
@@ -251,10 +253,26 @@ class RecordingSession:
             self._eos_seen = True
         elif t == Gst.MessageType.ELEMENT:
             s = msg.get_structure()
-            if s is not None and s.get_name() == "splitmuxsink-fragment-closed":
+            name = s.get_name() if s is not None else None
+            if name in ("splitmuxsink-fragment-opened", "splitmuxsink-fragment-closed"):
                 loc = s.get_string("location")
-                if loc:
-                    self.segments.append(loc)
+                if name == "splitmuxsink-fragment-opened":
+                    self._open_fragment = loc or None
+                else:
+                    if loc:
+                        self.segments.append(loc)
+                    self._open_fragment = None
+                # A file boundary is the one recording event worth telling a viewer about between
+                # transitions ("1 file" -> "2 files"); reported outside this dispatch, like an error.
+                if self._on_fragment is not None:
+                    GLib.idle_add(self._report_fragment)
+
+    def _report_fragment(self) -> bool:
+        try:
+            self._on_fragment(self)
+        except Exception as e:   # noqa: BLE001
+            log.warning("recording session %d: fragment hook failed: %s", self.index, e)
+        return False   # one-shot
 
     def _report_error(self) -> bool:
         try:
@@ -273,6 +291,7 @@ class RecordingSession:
             "started_unix_s": self.started_unix_s,
             "frames": self.frames,
             "segments": len(self.segments),
+            "open_fragment": self._open_fragment,   # the file being written now; None once finalized
             "skipped_awaiting_keyframe": self.skipped_awaiting_keyframe,
             "error": self.error,
         }

@@ -66,6 +66,10 @@ producer actually knows; **omit** what it can't substantiate.
   "width": 2048, "height": 1536, // OPTIONAL frame geometry
   "fps": 30,                     // OPTIONAL
   "pixel_format": "GRAY8",       // OPTIONAL sensor format (GRAY8 / GRAY16_LE / bayer_rggb8 / ...)
+  "source": "gige",              // OPTIONAL what kind of source the stream fronts: a live camera
+                                 //   (gige | usb | rtsp) or PLAYBACK (pcap | replay). A consumer uses it
+                                 //   as a label; the CAPABILITY to control playback is advertised
+                                 //   separately (PLAYBACK.md), never inferred from this field.
   "ros_topic": "/front/image_raw",  // OPTIONAL cross-link to the same stream on the ROS graph
   "recording": "cam-front-*.mkv"   // OPTIONAL cross-link to its on-vehicle recording
 }

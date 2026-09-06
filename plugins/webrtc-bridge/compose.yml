@@ -71,6 +71,10 @@ services:
       # (JSON descriptor). Best-effort + additive: CAM_ADVERTISE=0 (or CAM_LAUNCHER=gst-launch) turns
       # it off and the video path is untouched. VEHICLE_ID empty -> the container hostname.
       - CAM_INSTANCE=${CAM_INSTANCE:-camera}
+      # What KIND of source this stream fronts (gige|usb|rtsp|pcap|replay) -- sensor_env derives it
+      # from camera.type; the descriptor carries it as `source` so a viewer can tell a playback feed
+      # from a live camera (and offer playback control only where there is playback to control).
+      - CAM_SOURCE_TYPE=${CAM_SOURCE_TYPE:-}
       - VEHICLE_ID=${VEHICLE_ID:-}
       - ZENOH_CONNECT=${ZENOH_CONNECT:-tcp/localhost:7447}   # the vehicle's local zenohd; set empty to scout
       - CAM_ADVERTISE=${CAM_ADVERTISE:-1}
