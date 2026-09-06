@@ -204,8 +204,13 @@ class RecordingSession:
             elif not self._eos_seen:
                 self.truncated = True
         self._teardown_pipeline()
-        if not self.segments:
-            self.segments = sorted(glob.glob(self.path_base + "-*.mkv"))
+        # Reconcile with the DISK, always -- the bus is only a hint here. The signal watch came off
+        # before the drain and the drain is a FILTERED pop (EOS | ERROR), so the final fragment's
+        # `splitmuxsink-fragment-closed` -- emitted as the last file closes on EOS -- is discarded
+        # unseen. A session that crossed one segment_seconds boundary had 00000 on the list already,
+        # so the empty-list fallback never ran and the attestation read `segments: 1` over two files
+        # (frames_recorded and the sidecar were right: nothing was lost, one file went uncounted).
+        self.segments = sorted(set(self.segments) | set(glob.glob(self.path_base + "-*.mkv")))
         drops = DropStats.delta(drops_now, self.drops_at_start or {})
         attest = {
             "frames_recorded": self.frames,

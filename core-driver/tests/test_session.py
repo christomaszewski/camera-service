@@ -372,7 +372,30 @@ def test_fragment_closed_messages_collect_the_segment_list():
         assert s.segments == ["/r/cam-x-00000.mkv"]
         s.begin_close()
         info = s.finish_close(1.0, DROPS1)
-        assert info["files"] == ["/r/cam-x-00000.mkv"], "reported fragments win over the glob"
+        assert info["files"] == ["/r/cam-x-00000.mkv"], "reported fragments are united with the on-disk files (none here)"
+
+
+def test_the_final_fragment_closed_during_the_drain_is_still_counted():
+    # Seen on the bench: an 85 s session at segment_seconds=60 attested `segments: 1` over TWO files
+    # on disk (frames_recorded and the sidecar were exact -- nothing lost, one file uncounted). The
+    # 60 s split reported 00000 on the bus; the FINAL fragment closes on EOS, during finish_close's
+    # drain -- after the signal watch is off, and inside a FILTERED pop (EOS | ERROR) that discards
+    # its fragment-closed message unseen. The empty-list glob fallback never ran. The disk is the
+    # ground truth; the bus is a hint.
+    with tempfile.TemporaryDirectory() as tmp:
+        s, appsrc, bus, pipe, sc, order = _session(tmp)
+        s.start(DROPS0)
+        first = os.path.join(tmp, "cam-x-00000.mkv")
+        last = os.path.join(tmp, "cam-x-00001.mkv")
+        bus.handler(bus, _Msg(Gst.MessageType.ELEMENT, _Structure("splitmuxsink-fragment-closed", first)))
+        assert s.segments == [first]                       # the mid-session split, as the bus reported it
+        for f in (first, last):                            # what splitmuxsink actually left on disk
+            open(f, "wb").write(b"\x1a\x45\xdf\xa3")
+        s.begin_close()
+        info = s.finish_close(1.0, DROPS1)
+        assert info["files"] == [first, last], "the fragment that closed on EOS must not vanish"
+        assert info["segments"] == 2 if "segments" in info else len(info["files"]) == 2
+        assert sc.extra["session"]["segments"] == 2
 
 
 def test_zero_frame_session_still_attests_itself():
