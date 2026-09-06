@@ -101,10 +101,14 @@ class ReplaySource(GstPipelineSource):
         self._idx = 0
         self._cycle = 0
         self._offset = 0            # retime + loop shift applied to every delivered stamp
+        # Runtime playback control (docs/PLAYBACK.md). Restart is the loop wrap's own mechanism
+        # (a flush-seek to 0 with the counters bumped), so the hook IS _restart, on the main loop.
+        self._playback = playback.PlaybackState("replay", speed=cfg.speed, loop=cfg.loop,
+                                                on_restart=self._restart)
         self._retime_offset = 0
         self._span_ns = 0           # cycle length: last-first + one median interval
         self._median_ns = playback.DEFAULT_INTERVAL_NS
-        self._pacer = playback.Pacer(cfg.speed)
+        self._pacer = self._playback.pacer   # ONE pacer: set_speed reaches the feeder's wait
         self._stop_evt = threading.Event()   # cancels a pacing sleep (recorded gaps can be seconds)
         self._finished = False
         self._failed = False
@@ -124,6 +128,7 @@ class ReplaySource(GstPipelineSource):
         ts = [s.timestamp_ns for s in self._csv_stamps]
         self._median_ns = playback.median_interval_ns(ts)
         self._span_ns = (ts[-1] - ts[0]) + self._median_ns
+        self._playback.duration_s = round(self._span_ns / 1e9, 3)   # one cycle, known up front
         if (self.cfg.retime or "original") == "wall":
             self._retime_offset = time.time_ns() - ts[0]
         elif self.cfg.retime not in ("", "original"):
@@ -236,8 +241,15 @@ class ReplaySource(GstPipelineSource):
                             timestamp_ns=ts, source=TimestampSource.SYSTEM,
                             system_ns=ts, camera_ns=ts, chunk_ns=None)
         # blocks the streaming thread = natural backpressure; stop() cancels the sleep
-        # (a recorded gap can be seconds long and must not stall shutdown)
+        # (a recorded gap can be seconds long and must not stall shutdown). A pause holds HERE
+        # too -- the decode pipeline simply waits on its own thread, exactly like a long gap.
+        if self._playback.wait_if_paused(cancel=self._stop_evt) == playback.STOP:
+            return st
         self._pacer.wait(st.timestamp_ns, cancel=self._stop_evt)
+        # a pause that landed during the sleep holds this frame too (position stays put)
+        if self._playback.wait_if_paused(cancel=self._stop_evt) == playback.STOP:
+            return st
+        self._playback.note_frame(st.timestamp_ns)
         return st
 
     def stop(self) -> None:
@@ -259,17 +271,29 @@ class ReplaySource(GstPipelineSource):
 
     def _on_eos(self, _bus, _msg) -> None:
         self._check_row_count()
-        if not self.cfg.loop:
+        if not self._playback.loop:
             log.info("replay: end of run (%d frames delivered)", self._idx)
             self._finished = True
+            self._playback.mark_finished()
             return
+        self._restart(reason="loop")
+
+    def _restart(self, reason: str = "restart") -> None:
+        """Back to the start of the run: the next cycle's stamps are shifted past this one's, and
+        the decode pipeline flush-seeks to 0. The loop wrap and an operator's `restart` are the
+        same mechanism (main-loop thread: the bus handler's, and the zenoh adapter dispatches
+        there). Raises on a failed seek so a `restart` request is a legible refusal."""
         self._cycle += 1
         self._idx = 0
         self._offset = self._retime_offset + self._cycle * self._span_ns
-        log.info("replay: loop -> cycle %d (timestamps shifted %+.3fs)",
-                 self._cycle, self._cycle * self._span_ns / 1e9)
+        self._playback.mark_cycle(self._cycle)
+        self._playback.take_restart()   # the feeder needs no flag: the seek does the work
+        log.info("replay: %s -> cycle %d (timestamps shifted %+.3fs)",
+                 reason, self._cycle, self._cycle * self._span_ns / 1e9)
         if not self._pipeline.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH, 0):
-            log.error("replay: loop seek failed (parts moved/deleted?) -- ending playback")
+            log.error("replay: %s seek failed (parts moved/deleted?) -- ending playback", reason)
+            if reason != "loop":
+                raise RuntimeError("seek to start failed")
             self._failed = True
             self._finished = True
 
@@ -278,6 +302,10 @@ class ReplaySource(GstPipelineSource):
         log.error("replay pipeline error: %s | %s -- ending playback", err, dbg)
         self._failed = True     # surfaces as a non-zero exit; recording finalizes regardless
         self._finished = True
+
+    @property
+    def playback(self):
+        return self._playback
 
     @property
     def finite(self) -> bool:

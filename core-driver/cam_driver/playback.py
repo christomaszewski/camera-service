@@ -20,9 +20,10 @@ import logging
 import os
 import re
 import statistics
+import threading
 import time
 from dataclasses import dataclass, replace
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from .timestamps import FrameStamp, TimestampSource
 
@@ -153,16 +154,32 @@ def shift_stamp(st: FrameStamp, offset_ns: int) -> FrameStamp:
 class Pacer:
     """Sleep-based pacing against the data's own timeline (see module docstring).
     The baseline is the first wait()ed timestamp; loop cycles keep the SAME baseline
-    because their timestamps are already cycle-shifted monotonic."""
+    because their timestamps are already cycle-shifted monotonic.
+
+    The baseline is also what a runtime change RE-ANCHORS: a speed change or a resume
+    after a pause rebases (t0_src, t0_wall) onto (last data ts, now), so the new pace
+    applies from here on and a pause is never "caught up" in a burst afterwards."""
 
     def __init__(self, speed: float = 1.0):
         self.speed = float(speed)
         self._t0_src: Optional[int] = None
         self._t0_wall = 0
+        self._last_src: Optional[int] = None
+
+    def rebase(self) -> None:
+        """Anchor the timeline at (last waited data ts, now). Called on set_speed and on
+        resume; harmless before the first wait."""
+        if self._last_src is not None:
+            self._t0_src, self._t0_wall = self._last_src, time.monotonic_ns()
+
+    def set_speed(self, speed: float) -> None:
+        self.speed = float(speed)
+        self.rebase()
 
     def wait(self, ts_ns: int, cancel=None) -> None:
         """Sleep until ts_ns is due. `cancel` (a threading.Event) aborts the sleep --
         recorded gaps can be seconds long and must not block a shutdown."""
+        self._last_src = ts_ns
         if self.speed <= 0:
             return
         now = time.monotonic_ns()
@@ -176,3 +193,217 @@ class Pacer:
                 cancel.wait(delay_s)
             else:
                 time.sleep(delay_s)
+
+
+# ---- runtime playback control (docs/PLAYBACK.md) -------------------------------------------
+
+PLAYING = "playing"
+PAUSED = "paused"
+FINISHED = "finished"
+
+STOP, RESUME, RESTART = "stop", "resume", "restart"   # what wait_if_paused() returns
+RESTART_TAKE_S = 1.0   # how long request("restart") waits for the feeder to take it before replying
+
+
+class PlaybackState:
+    """The POLICY behind a source's playback control: what `control` accepts from which state,
+    idempotency, the descriptor every control surface publishes -- and the shared runtime state
+    the feeder reads (speed via the pacer, loop, a pending restart, the pause hold).
+
+    Pure Python and thread-safe: `request()` runs on the GLib main loop (the zenoh adapter
+    dispatches there, like change_state); the feeder calls `note_frame()` per frame and
+    `wait_if_paused()` at its pacing point from the SOURCE thread. The source supplies one hook,
+    `on_restart` (pcap: abandon the current cycle; replay: flush-seek to 0) -- the MECHANISM stays
+    in the source, the policy here.
+    """
+
+    def __init__(self, source_kind: str, *, speed: float = 1.0, loop: bool = False,
+                 duration_s: Optional[float] = None, pacer: Optional[Pacer] = None,
+                 on_restart: Optional[Callable[[], None]] = None, clock=time.time):
+        self.source_kind = source_kind
+        self.pacer = pacer or Pacer(speed)
+        self.loop = bool(loop)
+        self.duration_s = duration_s
+        self._on_restart = on_restart
+        self._clock = clock
+        self._cond = threading.Condition()
+        self._state = PLAYING
+        self._cycle = 0
+        self._frames = 0
+        self._position_ns = 0
+        self._cycle_base_ns: Optional[int] = None
+        self._restart_pending = False
+        self.since_unix_s = clock()
+        self.last_error: Optional[str] = None
+        self._observers: list = []
+
+    # ---- observation ----------------------------------------------------------
+    def add_observer(self, fn: Callable[[dict], None]) -> None:
+        self._observers.append(fn)
+
+    def _notify(self) -> None:
+        d = self.descriptor()
+        for fn in self._observers:
+            try:
+                fn(d)
+            except Exception as e:   # noqa: BLE001 -- an observer must never break a request
+                log.warning("playback observer failed: %s", e)
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    @property
+    def speed(self) -> float:
+        return self.pacer.speed
+
+    def controls(self) -> list:
+        if self._state == FINISHED:
+            return []
+        first = "pause" if self._state == PLAYING else "resume"
+        return [first, "set_speed", "set_loop", "restart"]
+
+    def descriptor(self) -> dict:
+        with self._cond:
+            return {
+                "schema_version": 1,
+                "service": "camera-service",
+                "instance": None,            # the adapter fills the key's <instance>
+                "source": self.source_kind,
+                "state": self._state,
+                "controls": self.controls(),
+                "speed": self.pacer.speed,
+                "loop": self.loop,
+                "cycle": self._cycle,
+                "position_s": round(self._position_ns / 1e9, 3),
+                "duration_s": self.duration_s,
+                "frames": self._frames,
+                "since_unix_s": self.since_unix_s,
+                "last_error": self.last_error,
+            }
+
+    # ---- the feeder's side (source thread) ---------------------------------------
+    def note_frame(self, data_ts_ns: int) -> None:
+        """One frame delivered at the data's own timestamp (cycle-shifted or not: the first
+        note after a (re)start anchors the cycle, so position is relative to it)."""
+        with self._cond:
+            if self._cycle_base_ns is None:
+                self._cycle_base_ns = data_ts_ns
+            self._position_ns = max(0, data_ts_ns - self._cycle_base_ns)
+            self._frames += 1
+
+    def mark_cycle(self, cycle: int) -> None:
+        """A new cycle began (loop wrap or restart): position/frames start over."""
+        with self._cond:
+            self._cycle = cycle
+            self._frames = 0
+            self._position_ns = 0
+            self._cycle_base_ns = None
+
+    def take_restart(self) -> bool:
+        """Feeder (or a source's restart hook): was a restart requested since the last check?
+        CONSUMES it -- and wakes request(), which waits for exactly this to reply "taken"."""
+        with self._cond:
+            r, self._restart_pending = self._restart_pending, False
+            if r:
+                self._cond.notify_all()
+            return r
+
+    def wait_if_paused(self, cancel=None) -> str:
+        """Feeder: block while paused. Returns STOP (cancel set), RESTART (a restart was pending --
+        CONSUMED here, the caller now honours it: a verdict that left the flag set made every
+        following cycle restart on its first frame, a tight loop delivering nothing) or RESUME
+        (carry on). Never blocks when playing."""
+        with self._cond:
+            while self._state == PAUSED and not (cancel is not None and cancel.is_set()) \
+                    and not self._restart_pending:
+                self._cond.wait(0.2)
+            if cancel is not None and cancel.is_set():
+                return STOP
+            if self._restart_pending:
+                self._restart_pending = False
+                self._cond.notify_all()
+                return RESTART
+            return RESUME
+
+    def mark_finished(self, error: Optional[str] = None) -> None:
+        with self._cond:
+            if self._state == FINISHED:
+                return
+            self._state = FINISHED
+            self.since_unix_s = self._clock()
+            self.last_error = error
+            self._cond.notify_all()
+        self._notify()
+
+    # ---- the control surface (main loop) --------------------------------------------
+    def request(self, op: str, params: Optional[dict] = None) -> dict:
+        params = params or {}
+        with self._cond:
+            cur = self._state
+            if op not in ("pause", "resume", "set_speed", "set_loop", "restart"):
+                return self._result(False, error=f"unknown op {op!r}")
+            if cur == FINISHED:
+                return self._result(False, error="playback has finished")
+            if op == "pause":
+                if cur == PAUSED:
+                    return self._result(True, noop=True)
+                self._state = PAUSED
+            elif op == "resume":
+                if cur == PLAYING:
+                    return self._result(True, noop=True)
+                self._state = PLAYING
+                self.pacer.rebase()          # the paused wall time must not be caught up in a burst
+                self._cond.notify_all()
+            elif op == "set_speed":
+                try:
+                    speed = float(params.get("speed"))
+                except (TypeError, ValueError):
+                    return self._result(False, error="'speed' must be a number >= 0")
+                if speed < 0:
+                    return self._result(False, error="'speed' must be >= 0")
+                if speed == self.pacer.speed:
+                    return self._result(True, noop=True)
+                self.pacer.set_speed(speed)
+            elif op == "set_loop":
+                loop = params.get("loop")
+                if not isinstance(loop, bool):
+                    return self._result(False, error="'loop' must be true or false")
+                if loop == self.loop:
+                    return self._result(True, noop=True)
+                self.loop = loop
+            elif op == "restart":
+                self._restart_pending = True
+                self._cond.notify_all()      # a paused feeder must wake to honour it
+            self.since_unix_s = self._clock()
+            self.last_error = None
+        if op == "restart":
+            if self._on_restart is not None:
+                try:
+                    self._on_restart()       # replay: the seek, which takes the flag itself
+                except Exception as e:   # noqa: BLE001 -- a mechanism failure is a legible refusal
+                    log.exception("playback: restart hook raised")
+                    with self._cond:
+                        self._restart_pending = False
+                        self.last_error = f"restart failed: {e}"
+                    return self._result(False, error=self.last_error)
+            # Reply once the feeder has TAKEN it (its next pacing point -- one frame interval,
+            # sub-second), so "ok" means "restarted", as the contract promises. Bounded: a
+            # feeder deep in a multi-second recorded gap takes it when it wakes; the reply is
+            # still honest about what happened.
+            with self._cond:
+                self._cond.wait_for(lambda: not self._restart_pending, timeout=RESTART_TAKE_S)
+                taken = not self._restart_pending
+        out = self._result(True)
+        if op == "restart" and not taken:
+            out["pending"] = True
+        self._notify()
+        return out
+
+    def _result(self, ok: bool, error: Optional[str] = None, noop: bool = False) -> dict:
+        out = {"ok": ok, "state": self._state, "descriptor": self.descriptor()}
+        if error:
+            out["error"] = error
+        if noop:
+            out["noop"] = True
+        return out

@@ -163,7 +163,9 @@ for reply in session.get(key + "/change_state", payload=b'{"transition":"activat
 
 ## Zenoh session (producer side)
 
-- **One peer-mode session**, reused for the token, the queryables and the publisher.
+- **One peer-mode session**, reused for the token, the queryables and the publisher — and, for a
+  source that plays data back, for the playback keys too ([PLAYBACK.md](PLAYBACK.md)): declared in
+  the same moment, queryables before tokens, the playback token last.
 - **Endpoints** to connect to: the service's own config first (camera-service `control.zenoh_connect`),
   else the `ZENOH_CONNECT` env, else the vehicle's local `zenohd` (`tcp/localhost:7447`, the
   `rmw_zenohd` rig runs); comma-separated; an **empty** string means scout only.

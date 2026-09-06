@@ -4,6 +4,12 @@
     fleet/<vehicle_id>/svc/<instance>/lifecycle/change_state  queryable: {"transition": ..., "run_id"?: ...}
     fleet/<vehicle_id>/svc/<instance>/lifecycle/state         publisher: the descriptor on every transition
 
+and, for a source that plays data back (docs/PLAYBACK.md), on the SAME session:
+
+    fleet/<vehicle_id>/svc/<instance>/playback                liveliness token + queryable (the descriptor)
+    fleet/<vehicle_id>/svc/<instance>/playback/control        queryable: {"op": pause|resume|set_speed|set_loop|restart, ...}
+    fleet/<vehicle_id>/svc/<instance>/playback/state          publisher: on every change + ~1 Hz while playing
+
 -- the producer half of the service-lifecycle convention (docs/LIFECYCLE.md), shaped after the media
 discovery advertiser (plugins/webrtc-bridge/tools/zenoh_advertiser.py, docs/DISCOVERY.md): ONE
 peer-mode session, a liveliness token that Zenoh withdraws by itself when this process dies (no
@@ -47,6 +53,13 @@ def vehicle_id() -> str:
 
 def lifecycle_key(vehicle: str, instance: str) -> str:
     return f"fleet/{vehicle}/svc/{instance}/lifecycle"
+
+
+def playback_key(vehicle: str, instance: str) -> str:
+    return f"fleet/{vehicle}/svc/{instance}/playback"
+
+
+PLAYBACK_POSITION_HZ = 1   # /playback/state cadence while playing (position moves)
 
 
 def zenoh_connect_endpoints(configured: Optional[str]) -> list:
@@ -97,15 +110,51 @@ def parse_change_state(payload: Optional[bytes], parameters: str = ""):
     return out, None
 
 
+def parse_playback_request(payload: Optional[bytes], parameters: str = ""):
+    """(request, error) from a playback/control query: {"op": ..., "speed"?, "loop"?} as a JSON
+    object payload, or selector parameters (`...?op=set_speed;speed=2`). Values are coerced from
+    the selector's strings; the policy validates ranges/types."""
+    req = None
+    if payload:
+        try:
+            req = json.loads(bytes(payload).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as e:
+            return None, f"request is not JSON: {e}"
+        if not isinstance(req, dict):
+            return None, "request must be a JSON object"
+    else:
+        req = _split_parameters(parameters)
+        if "speed" in req:
+            try:
+                req["speed"] = float(req["speed"])
+            except ValueError:
+                pass   # the policy refuses it legibly
+        if "loop" in req and isinstance(req["loop"], str):
+            req["loop"] = {"true": True, "false": False}.get(req["loop"].lower(), req["loop"])
+    op = req.get("op")
+    if not isinstance(op, str) or not op:
+        return None, "missing 'op'"
+    return {k: v for k, v in req.items() if k in ("op", "speed", "loop")}, None
+
+
 # ---- the adapter ---------------------------------------------------------------
 class ZenohControl:
     """Advertise + serve one service instance's lifecycle over zenoh. Best-effort; never raises."""
 
     def __init__(self, lifecycle, key_base: str, connect: Optional[Sequence[str]] = None,
                  enabled: bool = True, dispatch: Optional[Callable] = None,
-                 session_factory: Optional[Callable] = None):
+                 session_factory: Optional[Callable] = None,
+                 playback=None, playback_key: Optional[str] = None):
         self.lifecycle = lifecycle
         self.key_base = key_base
+        # Playback control (docs/PLAYBACK.md): only a source that plays data back hands one in --
+        # a live camera passes None and the playback keys are never declared. A CAPABILITY advert,
+        # so a consumer can't mistake a `source: pcap` label for something it can drive.
+        self.playback = playback
+        self.playback_key = playback_key
+        self._playback_token = None
+        self._playback_publisher = None
+        self._playback_tick = None
         self._connect = [e for e in (connect or []) if e]        # [] -> scout only
         self._enabled = enabled
         self._dispatch = dispatch or _glib_dispatch                # (fn, *args) -> run fn on the main loop
@@ -117,6 +166,8 @@ class ZenohControl:
         self._publisher = None
         self._closed = False
         lifecycle.add_observer(self._on_transition)
+        if playback is not None:
+            playback.add_observer(self._on_playback_change)
 
     @property
     def active(self) -> bool:
@@ -160,6 +211,16 @@ class ZenohControl:
             self._token = self._session.liveliness().declare_token(self.key_base)
             log.info("control plane: %s  (connect=%s)", self.key_base, self._connect or "scout")
             self._publish(self.lifecycle.descriptor())
+            if self.playback is not None and self.playback_key:
+                pk = self.playback_key
+                self._queryables.append(self._session.declare_queryable(pk, self._on_query_playback))
+                self._queryables.append(
+                    self._session.declare_queryable(pk + "/control", self._on_query_playback_control))
+                self._playback_publisher = self._session.declare_publisher(pk + "/state")
+                self._playback_token = self._session.liveliness().declare_token(pk)
+                log.info("control plane: %s (playback: %s)", pk, self.playback.source_kind)
+                self._publish_playback(self._playback_descriptor())   # instance filled, like every reply
+                self._start_playback_tick()
             return True
         except Exception as e:   # noqa: BLE001 -- the control plane must never take capture down
             log.warning("control plane: zenoh advertise failed (%s); capture continues", e)
@@ -190,7 +251,8 @@ class ZenohControl:
         self._safe_close()
 
     def _safe_close(self) -> None:
-        for label, obj in [("token", self._token), ("publisher", self._publisher)] + \
+        for label, obj in [("playback token", self._playback_token), ("token", self._token),
+                           ("playback publisher", self._playback_publisher), ("publisher", self._publisher)] + \
                 [("queryable", q) for q in self._queryables]:
             try:
                 if obj is not None:
@@ -199,6 +261,8 @@ class ZenohControl:
                 log.debug("undeclare %s failed: %s", label, e)
         self._token = None
         self._publisher = None
+        self._playback_token = None
+        self._playback_publisher = None
         self._queryables = []
         try:
             if self._session is not None:
@@ -254,6 +318,79 @@ class ZenohControl:
             log.exception("control plane: change_state failed")
             self._reply(query, {"ok": False, "error": f"internal error: {e}"})
         return False
+
+    # ---- playback (docs/PLAYBACK.md) --------------------------------------------
+    def _playback_descriptor(self) -> dict:
+        d = self.playback.descriptor()
+        d["instance"] = self.key_base.rsplit("/", 2)[-2]   # fleet/<v>/svc/<instance>/lifecycle
+        return d
+
+    def _on_query_playback(self, query) -> None:
+        try:
+            self._reply(query, self._playback_descriptor())
+        except Exception as e:   # noqa: BLE001
+            log.warning("control plane: playback descriptor reply failed: %s", e)
+
+    def _on_query_playback_control(self, query) -> None:
+        try:
+            self._dispatch(self._handle_playback, query)
+        except Exception as e:   # noqa: BLE001
+            log.warning("control plane: could not dispatch playback control: %s", e)
+            self._reply(query, {"ok": False, "error": f"dispatch failed: {e}"})
+
+    def _handle_playback(self, query) -> bool:
+        """Main loop. Parse, apply on the policy (which drives the feeder), reply. One-shot."""
+        try:
+            payload = getattr(query, "payload", None)
+            raw = None
+            if payload is not None:
+                raw = payload.to_bytes() if hasattr(payload, "to_bytes") else bytes(payload)
+            params = getattr(query, "parameters", "")
+            req, err = parse_playback_request(raw, str(params) if params is not None else "")
+            if err:
+                result = {"ok": False, "error": err, "state": self.playback.state,
+                          "descriptor": self._playback_descriptor()}
+            else:
+                result = self.playback.request(req["op"], req)
+                result["descriptor"] = self._playback_descriptor()
+                log.info("control plane: playback %s -> ok=%s state=%s%s", req["op"], result.get("ok"),
+                         result.get("state"), f" error={result['error']}" if result.get("error") else "")
+            self._reply(query, result)
+        except Exception as e:   # noqa: BLE001
+            log.exception("control plane: playback control failed")
+            self._reply(query, {"ok": False, "error": f"internal error: {e}"})
+        return False
+
+    def _on_playback_change(self, _descriptor: dict) -> None:
+        if self._playback_publisher is not None:
+            self._publish_playback(self._playback_descriptor())
+
+    def _publish_playback(self, descriptor: dict) -> None:
+        if self._playback_publisher is None:
+            return
+        try:
+            self._playback_publisher.put(encode_json(descriptor), encoding=self._json_encoding())
+        except Exception as e:   # noqa: BLE001
+            log.warning("control plane: playback state publish failed: %s", e)
+
+    def _start_playback_tick(self) -> None:
+        """~1 Hz position while playing (a viewer's scrubber moves); nothing while paused or
+        finished -- those states are published on the change itself."""
+        if self._playback_tick is not None:
+            return
+        try:
+            from gi.repository import GLib
+        except Exception:   # noqa: BLE001 -- no loop (tests): the change publications still flow
+            return
+        self._playback_tick = GLib.timeout_add(int(1000 / PLAYBACK_POSITION_HZ), self._playback_tick_fn)
+
+    def _playback_tick_fn(self) -> bool:
+        if self._closed or self._playback_publisher is None:
+            self._playback_tick = None
+            return False
+        if self.playback.state == "playing":
+            self._publish_playback(self._playback_descriptor())
+        return True
 
     # ---- state publication ---------------------------------------------------
     def _on_transition(self, descriptor: dict) -> None:

@@ -119,6 +119,13 @@ class Source(ABC):
         return False
 
     @property
+    def playback(self):
+        """The runtime playback control (playback.PlaybackState) for a source that plays data
+        back (docs/PLAYBACK.md), or None for a live camera -- which is exactly what decides
+        whether the playback keys are advertised at all."""
+        return None
+
+    @property
     def delivered_frame_rate(self) -> Optional[float]:
         """The fps this source will actually deliver, when it knows better than the config
         (replay: derived from the sidecar CSV). None = use the configured frame_rate."""

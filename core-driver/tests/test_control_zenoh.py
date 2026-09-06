@@ -12,8 +12,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from cam_driver.playback import PlaybackState
 from cam_driver.control_zenoh import (ZenohControl, encode_json, lifecycle_key,  # noqa: E402
-                                      parse_change_state, zenoh_connect_endpoints)
+                                      parse_change_state, zenoh_connect_endpoints, parse_playback_request, playback_key)
 
 KEY = lifecycle_key("veh", "cam_test")
 
@@ -92,8 +93,12 @@ class _Session:
         return q
 
     def declare_publisher(self, key):
-        self.publisher = _Publisher(key)
-        return self.publisher
+        pub = _Publisher(key)
+        self.publishers = getattr(self, "publishers", {})
+        self.publishers[key] = pub
+        if key.endswith("/lifecycle/state"):
+            self.publisher = pub          # the lifecycle publisher, as the older tests read it
+        return pub
 
     def liveliness(self):
         return _Liveliness(self)
@@ -135,6 +140,29 @@ def _control(connect=("tcp/localhost:7447",), enabled=True):
     ctl = ZenohControl(lc, KEY, connect=connect, enabled=enabled,
                        dispatch=lambda fn, *a: dispatched.append((fn, a)), session_factory=factory)
     return ctl, lc, sessions, dispatched, fail
+
+
+PKEY = playback_key("veh", "cam_test")
+
+
+def _control_with_playback(**kw):
+    """A control plane over a source that plays data back: the REAL policy (pure Python) with a
+    recording restart hook, beside the lifecycle stub."""
+    hooks = []
+    pb = PlaybackState("pcap", speed=1.0, loop=True, duration_s=4.0)
+    pb._on_restart = lambda: (hooks.append("restart"), pb.take_restart())   # replay's shape: the hook takes it
+    lc = _Lifecycle()
+    sessions, dispatched = [], []
+
+    def factory(endpoints):
+        s = _Session(endpoints)
+        sessions.append(s)
+        return s
+
+    ctl = ZenohControl(lc, KEY, connect=("tcp/localhost:7447",), enabled=True,
+                       dispatch=lambda fn, *a: dispatched.append((fn, a)), session_factory=factory,
+                       playback=pb, playback_key=PKEY, **kw)
+    return ctl, pb, hooks, sessions, dispatched
 
 
 def _run_dispatched(dispatched):
@@ -310,6 +338,95 @@ def _main():
         print(f"  ok  {t.__name__}")
     print(f"{len(tests)} passed")
 
+
+# ---- playback control (docs/PLAYBACK.md) ---------------------------------------------------
+
+def test_parse_playback_request_payload_and_parameters():
+    assert parse_playback_request(b'{"op": "pause"}') == ({"op": "pause"}, None)
+    assert parse_playback_request(b'{"op": "set_speed", "speed": 2, "x": 1}') == ({"op": "set_speed", "speed": 2}, None)
+    assert parse_playback_request(None, "op=set_speed;speed=2") == ({"op": "set_speed", "speed": 2.0}, None)
+    assert parse_playback_request(None, "op=set_loop;loop=false") == ({"op": "set_loop", "loop": False}, None)
+    assert parse_playback_request(b"{not json")[1].startswith("request is not JSON")
+    assert parse_playback_request(b"{}")[1] == "missing 'op'"
+    assert parse_playback_request(None, "speed=2")[1] == "missing 'op'"
+
+
+def test_a_live_camera_declares_no_playback_keys():
+    ctl, lc, sessions, dispatched, fail = _control()
+    assert ctl.advertise()
+    s = sessions[0]
+    assert set(s.queryables) == {KEY, KEY + "/change_state"}
+    assert [t.key for t in s.tokens] == [KEY]
+    assert set(getattr(s, "publishers", {})) == {KEY + "/state"}
+
+
+def test_playback_keys_are_declared_after_the_lifecycle_and_the_descriptor_carries_the_instance():
+    ctl, pb, hooks, sessions, dispatched = _control_with_playback()
+    assert ctl.advertise()
+    s = sessions[0]
+    assert set(s.queryables) == {KEY, KEY + "/change_state", PKEY, PKEY + "/control"}
+    assert [t.key for t in s.tokens] == [KEY, PKEY], "lifecycle first; the playback token LAST, after its queryables"
+    pub = s.publishers[PKEY + "/state"]
+    assert len(pub.puts) == 1 and pub.puts[0]["instance"] == "cam_test"       # the initial publication
+    assert pub.puts[0]["source"] == "pcap" and pub.puts[0]["controls"][0] == "pause"
+    q = _Query(PKEY)
+    s.queryables[PKEY][0](q)                                                     # descriptor query
+    assert q.replies[0][1]["instance"] == "cam_test" and q.replies[0][1]["state"] == "playing"
+
+
+def test_playback_control_round_trip_publishes_and_replies_when_applied():
+    ctl, pb, hooks, sessions, dispatched = _control_with_playback()
+    ctl.advertise()
+    s = sessions[0]
+    pub = s.publishers[PKEY + "/state"]
+    q = _Query(PKEY + "/control", b'{"op": "pause"}')
+    s.queryables[PKEY + "/control"][0](q)
+    assert q.replies == [] and len(dispatched) == 1, "answered from the main loop, not the zenoh thread"
+    _run_dispatched(dispatched)
+    key, r = q.replies[0]
+    assert key == PKEY + "/control" and r["ok"] and r["state"] == "paused"
+    assert r["descriptor"]["controls"][0] == "resume" and r["descriptor"]["instance"] == "cam_test"
+    assert pub.puts[-1]["state"] == "paused", "the change was published before the reply"
+    # selector-parameter form, speed reaches the pacer, publication follows
+    q2 = _Query(PKEY + "/control", None, "op=set_speed;speed=4")
+    s.queryables[PKEY + "/control"][0](q2)
+    _run_dispatched(dispatched)
+    assert q2.replies[0][1]["ok"] and pb.pacer.speed == 4.0 and pub.puts[-1]["speed"] == 4.0
+    # restart runs the source's hook
+    q3 = _Query(PKEY + "/control", b'{"op": "restart"}')
+    s.queryables[PKEY + "/control"][0](q3)
+    _run_dispatched(dispatched)
+    assert q3.replies[0][1]["ok"] and hooks == ["restart"]
+
+
+def test_playback_refusals_are_replies_never_errors():
+    ctl, pb, hooks, sessions, dispatched = _control_with_playback()
+    ctl.advertise()
+    s = sessions[0]
+    n = len(s.publishers[PKEY + "/state"].puts)
+    for payload, needle in ((b'{"op": "seek"}', "unknown op"), (b'{"op": "set_speed", "speed": -1}', "speed"),
+                            (b'{"nope": 1}', "missing 'op'"), (b"{bad", "not JSON")):
+        q = _Query(PKEY + "/control", payload)
+        s.queryables[PKEY + "/control"][0](q)
+        _run_dispatched(dispatched)
+        r = q.replies[0][1]
+        assert r["ok"] is False and needle in r["error"], (payload, r)
+    assert len(s.publishers[PKEY + "/state"].puts) == n, "a refusal changes nothing, so publishes nothing"
+    pb.mark_finished()
+    q = _Query(PKEY + "/control", b'{"op": "pause"}')
+    s.queryables[PKEY + "/control"][0](q)
+    _run_dispatched(dispatched)
+    assert q.replies[0][1]["ok"] is False and "finished" in q.replies[0][1]["error"]
+
+
+def test_close_withdraws_the_playback_presence_too():
+    ctl, pb, hooks, sessions, dispatched = _control_with_playback()
+    ctl.advertise()
+    s = sessions[0]
+    ctl.close()
+    assert [t.key for t in s.tokens] == [KEY, PKEY] and all(t.undeclared == 1 for t in s.tokens)
+    assert s.publishers[PKEY + "/state"].undeclared == 1
+    assert s.closed == 1 and ctl._playback_token is None and ctl._playback_publisher is None
 
 if __name__ == "__main__":
     _main()

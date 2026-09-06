@@ -349,6 +349,19 @@ or no router means signals only, never a stopped camera.
 python3 core-driver/tools/lifecycle_probe.py --connect tcp/<vehicle>:7447 --steps wait-put get activate wait-state:active
 ```
 
+### Playback control (pcap / replay sources)
+
+A source that plays a recording back is controllable at runtime over the **same** zenoh session
+([docs/PLAYBACK.md](docs/PLAYBACK.md)): presence + descriptor at `fleet/<VEHICLE_ID>/svc/<name>/playback`
+(state `playing | paused | finished`, `speed`, `loop`, `cycle`, `position_s`), requests via a `get` on
+`…/playback/control` with `{"op": "pause" | "resume" | "set_speed" | "set_loop" | "restart", …}`, and
+every change (plus ~1 Hz position while playing) on `…/playback/state`. **A live camera never
+declares these keys** — the capability is advertised, not inferred from `source:` in the media
+descriptor — so a viewer offers playback controls exactly where there is playback to control.
+Recording is independent: pausing playback while a session is active simply records nothing (no gap
+is written, because nothing was played); `speed` changes how fast frames reach the recorder, not the
+file; `restart` records the data again from its start into the same session.
+
 ## Status & roadmap
 
 - [x] **P0** project scaffold + container

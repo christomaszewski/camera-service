@@ -27,7 +27,8 @@ except (ImportError, ValueError):
 
 from cam_driver.config import (lifecycle_state_file, load_config, resolve_input_path,
                                resolve_recording_dir)
-from cam_driver.control_zenoh import ZenohControl, lifecycle_key, vehicle_id, zenoh_connect_endpoints
+from cam_driver.control_zenoh import (ZenohControl, lifecycle_key, playback_key, vehicle_id,
+                                      zenoh_connect_endpoints)
 from cam_driver.lifecycle import ACTIVE, Lifecycle
 from cam_driver.pipeline import CapturePipeline
 from cam_driver.sources import make_source
@@ -110,9 +111,14 @@ def main(argv=None) -> int:
     # With no control plane, nothing could ever re-activate a recorder that died: keep today's
     # non-zero exit for that shape (disk full must not look clean).
     pipe.session_error_fatal = (boot_state == ACTIVE and not cfg.control.enabled)
+    # A source that plays data back (pcap/replay) hands over its playback policy and the playback
+    # keys are declared beside the lifecycle's (docs/PLAYBACK.md); a live camera hands None and
+    # advertises nothing -- the capability, not the label, is what a dashboard keys off.
     control = ZenohControl(lifecycle, lifecycle_key(vehicle_id(), instance),
                            connect=zenoh_connect_endpoints(cfg.control.zenoh_connect),
-                           enabled=cfg.control.enabled)
+                           enabled=cfg.control.enabled,
+                           playback=pipe.source.playback,
+                           playback_key=playback_key(vehicle_id(), instance))
 
     def _on_playing() -> bool:
         if not lifecycle.boot():

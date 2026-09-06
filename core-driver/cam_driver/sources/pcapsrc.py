@@ -54,6 +54,12 @@ class PcapSource(GstPipelineSource):
         self._extractor = None      # built in open(), re-iterated per loop cycle
         self._stream = None         # the probed StreamInfo (logging + fps hint)
         self._pacer = playback.Pacer(cfg.speed)
+        # Runtime playback control (docs/PLAYBACK.md): the policy the zenoh adapter drives and the
+        # feeder honours -- pause holds at the pacing point, speed rides the pacer, loop is read
+        # per cycle, restart abandons the current cycle. No hook needed: the feed loop IS the
+        # mechanism, so it polls take_restart() itself.
+        self._playback = playback.PlaybackState("pcap", speed=cfg.speed, loop=cfg.loop,
+                                                pacer=self._pacer)
         self._retime_offset = 0
         self._finished = False
         self._failed = False
@@ -162,9 +168,11 @@ class PcapSource(GstPipelineSource):
     def _feed_loop(self) -> None:
         cycle, offset, span = 0, 0, 0
         eos_sent = False
+        pb = self._playback
         try:
             while not self._stop_evt.is_set() and not self._failed:
                 delivered = 0
+                restarted = False
                 for idx, (ts, frame) in enumerate(iter(self._extractor)):
                     if self._stop_evt.is_set() or self._failed:
                         return
@@ -175,31 +183,60 @@ class PcapSource(GstPipelineSource):
                     stamp = FrameStamp(frame_id=idx, timestamp_ns=ts,
                                        source=TimestampSource.SYSTEM,
                                        system_ns=ts, camera_ns=ts, chunk_ns=None)
+                    # Playback control, at the one point the feeder already blocks: a pause holds
+                    # here (consumers keep the last frame; a recording session gets nothing, which
+                    # is the truth), a restart abandons this cycle, a stop wins over both.
+                    verdict = pb.wait_if_paused(cancel=self._stop_evt)
+                    if verdict == playback.STOP:
+                        return
+                    if verdict == playback.RESTART or pb.take_restart():
+                        restarted = True
+                        break
                     self._pacer.wait(ts, cancel=self._stop_evt)
                     if self._stop_evt.is_set():
                         return
+                    # A pause that landed DURING the sleep holds this frame too, so a viewer's
+                    # position is exactly where the reply said it was -- not one frame later.
+                    verdict = pb.wait_if_paused(cancel=self._stop_evt)
+                    if verdict == playback.STOP:
+                        return
+                    if verdict == playback.RESTART:
+                        restarted = True
+                        break
                     if self._mjpeg:
                         self._push_encoded(stamp, frame)
                     elif self._on_frame is not None:
                         self._on_frame(stamp, frame)
+                    pb.note_frame(ts)
                     delivered += 1
                 st = self._extractor.stats
-                if cycle == 0:
+                if cycle == 0 and not restarted:
                     log.info("pcap: %d frame(s) over %.2fs%s", delivered,
                              (st.last_ts_ns - st.first_ts_ns) / 1e9 if st.last_ts_ns else 0.0,
-                             " (looping)" if self.cfg.loop else "")
+                             " (looping)" if pb.loop else "")
                     if st.size_drops or st.err_frames or st.truncated or st.bad_header:
                         log.warning("pcap: dropped during reassembly: size=%d err=%d "
                                     "truncated=%d bad_header=%d", st.size_drops,
                                     st.err_frames, st.truncated, st.bad_header)
-                if not self.cfg.loop:
-                    break
-                if span == 0:
+                if span == 0 and st.last_ts_ns:
                     interval = (st.last_ts_ns - st.first_ts_ns) // max(1, st.frames_ok - 1) \
                         if st.frames_ok > 1 else playback.DEFAULT_INTERVAL_NS
-                    span = (st.last_ts_ns - st.first_ts_ns) + interval if st.last_ts_ns else 0
+                    span = (st.last_ts_ns - st.first_ts_ns) + interval
+                    pb.duration_s = round(span / 1e9, 3)   # one cycle, now that it has been measured
+                if delivered == 0 and not restarted:
+                    # Nothing came out of a full pass: an empty/unusable capture. Finish, loudly --
+                    # looping over nothing would spin the feeder at thousands of cycles a second.
+                    log.error("pcap: a full pass delivered no frames; ending playback")
+                    self._failed = True
+                    break
+                if not restarted and not pb.loop:
+                    break
+                # a loop wrap or a restart: the next cycle's stamps are shifted past this one's
                 cycle += 1
                 offset = cycle * span
+                pb.mark_cycle(cycle)
+                if restarted:
+                    log.info("pcap: restart -> cycle %d", cycle)
             # clean end of feed. mjpeg: push EOS and let `finished` come from the bus EOS
             # handler AFTER the queued tail drains through encsink -- flipping it here
             # would let request_stop() NULL the mini-pipeline mid-drain (truncated recording)
@@ -225,6 +262,8 @@ class PcapSource(GstPipelineSource):
         finally:
             if not eos_sent:
                 self._finished = True
+            if self._finished or self._failed:
+                self._playback.mark_finished("playback failed" if self._failed else None)
 
     def _push_encoded(self, stamp: FrameStamp, frame: bytes) -> None:
         """Feed one JPEG into the mini-pipeline; the base's pre-tee probe assigns it the
@@ -251,6 +290,10 @@ class PcapSource(GstPipelineSource):
         return super()._new_stamp(buf)   # unreachable in practice; safe fallback
 
     # ---- EOF ---------------------------------------------------------------
+    @property
+    def playback(self):
+        return self._playback
+
     @property
     def finite(self) -> bool:
         return True   # even loop mode ends on a parser error
