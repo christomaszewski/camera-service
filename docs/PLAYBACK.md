@@ -65,19 +65,30 @@ UTF-8 JSON, `application/json`. Only `schema_version`, `service`, `instance`, `s
   "duration_s": 4.0,               // one cycle's length; null when not known up front
   "frames": 310,                   // frames delivered in the current cycle
   "since_unix_s": 1756700000.0,    // when the current state was entered
-  "last_error": null
+  "last_error": null,
+  "source_path": "/data/runs/20260907T101500Z_survey/recordings/cam_front/cam-20260907-101612",
+                                   // what is being played RIGHT NOW (a replay: the session prefix)
+  "session": 1,                    // 0-based index of that session in the run, and
+  "sessions": 3,                   //   how many the run holds (a replay plays them in order)
+  "epoch_unix_ns": 1757240100000000000   // the timeline zero position_s counts from (see Timeline)
 }
 ```
 
 - `state` — `playing` (data flowing, paced by `speed`), `paused` (held; consumers keep the last
-  frame; the recorder, if active, simply receives nothing), `finished` (a non-looping source
-  reached its end; camera-service then finalizes any recording and exits — the descriptor is
-  published once before the token is withdrawn).
+  frame — camera-service re-publishes it to the plugin transport at ~1 Hz, so a bridge or viewer
+  attaching late still gets a picture; the recorder, if active, simply receives nothing; a
+  playback that BOOTS paused lets its first frame out, then holds), `finished` (a non-looping source
+  reached its end; any open recording session is finalized). What happens next is the producer's
+  `on_finish` policy: **hold** — the process stays up, the keys stay declared, consumers keep the
+  last frame and `restart` is accepted (the orchestrated shape: a run brought up by rig must not
+  exit-and-restart under compose) — or **exit** (the bare tool: the descriptor is published once
+  before the token is withdrawn).
 - `controls` lists what the producer will honour from the current state: `pause` while playing,
-  `resume` while paused, and `set_speed` / `set_loop` / `restart` in either. Nothing while
-  `finished`. Consumers render exactly these — never an assumed state machine.
+  `resume` while paused, and `set_speed` / `set_loop` / `restart` in either; while `finished`,
+  `restart` alone for a producer that can start over (camera-service `replay`), nothing for one
+  that cannot (`pcap`). Consumers render exactly these — never an assumed state machine.
 - Timing: `position_s` advances by the data's timestamps scaled by `speed`, not by wall time, so
-  it is honest at any speed and stands still while paused.
+  it is honest at any speed and stands still while paused. It counts from `epoch_unix_ns`.
 
 ## `control` request / reply
 
@@ -108,6 +119,24 @@ be honoured — an unknown `op`, a negative speed, an `op` not in `controls` (e.
 `finished`) — is an `ok: false` reply with `error`, never a Zenoh-level error. The reply is sent
 once the request has taken effect on the feeder (sub-second); a query timeout of 5 s is plenty.
 
+## Timeline: several producers, one zero
+
+A replay of a *run* has several producers (cameras, a bag player) that must sit at the same place
+on one timeline. The producer-side knobs (camera-service `playback:` config block; an orchestrator
+sets them per instance — rig renders them into the replay config):
+
+| Knob | Meaning |
+|---|---|
+| `initial_state: playing \| paused` | come up held on the first frame |
+| `start_at_unix_s` | the release gate: resume itself at this wall instant — every producer of the replay gets the same one, so they start together instead of at their own container start |
+| `epoch_unix_ns` | the timeline ZERO (the bag's start): frame k is released `(ts_k − epoch)/speed` after release, wherever the first recorded frame sits — a session recorded ten minutes into the run comes out ten minutes after release, where the bag is. Frames before the epoch are skipped. Unset = the data's own first frame. |
+| `from_s`, `to_s` | a window on that timeline (skip before, `finished` at) |
+| `on_finish: hold \| exit \| auto` | see `state` above; `auto` = hold iff the control plane is enabled |
+
+A camera-service `replay` plays **every session** the run holds for the instance, in timeline
+order, with the recorded gaps between them honoured as silence (`session`/`sessions`/`source_path`
+in the descriptor say where it is). `restart` goes back to the first session inside the window.
+
 ## Interaction with the recorder (camera-service)
 
 Recording and playback are independent controls on one process: pausing playback while a session
@@ -116,7 +145,9 @@ recorded, because nothing was played); changing speed changes how fast frames ar
 recorder (the recorder writes the data's timestamps, so the FILE is unaffected — a `speed: 4`
 replay yields the same recording as `speed: 1`, four times sooner; `speed: 0` is the batch
 reprocess). `restart` mid-session records the data again from its start into the same session
-(the sidecar's monotonic PTS keeps the join exact). `finished` finalizes an open session.
+(the sidecar's monotonic PTS keeps the join exact). `finished` finalizes an open session; a
+re-recorded replay's sidecar header carries `replay_of` (the session prefixes it was played from)
+and `replay_epoch_unix_ns`, so the new run links back to its origin.
 
 ## Zenoh session (producer side)
 

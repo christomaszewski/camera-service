@@ -125,6 +125,19 @@ class Source(ABC):
         whether the playback keys are advertised at all."""
         return None
 
+    def take_discontinuity(self) -> bool:
+        """Feeder path: is the NEXT frame a known discontinuity (a replay crossing into its next
+        recorded session, whose frame ids continue from wherever the recorder's counter was)?
+        Consumed on read; the pipeline resyncs its gap accounting instead of counting lost frames.
+        A live camera never has one."""
+        return False
+
+    def provenance(self) -> dict:
+        """Extra sidecar-header fields attesting where this source's frames CAME from -- a replay
+        names the recorded sessions it re-delivers (`replay_of`) so a re-recorded run links back to
+        its origin. A live camera has nothing to add."""
+        return {}
+
     @property
     def delivered_frame_rate(self) -> Optional[float]:
         """The fps this source will actually deliver, when it knows better than the config

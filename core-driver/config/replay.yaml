@@ -17,9 +17,12 @@ camera:
   type: replay
 
 replay:
-  path: /replay              # a run directory (newest run inside is picked, replay.run pins
-  #                            one) or a run prefix path like /replay/cam-20260827-041627
-  # run: cam-20260827-041627 # pin a specific run when the directory holds several
+  path: /replay              # a run directory (EVERY session inside plays, in timeline order,
+  #                            with the recorded gaps between them) or one session's prefix path
+  #                            like /replay/cam-20260827-041627
+  # run: cam-20260827-041627 # pin a single session when the directory holds several
+  # gap_max_s: 5             # cap the silence between sessions (0 = the recorded gap verbatim;
+  #                            always verbatim under playback.epoch_unix_ns)
   speed: 1.0                 # 1.0 = realtime by the sidecar timestamps; 2.0 = 2x; 0 = as
   #                            fast as the pipeline drains (batch reprocessing -- note the
   #                            recorder may drop frames if it can't keep up at 0)
@@ -27,6 +30,20 @@ replay:
   #                            useful as a long-lived fake camera for plugin development
   retime: original           # original = faithful historical stamps | wall = rebase the
   #                            run onto NOW at start (live consumers see fresh timestamps)
+
+playback:                    # how playback STARTS / where its timeline ZERO is / what the END does
+  on_finish: exit            #   hold (stay up, keys served, `restart` accepted -- what an orchestrated
+  #                            run wants; the default whenever the control plane is enabled) | exit
+  #                            (exit 0 at end-of-data: this bare-tool config) | auto
+#   initial_state: paused    #   playing (default) | paused: hold the first frame until `resume`
+#   start_at_unix_s: 1757240100.0   # ...or until this wall instant (a release gate an orchestrator
+#                            #   hands every producer of a replay, so they start together)
+#   epoch_unix_ns: 1757240100000000000  # the timeline zero shared with sibling producers (the bag's
+#                            #   start): frames are released (ts - epoch)/speed after release,
+#                            #   wherever the first recorded one sits; earlier frames are skipped.
+#                            #   Unset = the run's own first frame.
+#   from_s: 0                #   window on that timeline: skip before from_s, finish at to_s
+#   to_s: 600
 
 recording:
   enabled: false             # flip on to re-record the replay (lossless roundtrip testing);

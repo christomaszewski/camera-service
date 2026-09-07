@@ -10,6 +10,9 @@ replay:
   #                            re-recording encoder never drops (drops would break the
   #                            exact CSV diff the test asserts)
 
+playback:
+  on_finish: exit            # the bare tool: exit 0 at end-of-data (the test waits for that)
+
 recording:
   enabled: true
   encoder: auto              # raw runs re-encode (ffv1 here); stream-copy runs stream-copy

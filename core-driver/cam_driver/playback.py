@@ -46,10 +46,12 @@ class RunInfo:
         return f"{self.base}-*.mkv"
 
 
-def discover_run(path: str, run: str = "") -> RunInfo:
-    """Locate a run from `path`: either a run-prefix path (`<dir>/<prefix>` such that
-    `<prefix>.json` exists) or a directory -- one run inside is used directly, several
-    picks the most recent (prominently logged; `run` pins one). Legible errors otherwise."""
+def discover_sessions(path: str, run: str = "") -> List[RunInfo]:
+    """Every recorded SESSION under `path`, in timeline order: a run directory holds one per
+    lifecycle activate (each its own `<prefix>` triple), and a replay plays them back to back
+    with the recorded gaps between them. Ordered by the header's `first_timestamp_ns` (sidecar
+    mtime for headers that predate it). `run` pins ONE prefix; a prefix path (or its .json)
+    names one directly. Legible errors otherwise."""
     if not path:
         raise ValueError("replay.path is empty -- point it at a run directory or a run prefix")
     path = path.rstrip("/")
@@ -60,22 +62,36 @@ def discover_run(path: str, run: str = "") -> RunInfo:
                 raise ValueError(
                     f"replay.run {run!r} not found in {path} (no {run}.json); runs present: "
                     f"{', '.join(_run_names(path)) or 'none'}")
+            names = [run]
         else:
             names = _run_names(path)
             if not names:
                 raise ValueError(
                     f"replay.path {path} contains no runs (no <prefix>.json sidecar found)")
-            base = os.path.join(path, names[-1])
-            if len(names) > 1:
-                log.warning("replay: %d runs in %s -- picking the most recent %r "
-                            "(set replay.run to pin another: %s)",
-                            len(names), path, names[-1], ", ".join(names))
-    else:
-        base = path[:-5] if path.endswith(".json") else path
-        if not os.path.isfile(base + ".json"):
-            raise ValueError(
-                f"replay.path {path}: not a directory and {base}.json does not exist -- "
-                f"point it at a run directory or a run prefix")
+        infos = [_load_run(os.path.join(path, n)) for n in names]
+        infos.sort(key=lambda r: (int(r.header.get("first_timestamp_ns") or 0),
+                                  os.path.getmtime(r.base + ".json")))
+        return infos
+    base = path[:-5] if path.endswith(".json") else path
+    if not os.path.isfile(base + ".json"):
+        raise ValueError(
+            f"replay.path {path}: not a directory and {base}.json does not exist -- "
+            f"point it at a run directory or a run prefix")
+    return [_load_run(base)]
+
+
+def discover_run(path: str, run: str = "") -> RunInfo:
+    """ONE session from `path` (the pre-session API): a prefix path names it, a directory with
+    several picks the most recent (prominently logged; `run` pins one)."""
+    infos = discover_sessions(path, run)
+    if len(infos) > 1:
+        log.warning("replay: %d runs in %s -- picking the most recent %r "
+                    "(set replay.run to pin another: %s)", len(infos), path,
+                    os.path.basename(infos[-1].base), ", ".join(os.path.basename(i.base) for i in infos))
+    return infos[-1]
+
+
+def _load_run(base: str) -> RunInfo:
     with open(base + ".json") as f:
         header = json.load(f)
     missing = [k for k in ("pixel_format", "width", "height") if not header.get(k)]
@@ -160,11 +176,24 @@ class Pacer:
     after a pause rebases (t0_src, t0_wall) onto (last data ts, now), so the new pace
     applies from here on and a pause is never "caught up" in a burst afterwards."""
 
-    def __init__(self, speed: float = 1.0):
+    def __init__(self, speed: float = 1.0, anchor_src_ns: Optional[int] = None):
         self.speed = float(speed)
+        # The data-timeline ZERO the first wait anchors at "now" (playback.epoch_unix_ns, in the
+        # stamps' own -- shifted -- domain). None = the first waited timestamp: playback starts on
+        # frame 0. Set: frame 0 is released (ts_0 - anchor)/speed after playback starts, so several
+        # producers released together sit at the same place on one shared timeline.
+        self.anchor_src_ns = anchor_src_ns
         self._t0_src: Optional[int] = None
         self._t0_wall = 0
         self._last_src: Optional[int] = None
+
+    def reset(self, anchor_src_ns: Optional[int] = None) -> None:
+        """Forget the baseline: the next wait() anchors afresh at now (a restart from the top --
+        with or without a hold in between -- must not pay for the wall time the old baseline
+        says has elapsed, nor burst through it)."""
+        self.anchor_src_ns = anchor_src_ns
+        self._t0_src = None
+        self._last_src = None
 
     def rebase(self) -> None:
         """Anchor the timeline at (last waited data ts, now). Called on set_speed and on
@@ -184,8 +213,10 @@ class Pacer:
             return
         now = time.monotonic_ns()
         if self._t0_src is None:
-            self._t0_src, self._t0_wall = ts_ns, now
-            return
+            self._t0_src = self.anchor_src_ns if self.anchor_src_ns is not None else ts_ns
+            self._t0_wall = now
+            if self.anchor_src_ns is None:
+                return
         target = self._t0_wall + int((ts_ns - self._t0_src) / self.speed)
         if target > now:
             delay_s = (target - now) / 1e9
@@ -219,7 +250,9 @@ class PlaybackState:
 
     def __init__(self, source_kind: str, *, speed: float = 1.0, loop: bool = False,
                  duration_s: Optional[float] = None, pacer: Optional[Pacer] = None,
-                 on_restart: Optional[Callable[[], None]] = None, clock=time.time):
+                 on_restart: Optional[Callable[[], None]] = None, clock=time.time,
+                 initial_state: str = PLAYING, start_at_unix_s: Optional[float] = None,
+                 restartable_when_finished: bool = False):
         self.source_kind = source_kind
         self.pacer = pacer or Pacer(speed)
         self.loop = bool(loop)
@@ -227,15 +260,67 @@ class PlaybackState:
         self._on_restart = on_restart
         self._clock = clock
         self._cond = threading.Condition()
-        self._state = PLAYING
+        self._state = PAUSED if initial_state == PAUSED else PLAYING
         self._cycle = 0
         self._frames = 0
         self._position_ns = 0
         self._cycle_base_ns: Optional[int] = None
         self._restart_pending = False
+        # A source that can start over after its end (replay rebuilds its reader) advertises
+        # `restart` while finished; one that cannot (pcap's feeder has exited) advertises nothing.
+        self._restartable = bool(restartable_when_finished)
+        # "paused" at boot means HOLD ON THE FIRST FRAME: consumers (the bridges, a viewer) get one
+        # frame to negotiate and show, then nothing until release. The feeder takes the preroll
+        # once, for the very first frame, and holds from the second on.
+        self._preroll_pending = self._state == PAUSED
         self.since_unix_s = clock()
         self.last_error: Optional[str] = None
         self._observers: list = []
+        # Timeline fields the source fills for the descriptor (docs/PLAYBACK.md).
+        self.source_path: Optional[str] = None    # what is being played right now (a session prefix)
+        self.session: Optional[int] = None        # 0-based index of that session in the run
+        self.sessions: Optional[int] = None       # how many the run holds
+        self.epoch_unix_ns: Optional[int] = None  # the timeline zero (position_s counts from it)
+        # The release gate: an orchestrator starts N producers paused and hands them all the same
+        # instant; each resumes itself there, so a replay's cameras and bag player start together.
+        self._gate: Optional[threading.Timer] = None
+        self._gate_armed = False
+        if start_at_unix_s is not None:
+            self.arm_start_gate(float(start_at_unix_s))
+
+    def arm_start_gate(self, at_unix_s: float) -> None:
+        """Resume at the wall instant `at_unix_s` (a no-op if not paused by then, or if an
+        operator touched playback first -- their intent wins over a schedule)."""
+        delay = at_unix_s - self._clock()
+        if self._state != PAUSED:
+            log.warning("playback: start gate %.3f ignored -- playback is not paused", at_unix_s)
+            return
+        if delay <= 0:
+            log.warning("playback: start gate %.3f is %.1fs in the past -- releasing now",
+                        at_unix_s, -delay)
+            with self._cond:
+                self._state = PLAYING
+                self.since_unix_s = self._clock()
+            return
+        self._gate_armed = True
+        self._gate = threading.Timer(delay, self._fire_gate)
+        self._gate.daemon = True
+        self._gate.start()
+        log.info("playback: paused; start gate in %.1fs (%.3f)", delay, at_unix_s)
+
+    def _fire_gate(self) -> None:
+        if not self._gate_armed:
+            return
+        self._gate_armed = False
+        if self._state == PAUSED:
+            log.info("playback: start gate reached -> resume")
+            self.request("resume")
+
+    def cancel_start_gate(self) -> None:
+        self._gate_armed = False
+        if self._gate is not None:
+            self._gate.cancel()
+            self._gate = None
 
     # ---- observation ----------------------------------------------------------
     def add_observer(self, fn: Callable[[dict], None]) -> None:
@@ -259,7 +344,7 @@ class PlaybackState:
 
     def controls(self) -> list:
         if self._state == FINISHED:
-            return []
+            return ["restart"] if self._restartable else []
         first = "pause" if self._state == PLAYING else "resume"
         return [first, "set_speed", "set_loop", "restart"]
 
@@ -280,14 +365,22 @@ class PlaybackState:
                 "frames": self._frames,
                 "since_unix_s": self.since_unix_s,
                 "last_error": self.last_error,
+                "source_path": self.source_path,
+                "session": self.session,
+                "sessions": self.sessions,
+                "epoch_unix_ns": self.epoch_unix_ns,
             }
 
     # ---- the feeder's side (source thread) ---------------------------------------
-    def note_frame(self, data_ts_ns: int) -> None:
-        """One frame delivered at the data's own timestamp (cycle-shifted or not: the first
-        note after a (re)start anchors the cycle, so position is relative to it)."""
+    def note_frame(self, data_ts_ns: int, cycle_base_ns: Optional[int] = None) -> None:
+        """One frame delivered at the data's own timestamp (cycle-shifted or not). Position is
+        relative to the cycle's base: `cycle_base_ns` when the source has a timeline zero (the
+        epoch, shifted like the stamps -- and moved forward by whatever silence it skipped, so
+        position stays EFFECTIVE playback time), else the first frame noted after a (re)start."""
         with self._cond:
-            if self._cycle_base_ns is None:
+            if cycle_base_ns is not None:
+                self._cycle_base_ns = cycle_base_ns
+            elif self._cycle_base_ns is None:
                 self._cycle_base_ns = data_ts_ns
             self._position_ns = max(0, data_ts_ns - self._cycle_base_ns)
             self._frames += 1
@@ -307,6 +400,13 @@ class PlaybackState:
             r, self._restart_pending = self._restart_pending, False
             if r:
                 self._cond.notify_all()
+            return r
+
+    def take_preroll(self) -> bool:
+        """Feeder: deliver this frame WITHOUT the pause hold? True exactly once -- for the first
+        frame of a playback that boots paused -- so a held source still shows its first frame."""
+        with self._cond:
+            r, self._preroll_pending = self._preroll_pending, False
             return r
 
     def wait_if_paused(self, cancel=None) -> str:
@@ -339,12 +439,15 @@ class PlaybackState:
     # ---- the control surface (main loop) --------------------------------------------
     def request(self, op: str, params: Optional[dict] = None) -> dict:
         params = params or {}
+        self._gate_armed = False      # an operator's request outranks a scheduled release
         with self._cond:
             cur = self._state
             if op not in ("pause", "resume", "set_speed", "set_loop", "restart"):
                 return self._result(False, error=f"unknown op {op!r}")
             if cur == FINISHED:
-                return self._result(False, error="playback has finished")
+                if not (op == "restart" and self._restartable):
+                    return self._result(False, error="playback has finished")
+                self._state = PLAYING     # a restart from the end plays from the top
             if op == "pause":
                 if cur == PAUSED:
                     return self._result(True, noop=True)
@@ -353,7 +456,12 @@ class PlaybackState:
                 if cur == PLAYING:
                     return self._result(True, noop=True)
                 self._state = PLAYING
-                self.pacer.rebase()          # the paused wall time must not be caught up in a burst
+                if self._frames <= 1 and self.pacer.anchor_src_ns is not None:
+                    # released from the boot hold (at most the preroll frame out): the timeline
+                    # zero is NOW -- frame 0 sits (ts_0 - epoch)/speed after it, not at it
+                    self.pacer.reset(self.pacer.anchor_src_ns)
+                else:
+                    self.pacer.rebase()      # the paused wall time must not be caught up in a burst
                 self._cond.notify_all()
             elif op == "set_speed":
                 try:

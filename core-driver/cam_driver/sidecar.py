@@ -59,6 +59,11 @@ class SidecarHeader:
     first_frame_id: int = 0
     first_timestamp_ns: int = 0
     pts_offset_ns: int = 0
+    # Provenance for a RE-RECORDED replay (sources/replay.py): the session prefixes the frames were
+    # played back from, in timeline order, and the timeline zero they were released against. Absent
+    # (None) for a live capture.
+    replay_of: Optional[list] = None
+    replay_epoch_unix_ns: Optional[int] = None
 
 
 class SidecarWriter:

@@ -38,9 +38,13 @@ log = logging.getLogger(__name__)
 
 
 class PcapSource(GstPipelineSource):
-    def __init__(self, cfg):   # cfg = config.PcapConfig
+    def __init__(self, cfg, pb_cfg=None):   # cfg = config.PcapConfig, pb_cfg = config.PlaybackConfig
         super().__init__()
         self.cfg = cfg
+        if pb_cfg is not None and (pb_cfg.epoch_unix_ns is not None or pb_cfg.from_s is not None
+                                   or pb_cfg.to_s is not None):
+            # a usbmon capture is a bus trace, not a run: it has no place on a rig's timeline
+            log.warning("pcap source: playback.epoch_unix_ns/from_s/to_s are replay-only knobs; ignored")
         pf = (cfg.pixel_format or "").upper()
         if pf in ("H264", "H265"):
             raise ValueError(
@@ -58,8 +62,10 @@ class PcapSource(GstPipelineSource):
         # feeder honours -- pause holds at the pacing point, speed rides the pacer, loop is read
         # per cycle, restart abandons the current cycle. No hook needed: the feed loop IS the
         # mechanism, so it polls take_restart() itself.
-        self._playback = playback.PlaybackState("pcap", speed=cfg.speed, loop=cfg.loop,
-                                                pacer=self._pacer)
+        self._playback = playback.PlaybackState(
+            "pcap", speed=cfg.speed, loop=cfg.loop, pacer=self._pacer,
+            initial_state=getattr(pb_cfg, "initial_state", playback.PLAYING),
+            start_at_unix_s=getattr(pb_cfg, "start_at_unix_s", None))
         self._retime_offset = 0
         self._finished = False
         self._failed = False
@@ -153,6 +159,7 @@ class PcapSource(GstPipelineSource):
         self._thread.start()
 
     def stop(self) -> None:
+        self._playback.cancel_start_gate()
         self._stop_evt.set()
         # mjpeg: NULL the mini-pipeline FIRST -- it flushes the appsrc, unblocking a feeder
         # stuck in a block=true push-buffer; joining before that would always burn the timeout
@@ -185,24 +192,26 @@ class PcapSource(GstPipelineSource):
                                        system_ns=ts, camera_ns=ts, chunk_ns=None)
                     # Playback control, at the one point the feeder already blocks: a pause holds
                     # here (consumers keep the last frame; a recording session gets nothing, which
-                    # is the truth), a restart abandons this cycle, a stop wins over both.
-                    verdict = pb.wait_if_paused(cancel=self._stop_evt)
-                    if verdict == playback.STOP:
-                        return
-                    if verdict == playback.RESTART or pb.take_restart():
-                        restarted = True
-                        break
-                    self._pacer.wait(ts, cancel=self._stop_evt)
-                    if self._stop_evt.is_set():
-                        return
-                    # A pause that landed DURING the sleep holds this frame too, so a viewer's
-                    # position is exactly where the reply said it was -- not one frame later.
-                    verdict = pb.wait_if_paused(cancel=self._stop_evt)
-                    if verdict == playback.STOP:
-                        return
-                    if verdict == playback.RESTART:
-                        restarted = True
-                        break
+                    # is the truth), a restart abandons this cycle, a stop wins over both. A boot
+                    # hold lets the FIRST frame through (consumers negotiate + show it), then holds.
+                    if not pb.take_preroll():
+                        verdict = pb.wait_if_paused(cancel=self._stop_evt)
+                        if verdict == playback.STOP:
+                            return
+                        if verdict == playback.RESTART or pb.take_restart():
+                            restarted = True
+                            break
+                        self._pacer.wait(ts, cancel=self._stop_evt)
+                        if self._stop_evt.is_set():
+                            return
+                        # A pause that landed DURING the sleep holds this frame too, so a viewer's
+                        # position is exactly where the reply said it was -- not one frame later.
+                        verdict = pb.wait_if_paused(cancel=self._stop_evt)
+                        if verdict == playback.STOP:
+                            return
+                        if verdict == playback.RESTART:
+                            restarted = True
+                            break
                     if self._mjpeg:
                         self._push_encoded(stamp, frame)
                     elif self._on_frame is not None:

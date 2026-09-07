@@ -151,6 +151,14 @@ class CapturePipeline:
         self._tile_mode = "off"            # off | plain | green_diff | rct (recording.bayer_tile)
         self._tiler = None                 # closure: frame_bytes -> tiled bytes (lazy; needs numpy)
         self._stream_copy = False          # encoded source -> recorder muxes the delivered bitstream verbatim
+        # A finite (playback) source at its end: exit 0 (the bare tool) or HOLD -- finalize the open
+        # session, keep serving consumers + the control plane, accept `restart` (docs/PLAYBACK.md).
+        # main sets it from config.hold_on_finish; the hook tells the lifecycle a session closed.
+        self.hold_on_finish = False
+        self.on_playback_finished = None
+        self._held = False
+        self._still = None                 # the last frame handed to the transport (see _publish_transport)
+        self._still_pushed_mono = 0.0
         self._base_lock = threading.Lock()  # base-ts init is shared by the raw + encoded callbacks
         # Recording SESSIONS (session.py / lifecycle.py): the recorder is a per-session pipeline fed by
         # its own appsrc, opened by activate() and finalized by deactivate(). _session is read ONCE per
@@ -510,6 +518,8 @@ class CapturePipeline:
         RecordingSession.push(), under the session lock, so the CSV stays 1:1 with what the muxer
         received. Deliberately NOT the best-effort decode branch of a stream-copy source -- a leaky
         decode drop there is expected (not a lost frame) and must not trip drop warnings."""
+        if self.source.take_discontinuity():
+            self.drops.resync()   # a replay's next session: its ids continue from elsewhere, nothing was lost
         gap = self.drops.observe_frame(stamp.frame_id)
         if gap:
             log.warning("frame-id gap: %d frame(s) lost before fid=%s (source/link drop; %d missing total)",
@@ -555,6 +565,19 @@ class CapturePipeline:
         # capture time in .offset_end (an absolute-ns PTS would stall downstream flow). PTS stays
         # relative. JP6 (no unixfd): the legacy shm+header endpoint.
         if self._should_publish(stamp.timestamp_ns):
+            self._publish_transport(stamp, frame_bytes, pts)
+
+        if not self._stream_copy:
+            self._account(stamp)   # raw / re-encode: THIS path is the recording feed
+
+    def _publish_transport(self, stamp: FrameStamp, frame_bytes: bytes, pts: int) -> None:
+        """One frame to the plugin transport endpoint (unixfd or shm+header). Remembers it as the
+        HELD frame: a paused/finished playback re-publishes it (_still_tick) so a consumer that
+        attaches late -- a bridge restarted behind the core, a viewer opening the page -- still
+        gets a picture and its caps, instead of nothing until release."""
+        self._still = (stamp, frame_bytes, pts)
+        self._still_pushed_mono = time.monotonic()
+        if True:
             try:
                 if self.unixfd_src is not None:
                     # bound check BEFORE the memfd: no point paying the copy for a frame we then drop
@@ -595,8 +618,20 @@ class CapturePipeline:
                     self._pub_err_last = now
                     log.warning("plugin transport publish failed (throttled 5s): %s", e)
 
-        if not self._stream_copy:
-            self._account(stamp)   # raw / re-encode: THIS path is the recording feed
+    def _still_tick(self) -> bool:
+        """~1 Hz on the main loop while a playback source is held (paused / finished): re-publish
+        the held frame to the plugin transport. Never the recorder (it is not a new frame), never
+        while playing (the feeder is publishing)."""
+        if self._stopping:
+            return False
+        pb = getattr(self.source, "playback", None)
+        if pb is None or pb.state == "playing" or self._still is None:
+            return True
+        if time.monotonic() - self._still_pushed_mono < 0.9:
+            return True
+        stamp, frame_bytes, pts = self._still
+        self._publish_transport(stamp, frame_bytes, pts)
+        return True
 
     def _on_encoded(self, stamp: FrameStamp, enc_bytes: bytes, caps_str: str = None) -> None:
         """Encoded-source callback (parallel to on_frame, SAME per-frame stamp): the stream-copy
@@ -635,6 +670,7 @@ class CapturePipeline:
         the PROCESS base (so pts_ns = timestamp_ns - base holds across sessions); the session's own
         first frame is recorded alongside."""
         _x, _y, width, height = self.source.geometry()
+        prov = self.source.provenance() if hasattr(self.source, "provenance") else {}
         return SidecarHeader(
             created_unix_s=time.time(),
             base_timestamp_ns=int(self._base_ts),
@@ -652,6 +688,8 @@ class CapturePipeline:
             first_pts_ns=int(pts),
             first_frame_id=int(stamp.frame_id),
             first_timestamp_ns=int(stamp.timestamp_ns),
+            replay_of=prov.get("replay_of"),
+            replay_epoch_unix_ns=prov.get("replay_epoch_unix_ns"),
         )
 
     # ---- recording sessions (lifecycle activate / deactivate) ---------------
@@ -859,6 +897,8 @@ class CapturePipeline:
         self.source.start(self._on_frame, self._on_encoded)
         if self.source.reconnect_enabled or self.source.finite:
             GLib.timeout_add_seconds(1, self._watchdog)
+        if getattr(self.source, "playback", None) is not None:
+            GLib.timeout_add(1000, self._still_tick)   # a held playback keeps its frame on the wire
         GLib.timeout_add_seconds(_HEALTH_INTERVAL_S, self._log_health)
         log.info("running")
         try:
@@ -877,6 +917,13 @@ class CapturePipeline:
         if self._stopping:
             return False
         s = self.drops.summary()
+        # A playback source that is paused or finished delivers nothing BY DESIGN: idle, not stalled.
+        pb = getattr(self.source, "playback", None)
+        if pb is not None and pb.state != "playing":
+            self._stalled = False
+            self._last_health_frames = self._n_pushed
+            log.info("health: playback %s (frames=%d)", pb.state, self._n_pushed)
+            return True
         # An active reconnect is a KNOWN gap, already logged by the watchdog -- don't double-report.
         if self._n_pushed == self._last_health_frames and not self._reconnecting:
             self._stalled = True
@@ -903,10 +950,24 @@ class CapturePipeline:
             if self.source.finished_error:
                 log.error("playback ended on an error -> finalizing recording, exiting non-zero")
                 self._fatal = True   # a truncated reprocess must not look like a complete one
-            else:
+                self.request_stop()
+                return False
+            if not self.hold_on_finish:
                 log.info("playback finished -> finalizing recording and exiting")
-            self.request_stop()
-            return False
+                self.request_stop()
+                return False
+            if not self._held:
+                self._held = True
+                log.info("playback finished -> finalizing the recording session; holding for a restart")
+                if self._session is not None:
+                    result = self.deactivate(wait_eos=True)
+                    if self.on_playback_finished is not None:
+                        try:
+                            self.on_playback_finished(result)
+                        except Exception as e:   # noqa: BLE001
+                            log.warning("playback-finished hook failed: %s", e)
+            return True
+        self._held = False   # a restart from the end: the next end finalizes again
         if self._reconnecting:
             return True
         if not self.source.reconnect_enabled:

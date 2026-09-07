@@ -68,6 +68,12 @@ class _Source:
     def is_disconnected(self):
         return False
 
+    discontinuity = False
+
+    def take_discontinuity(self):
+        r, self.discontinuity = self.discontinuity, False
+        return r
+
 
 class _Appsrc:
     def __init__(self, events, name):
@@ -426,6 +432,80 @@ def test_session_drain_fits_inside_the_core_stop_budget():
     worst = max(5.0, SESSION_DRAIN_S + 5.0) + _RECONNECT_JOIN_S
     assert worst < CORE_STOP_GRACE_S, (worst, CORE_STOP_GRACE_S)
     assert SESSION_DRAIN_S <= 5.0, "keep the session drain inside the process-level 5 s convention"
+
+
+
+def test_a_finished_playback_holds_when_told_finalizing_the_session_once():
+    # docs/PLAYBACK.md `finished`: under an orchestrator the process stays up (keys served, restart
+    # accepted) -- the open session is finalized exactly once and the lifecycle hears about it; a
+    # restart from the end arms the next finish again. Without hold, or on an error, it stops.
+    with tempfile.TemporaryDirectory() as tmp:
+        p, created, events = _pipe(tmp)
+        p.source.finite = True
+        p.hold_on_finish = True
+        ended = []
+        p.on_playback_finished = ended.append
+        p.activate()
+        p.source.finished = True
+        assert p._watchdog() is True and p._held is True             # keeps watching
+        assert p._session is None and p.get_state()["state"] == INACTIVE
+        assert ended and ended[0]["ok"] and "source-stop" not in events   # the source is NOT stopped
+        assert p._watchdog() is True and len(ended) == 1              # once, not per tick
+        p.source.finished = False                                     # a restart from the end
+        assert p._watchdog() is True and p._held is False
+        p.source.finished = True
+        assert p._watchdog() is True and len(ended) == 1              # nothing open this time: no hook
+        assert not p._stopping
+
+        p.source.finished_error = True                                # an error still ends the process
+        assert p._watchdog() is False and p._stopping and p._fatal
+
+    with tempfile.TemporaryDirectory() as tmp:
+        p, created, events = _pipe(tmp)
+        p.source.finite = True
+        p.source.finished = True
+        assert p._watchdog() is False and p._stopping and not p._fatal   # the bare tool: exit 0
+
+
+def test_a_held_playback_republishes_its_last_frame_to_the_transport_only():
+    with tempfile.TemporaryDirectory() as tmp:
+        p, created, events = _pipe(tmp)
+        p.transport_src = _Appsrc(events, "transport_src")
+        p._width, p._height, p._gst_format = 8, 8, "GRAY8"
+        p.source.playback = SimpleNamespace(state="playing")
+        p._on_frame(_stamp(0, 10 ** 9), bytes(64))
+        assert len(p.transport_src.pushed) == 1
+        assert p._still_tick() is True and len(p.transport_src.pushed) == 1      # playing: the feeder publishes
+        p.source.playback = SimpleNamespace(state="paused")
+        p._still_pushed_mono = 0.0
+        assert p._still_tick() is True and len(p.transport_src.pushed) == 2      # held: the frame again
+        assert p.transport_src.pushed[1] == p.transport_src.pushed[0]            # the SAME frame
+        assert p._still_tick() is True and len(p.transport_src.pushed) == 2      # rate-limited
+        assert p.appsrc.pushed and len(p.appsrc.pushed) == 1                     # never the main/record feed
+        p._stopping = True
+        assert p._still_tick() is False
+
+
+def test_a_known_discontinuity_counts_no_lost_frames():
+    with tempfile.TemporaryDirectory() as tmp:
+        p, created, events = _pipe(tmp)
+        p._on_frame(_stamp(0, 10 ** 9), bytes(64))
+        p._on_frame(_stamp(1, 10 ** 9 + INTERVAL), bytes(64))
+        p.source.discontinuity = True                     # a replay's next session starts at fid 40
+        p._on_frame(_stamp(40, 10 ** 9 + 2 * INTERVAL), bytes(64))
+        assert p.drops.frames_missing == 0 and p.drops.source_gaps == 0
+        p._on_frame(_stamp(43, 10 ** 9 + 3 * INTERVAL), bytes(64))   # a REAL gap still counts
+        assert p.drops.frames_missing == 2 and p.drops.source_gaps == 1
+
+
+def test_health_treats_a_paused_or_finished_playback_as_idle_not_stalled():
+    with tempfile.TemporaryDirectory() as tmp:
+        p, created, events = _pipe(tmp)
+        p.source.playback = SimpleNamespace(state="paused")
+        p._last_health_frames = p._n_pushed
+        assert p._log_health() is True and p._stalled is False
+        p.source.playback = SimpleNamespace(state="playing")
+        assert p._log_health() is True and p._stalled is True         # no frames while playing IS a stall
 
 
 def _main():

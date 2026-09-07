@@ -207,6 +207,140 @@ def test_wait_if_paused_holds_then_wakes_on_resume_restart_or_stop():
     assert out["r"] == STOP
 
 
+
+# ---- sessions: every recording of a run, in timeline order --------------------------------------
+
+def _fake_session(d, prefix, first_ts_ns, n=3, interval_ns=40_000_000):
+    import json
+    base = d / prefix
+    hdr = {"pixel_format": "GRAY8", "width": 8, "height": 8, "first_timestamp_ns": first_ts_ns,
+           "cfa_tile_mode": "off", "bayer_pattern": None}
+    (base.with_suffix(".json")).write_text(json.dumps(hdr))
+    rows = ["frame_id,pts_ns,timestamp_ns,source,chunk_ns,camera_ns,system_ns"]
+    for i in range(n):
+        ts = first_ts_ns + i * interval_ns
+        rows.append(f"{i},{i * interval_ns},{ts},system,,{ts},{ts}")
+    (base.with_suffix(".csv")).write_text("\n".join(rows) + "\n")
+    (d / f"{prefix}-00000.mkv").write_bytes(b"x")
+    return str(base)
+
+
+def test_discover_sessions_orders_by_first_stamp_not_by_name_or_mtime(tmp_path=None):
+    import tempfile
+    from pathlib import Path
+    from cam_driver.playback import discover_run, discover_sessions
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        late = _fake_session(d, "cam-b-20260907-120000", 5_000_000_000_000)   # written FIRST, later data
+        early = _fake_session(d, "cam-a-20260907-110000", 1_000_000_000_000)
+        (d / "manifest.json").write_text("{}")                               # no csv: not a session
+        got = discover_sessions(str(d))
+        assert [r.base for r in got] == [early, late]
+        assert got[0].mkv_paths == [str(d / "cam-a-20260907-110000-00000.mkv")]
+        assert discover_sessions(str(d), run="cam-b-20260907-120000")[0].base == late   # pinned
+        assert discover_sessions(early + ".json")[0].base == early                      # prefix path
+        assert discover_run(str(d)).base == late                                        # the old API: newest
+        try:
+            discover_sessions(str(d), run="nope")
+        except ValueError as e:
+            assert "nope" in str(e) and "cam-a" in str(e)
+        else:
+            raise AssertionError("a missing pinned run must be a legible error")
+
+
+# ---- Pacer: an explicit timeline zero, and a reset for restarts -----------------------------------
+
+def test_pacer_anchor_releases_frame_zero_at_its_place_on_the_timeline():
+    p = Pacer(1.0, anchor_src_ns=0)
+    t = time.monotonic_ns()
+    p.wait(80_000_000)            # first frame sits 80 ms after the zero -> ~80 ms sleep, not 0
+    assert 0.05 < (time.monotonic_ns() - t) / 1e9 < 0.3
+
+
+def test_pacer_reset_forgets_the_old_baseline_so_a_restart_starts_now():
+    p = Pacer(1.0)
+    p.wait(0)
+    p.wait(20_000_000)
+    time.sleep(0.1)               # a hold: wall time passes, no data
+    p.reset()                     # restart from the top: next wait anchors afresh
+    t = time.monotonic_ns()
+    p.wait(0)                     # frame 0 again -> immediate (the old baseline would say -120 ms: a burst)
+    p.wait(50_000_000)            # then 50 ms of data -> ~50 ms
+    assert 0.03 < (time.monotonic_ns() - t) / 1e9 < 0.2
+
+
+# ---- PlaybackState: start paused, the release gate, restart from the end --------------------------
+
+def test_initial_paused_and_the_start_gate_release_it():
+    now = time.time()
+    pb = PlaybackState("replay", initial_state=PAUSED, start_at_unix_s=now + 0.2, clock=time.time)
+    assert pb.state == PAUSED and pb.controls()[0] == "resume"
+    seen = []
+    pb.add_observer(seen.append)
+    time.sleep(0.5)
+    assert pb.state == PLAYING and seen and seen[-1]["state"] == PLAYING
+
+
+def test_a_start_gate_in_the_past_releases_at_once_and_an_operator_outranks_a_pending_one():
+    pb = PlaybackState("replay", initial_state=PAUSED, start_at_unix_s=time.time() - 5)
+    assert pb.state == PLAYING
+    pb2 = PlaybackState("replay", initial_state=PAUSED, start_at_unix_s=time.time() + 0.2)
+    pb2.request("resume")
+    pb2.request("pause")          # the operator's last word: paused
+    time.sleep(0.4)
+    assert pb2.state == PAUSED    # the gate did not override it
+    pb2.cancel_start_gate()
+
+
+def test_a_boot_hold_lets_exactly_the_first_frame_through_then_holds():
+    pb = PlaybackState("replay", initial_state=PAUSED)
+    assert pb.take_preroll() is True and pb.take_preroll() is False    # once
+    assert PlaybackState("replay").take_preroll() is False             # playing at boot: no preroll
+    cancel = threading.Event()
+    out = {}
+    t = threading.Thread(target=lambda: out.setdefault("r", pb.wait_if_paused(cancel)))
+    t.start(); t.join(0.2)
+    assert t.is_alive()                                                # the second frame holds
+    cancel.set(); t.join(1.0)
+
+
+def test_release_from_the_boot_hold_re_anchors_at_the_epoch_not_the_preroll_frame():
+    pb = PlaybackState("replay", initial_state=PAUSED, pacer=Pacer(1.0, anchor_src_ns=0))
+    pb.note_frame(80_000_000, cycle_base_ns=0)          # the preroll frame, 80 ms after the zero
+    pb.request("resume")
+    t = time.monotonic_ns()
+    pb.pacer.wait(80_000_000)                            # frame 0 is due 80 ms after release
+    assert 0.05 < (time.monotonic_ns() - t) / 1e9 < 0.3
+    pb.note_frame(80_000_000, cycle_base_ns=0)
+    pb.request("pause"); time.sleep(0.1); pb.request("resume")   # a LATER resume rebases (no burst)
+    t = time.monotonic_ns()
+    pb.pacer.wait(130_000_000)
+    assert 0.03 < (time.monotonic_ns() - t) / 1e9 < 0.2
+
+
+def test_restart_is_the_one_control_left_when_a_restartable_source_finishes():
+    calls = []
+    pb = PlaybackState("replay", restartable_when_finished=True)
+    pb._on_restart = lambda: (calls.append("rebuild"), pb.take_restart())
+    pb.mark_finished()
+    assert pb.state == FINISHED and pb.controls() == ["restart"]
+    assert not pb.request("pause")["ok"]
+    r = pb.request("restart")
+    assert r["ok"] and r["state"] == PLAYING and calls == ["rebuild"]
+    pcap = PlaybackState("pcap")
+    pcap.mark_finished()
+    assert pcap.controls() == [] and not pcap.request("restart")["ok"]
+
+
+def test_descriptor_carries_the_timeline_fields_the_source_fills():
+    pb = _pb()
+    pb.source_path, pb.session, pb.sessions, pb.epoch_unix_ns = "/runs/x/cam-1", 1, 3, 10 ** 18
+    d = pb.descriptor()
+    assert (d["source_path"], d["session"], d["sessions"], d["epoch_unix_ns"]) == ("/runs/x/cam-1", 1, 3, 10 ** 18)
+    pb.note_frame(10 ** 18 + 2_500_000_000, cycle_base_ns=10 ** 18)   # position counts from the epoch
+    assert pb.descriptor()["position_s"] == 2.5
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

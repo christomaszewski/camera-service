@@ -19,9 +19,9 @@ def make_source(cfg) -> Source:
         return RtspSource(cfg.rtsp)
     if stype == "replay":
         from .replay import ReplaySource
-        return ReplaySource(cfg.replay)
+        return ReplaySource(cfg.replay, cfg.playback)
     if stype == "pcap":
         from .pcapsrc import PcapSource
-        return PcapSource(cfg.pcap)
+        return PcapSource(cfg.pcap, cfg.playback)
     raise ValueError(
         f"unknown source type {cfg.camera.type!r} (known: gige, usb, rtsp, replay, pcap)")

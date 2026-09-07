@@ -86,6 +86,12 @@ class Lifecycle:
         # zenoh /state publisher) sees fresh frames / files / elapsed between transitions.
         if hasattr(pipeline, "on_session_progress"):
             pipeline.on_session_progress = self._notify
+        # A playback source that reached its end while a session was open: the pipeline finalized
+        # the session (docs/PLAYBACK.md: `finished` finalizes) and holds for a restart. Not an
+        # error -- but the honest state is inactive, remembered so a crash restart of a finished
+        # replay does not walk back into recording nothing.
+        if hasattr(pipeline, "on_playback_finished"):
+            pipeline.on_playback_finished = self._on_playback_finished
 
     # ---- state -------------------------------------------------------------
     @property
@@ -184,6 +190,11 @@ class Lifecycle:
         straight back into the same failure without an operator seeing last_error first."""
         self.last_error = result.get("error") or (result.get("session") or {}).get("error") \
             or "recording session ended on an error"
+        self.since_unix_s = time.time()
+        self.remember(INACTIVE)
+        self._notify()
+
+    def _on_playback_finished(self, result: dict) -> None:
         self.since_unix_s = time.time()
         self.remember(INACTIVE)
         self._notify()

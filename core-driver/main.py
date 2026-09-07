@@ -25,7 +25,7 @@ except (ImportError, ValueError):
     class CameraError(Exception):
         pass
 
-from cam_driver.config import (lifecycle_state_file, load_config, resolve_input_path,
+from cam_driver.config import (hold_on_finish, lifecycle_state_file, load_config, resolve_input_path,
                                resolve_recording_dir)
 from cam_driver.control_zenoh import (ZenohControl, lifecycle_key, playback_key, vehicle_id,
                                       zenoh_connect_endpoints)
@@ -111,6 +111,14 @@ def main(argv=None) -> int:
     # With no control plane, nothing could ever re-activate a recorder that died: keep today's
     # non-zero exit for that shape (disk full must not look clean).
     pipe.session_error_fatal = (boot_state == ACTIVE and not cfg.control.enabled)
+    # A playback source at its end: hold (keys served, `restart` accepted -- an orchestrated run)
+    # or exit 0 (the bare tool). docs/PLAYBACK.md `finished`; config.hold_on_finish.
+    pipe.hold_on_finish = hold_on_finish(cfg)
+    if cfg.camera.type in ("pcap", "replay"):
+        pb = cfg.playback
+        log.info("playback: initial_state=%s start_at=%s epoch=%s window=%s..%s on_finish=%s",
+                 pb.initial_state, pb.start_at_unix_s, pb.epoch_unix_ns, pb.from_s, pb.to_s,
+                 "hold" if pipe.hold_on_finish else "exit")
     # A source that plays data back (pcap/replay) hands over its playback policy and the playback
     # keys are declared beside the lifecycle's (docs/PLAYBACK.md); a live camera hands None and
     # advertises nothing -- the capability, not the label, is what a dashboard keys off.

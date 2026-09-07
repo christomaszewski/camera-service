@@ -126,8 +126,14 @@ class ReplayConfig:
     THIS service previously recorded (<prefix>-NNNNN.mkv parts + <prefix>.csv/.json sidecar).
     Frames are re-delivered with their sidecar-recorded per-frame stamps (provenance intact),
     so plugins/recording downstream behave as if the original camera were live."""
-    path: str = ""                # a run directory, or a run prefix path (<dir>/<prefix>-<stamp>)
-    run: str = ""                 # pin one run's prefix when `path` is a dir holding several
+    path: str = ""                # a run directory (EVERY session inside plays, in timeline order),
+    #                               or one session's prefix path (<dir>/<prefix>-<stamp>)
+    run: str = ""                 # pin one session's prefix when `path` is a dir holding several
+    # The silence between two sessions is the recorded gap -- capped here so a directory that
+    # accumulated runs over days does not wait days between them. 0 = verbatim. Forced verbatim
+    # when playback.epoch_unix_ns places the replay on a shared timeline (a collapsed gap would
+    # put every later session in the wrong place against the bag).
+    gap_max_s: float = 5.0
     speed: float = 1.0            # pacing: 1.0 = realtime by sidecar timestamps, 2.0 = 2x,
     #                               0 = as fast as the pipeline drains (tests / batch reprocess)
     loop: bool = False            # restart at EOF, shifting timestamps to stay monotonic
@@ -241,6 +247,33 @@ class PluginConfig:
 
 
 LIFECYCLE_STATES = ("active", "inactive")
+PLAYBACK_STATES = ("playing", "paused")
+PLAYBACK_ON_FINISH = ("auto", "hold", "exit")
+
+
+@dataclass
+class PlaybackConfig:
+    """Runtime playback policy shared by the playback sources (camera.type == replay | pcap): how
+    playback STARTS, where its timeline ZERO is, and what happens at the END (docs/PLAYBACK.md).
+    The per-source blocks (replay:/pcap:) keep what is about the DATA -- path, speed, loop, retime;
+    this block is about the run an orchestrator composes several producers into."""
+    initial_state: str = "playing"    # playing | paused (hold the first frame until `resume` or the gate below)
+    # Release gate: resume itself at this wall instant. rig hands every producer of a replay the same
+    # one, so N cameras and a bag player start together instead of at their own container start.
+    start_at_unix_s: Optional[float] = None
+    # Timeline zero shared with sibling producers (the bag's start): frame k is released
+    # (ts_k - epoch)/speed after playback starts, WHEREVER the first recorded frame sits -- a session
+    # recorded 10 min into the run comes out 10 min after release, where the bag is. None = the
+    # data's own first stamp (playback starts on frame 0, the pre-epoch behaviour). Frames before
+    # the epoch are skipped (they are before the shared zero).
+    epoch_unix_ns: Optional[int] = None
+    from_s: Optional[float] = None    # window: skip frames before epoch + from_s
+    to_s: Optional[float] = None      # window: finish at epoch + to_s (exclusive)
+    # At end-of-data: hold = stay up, keys served, `restart` accepted (an orchestrated run, where a
+    # 0-exit under compose `restart: unless-stopped` would just start over) | exit = finalize + exit 0
+    # (the bare `python3 main.py` tool) | auto = hold iff the control plane is enabled, i.e. iff
+    # something could ever restart it.
+    on_finish: str = "auto"
 
 
 @dataclass
@@ -279,6 +312,7 @@ class AppConfig:
     preview: PreviewConfig = field(default_factory=PreviewConfig)
     transport: TransportConfig = field(default_factory=TransportConfig)
     control: ControlConfig = field(default_factory=ControlConfig)
+    playback: PlaybackConfig = field(default_factory=PlaybackConfig)   # start / timeline / end policy
     plugins: list = field(default_factory=list)   # list[PluginConfig], for the plugin supervisor
 
 
@@ -353,6 +387,9 @@ def parse_config(raw: dict) -> AppConfig:
         if sc.speed < 0:
             raise ValueError(f"{block}.speed: must be >= 0 (0 = as fast as the pipeline drains), "
                              f"got {sc.speed!r}")
+    if replay.gap_max_s < 0:
+        raise ValueError(f"replay.gap_max_s: must be >= 0 (0 = play recorded gaps verbatim), "
+                         f"got {replay.gap_max_s!r}")
     if camera.type == "pcap" and not pcap.path:
         raise ValueError("pcap.path: required for camera.type: pcap (the .pcap/.pcapng file to replay)")
 
@@ -399,6 +436,19 @@ def parse_config(raw: dict) -> AppConfig:
         raise ValueError(f"ControlConfig.initial_state: expected one of {LIFECYCLE_STATES}, "
                          f"got {control.initial_state!r}")
 
+    pb = _build(PlaybackConfig, raw.get("playback"))
+    pb.initial_state = str(pb.initial_state or "playing").strip().lower()
+    if pb.initial_state not in PLAYBACK_STATES:
+        raise ValueError(f"playback.initial_state: expected one of {PLAYBACK_STATES}, "
+                         f"got {pb.initial_state!r}")
+    pb.on_finish = str(pb.on_finish or "auto").strip().lower()
+    if pb.on_finish not in PLAYBACK_ON_FINISH:
+        raise ValueError(f"playback.on_finish: expected one of {PLAYBACK_ON_FINISH}, got {pb.on_finish!r}")
+    if pb.from_s is not None and pb.from_s < 0:
+        raise ValueError(f"playback.from_s: must be >= 0 (seconds from the epoch), got {pb.from_s!r}")
+    if pb.to_s is not None and pb.to_s <= (pb.from_s or 0):
+        raise ValueError(f"playback.to_s: must be > from_s ({pb.from_s or 0}), got {pb.to_s!r}")
+
     return AppConfig(
         camera=camera,
         gige=gige,
@@ -410,8 +460,19 @@ def parse_config(raw: dict) -> AppConfig:
         preview=_build(PreviewConfig, raw.get("preview")),
         transport=transport_cfg,
         control=control,
+        playback=pb,
         plugins=plugins,
     )
+
+
+def hold_on_finish(cfg: AppConfig) -> bool:
+    """Whether a finished playback keeps the process up (docs/PLAYBACK.md `finished`): explicit
+    hold/exit, else hold exactly when the control plane could restart it."""
+    if cfg.playback.on_finish == "hold":
+        return True
+    if cfg.playback.on_finish == "exit":
+        return False
+    return bool(cfg.control.enabled)
 
 
 def lifecycle_state_file(cfg: AppConfig) -> str:

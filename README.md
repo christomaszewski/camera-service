@@ -206,17 +206,23 @@ A `replay.path` already inside the data root (`/data/recordings`, or `$RIG_DATA_
 extra mount -- the base compose already binds that root read-write, so cam-up leaves it alone
 rather than shadowing it with a read-only bind.
 
-Both pace to the data's own timestamps (`speed`, `loop`, `retime: wall` knobs), exit
-cleanly at end-of-data (the recording finalizes; `loop: true` makes a long-lived fake
-camera for plugin development), and fail legibly — the pcap parser can even tell you the
-camera's real format/geometry when the config mismatches, if the capture includes the
-device enumeration. A playback source feeds the recording through *blocking* appsrcs, so
-`speed: 0` (as fast as the pipeline drains) is lossless: the reader waits for the encoder
-instead of dropping. Two caveats: a run containing a recorded gap longer than 60 s replays
-with that gap collapsed in the re-recorded `pts_ns` (the PTS guard treats a larger forward
-step as a clock-source change; the sidecar keeps the true stamps), and under `cam-up`/compose
-a finished playback exits 0 but `restart: unless-stopped` starts it again — playback is a
-dev-container / `python3 main.py` tool for now.
+Both pace to the data's own timestamps (`speed`, `loop`, `retime: wall` knobs) and fail
+legibly — the pcap parser can even tell you the camera's real format/geometry when the config
+mismatches, if the capture includes the device enumeration. A `replay` plays **every session**
+a run directory holds for the instance (one per lifecycle activate), in timeline order with
+the recorded gaps between them; `replay.run` pins one. At end-of-data the recording
+finalizes and the process either **holds** (keys served, `restart` accepted — the default
+whenever the control plane is on, so a run rig brought up does not exit-and-restart under
+compose) or exits 0 (`playback.on_finish: exit`, the bare-tool shape; `loop: true` makes a
+long-lived fake camera for plugin development either way). The `playback:` block also
+places a replay on a *shared* timeline — `initial_state: paused` + `start_at_unix_s` (a
+release gate every producer of a replay gets), `epoch_unix_ns` (the zero the bag player
+counts from), `from_s`/`to_s` (a window) — see [docs/PLAYBACK.md](docs/PLAYBACK.md)
+"Timeline". A playback source feeds the recording through *blocking* appsrcs, so `speed: 0`
+(as fast as the pipeline drains) is lossless: the reader waits for the encoder instead of
+dropping. One caveat: a run containing a recorded gap longer than 60 s replays with that gap
+collapsed in the re-recorded `pts_ns` (the PTS guard treats a larger forward step as a
+clock-source change; the sidecar keeps the true stamps).
 
 ### Dev container (run the producer without a Jetson)
 
@@ -355,7 +361,9 @@ A source that plays a recording back is controllable at runtime over the **same*
 ([docs/PLAYBACK.md](docs/PLAYBACK.md)): presence + descriptor at `fleet/<VEHICLE_ID>/svc/<name>/playback`
 (state `playing | paused | finished`, `speed`, `loop`, `cycle`, `position_s`), requests via a `get` on
 `…/playback/control` with `{"op": "pause" | "resume" | "set_speed" | "set_loop" | "restart", …}`, and
-every change (plus ~1 Hz position while playing) on `…/playback/state`. **A live camera never
+every change (plus ~1 Hz position while playing) on `…/playback/state`. A finished replay holds and
+accepts `restart`; the descriptor also says which session of the run is playing (`source_path`,
+`session`/`sessions`) and the timeline zero (`epoch_unix_ns`). **A live camera never
 declares these keys** — the capability is advertised, not inferred from `source:` in the media
 descriptor — so a viewer offers playback controls exactly where there is playback to control.
 Recording is independent: pausing playback while a session is active simply records nothing (no gap

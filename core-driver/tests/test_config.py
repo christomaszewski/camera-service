@@ -7,8 +7,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from cam_driver.config import (lifecycle_state_file, parse_config, resolve_input_path,  # noqa: E402
-                               resolve_recording_dir,
+from cam_driver.config import (hold_on_finish, lifecycle_state_file, parse_config,  # noqa: E402
+                               resolve_input_path, resolve_recording_dir,
                                unique_run_prefix)
 from cam_driver.sources import make_source  # noqa: E402
 
@@ -400,6 +400,39 @@ def _main():
         t()
         print(f"  ok  {t.__name__}")
     print(f"{len(tests)} passed")
+
+
+
+def test_playback_block_defaults_and_parse():
+    c = parse_config({})
+    assert c.playback.initial_state == "playing" and c.playback.on_finish == "auto"
+    assert c.playback.start_at_unix_s is None and c.playback.epoch_unix_ns is None
+    c = parse_config({"playback": {"initial_state": "Paused", "start_at_unix_s": "1757200000.5",
+                                   "epoch_unix_ns": "1757199000000000000", "from_s": 2, "to_s": 30,
+                                   "on_finish": "hold"}})
+    assert c.playback.initial_state == "paused" and c.playback.start_at_unix_s == 1757200000.5
+    assert c.playback.epoch_unix_ns == 1757199000000000000 and (c.playback.from_s, c.playback.to_s) == (2.0, 30.0)
+    assert c.playback.on_finish == "hold"
+
+
+def test_playback_block_is_validated():
+    for bad, needle in (({"initial_state": "stopped"}, "initial_state"),
+                        ({"on_finish": "loop"}, "on_finish"),
+                        ({"from_s": -1}, "from_s"),
+                        ({"from_s": 5, "to_s": 5}, "to_s")):
+        try:
+            parse_config({"playback": bad})
+        except ValueError as e:
+            assert needle in str(e)
+        else:
+            raise AssertionError(f"{bad} must be refused")
+
+
+def test_hold_on_finish_follows_the_control_plane_unless_told():
+    assert hold_on_finish(parse_config({})) is True                                   # control on by default
+    assert hold_on_finish(parse_config({"control": {"enabled": False}})) is False     # nothing could restart it
+    assert hold_on_finish(parse_config({"control": {"enabled": False}, "playback": {"on_finish": "hold"}})) is True
+    assert hold_on_finish(parse_config({"playback": {"on_finish": "exit"}})) is False
 
 
 if __name__ == "__main__":

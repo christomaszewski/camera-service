@@ -37,6 +37,11 @@ class DropStats:
         self._last_fid = frame_id
         return gap
 
+    def resync(self) -> None:
+        """The next frame id is a KNOWN discontinuity (a replay crossing into its next recorded
+        session): expect nothing, count no gap."""
+        self._last_fid = None
+
     def note_enqueue_failure(self) -> None:
         self.enqueue_failures += 1
 

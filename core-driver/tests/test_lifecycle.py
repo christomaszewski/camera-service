@@ -24,6 +24,7 @@ class _StubPipe:
         self.calls = []
         self.on_session_ended = None
         self.on_session_progress = None
+        self.on_playback_finished = None
         self._activate_fails = activate_fails
         self._activate_raises = activate_raises
         self._close_error = close_error
@@ -232,6 +233,23 @@ def test_descriptor_required_fields():
     assert d["service"] == "camera-service" and d["instance"] == "cam_test" and d["schema_version"] == 1
     assert d["boot_reason"] == "config" and d["health"]["frames"] == 7 and d["recording_enabled"] is True
     assert transitions_from(ACTIVE) == ["deactivate"] and transitions_from(INACTIVE) == ["activate"]
+
+
+
+def test_playback_finished_remembers_inactive_without_an_error():
+    # A replay reached its end with a session open: the pipeline finalized it (not an error) and
+    # holds; the lifecycle follows -- inactive remembered, observers told, last_error untouched.
+    with tempfile.TemporaryDirectory() as tmp:
+        pipe, lc = _lc(tmp=tmp)
+        seen = []
+        lc.add_observer(seen.append)
+        lc.request("activate")
+        assert pipe.on_playback_finished is not None
+        pipe.state, pipe.session = INACTIVE, None
+        pipe.on_playback_finished({"ok": True, "state": INACTIVE, "session": {"frames": 12}})
+        assert lc.last_error is None
+        assert open(os.path.join(tmp, "lifecycle.state")).read().strip() == INACTIVE
+        assert seen[-1]["state"] == INACTIVE and seen[-1]["last_error"] is None
 
 
 def _main():
