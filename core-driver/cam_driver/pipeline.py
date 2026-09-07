@@ -619,13 +619,15 @@ class CapturePipeline:
                     log.warning("plugin transport publish failed (throttled 5s): %s", e)
 
     def _still_tick(self) -> bool:
-        """~1 Hz on the main loop while a playback source is held (paused / finished): re-publish
-        the held frame to the plugin transport. Never the recorder (it is not a new frame), never
-        while playing (the feeder is publishing)."""
+        """~1 Hz on the main loop for a playback source: whenever nothing reached the plugin
+        transport for ~1 s -- held (paused / finished) OR playing through silence (a lead-in
+        before the first recorded frame, a gap between sessions) -- re-publish the last frame.
+        A bridge that attaches during the silence still negotiates and advertises. Never the
+        recorder (it is not a new frame); a feeder publishing at any real rate keeps this idle."""
         if self._stopping:
             return False
         pb = getattr(self.source, "playback", None)
-        if pb is None or pb.state == "playing" or self._still is None:
+        if pb is None or self._still is None:
             return True
         if time.monotonic() - self._still_pushed_mono < 0.9:
             return True

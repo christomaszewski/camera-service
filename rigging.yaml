@@ -80,6 +80,32 @@ launch_surface:                          # the files rig copies to the vehicle (
 external_volumes:                        # rig removes these only on FINAL teardown (`rig down --purge`),
   - "cam_{name}_sock"                   #   never on a restart; {name} is the instance name
 
+replay:                                  # `rig replay <run>`: this service can replay ITS OWN recordings
+  #                                        (docs/PLAYBACK.md "Timeline"; rig-sensor-replay-plan). rig finds
+  #                                        an instance's recordings under `data` in the source run and renders
+  #                                        the instance's config with `overrides` on top for the session --
+  #                                        never interpreting the keys. {{replay_*}} are rig's timeline
+  #                                        variables (one zero, one release instant, the window, the clock
+  #                                        decision); a variable rig has no value for renders as null, which
+  #                                        DELETES the key so this service's own default applies.
+  source:
+    data: recordings/{name}                # where <instance> records: <run>/recordings/<instance>/<prefix>-*
+    overrides:
+      camera: { type: replay }
+      replay:
+        path: "{{replay_source}}/recordings/{{name}}"   # every session in the run, in timeline order
+        run: "{{replay_session}}"          # rig --session PREFIX pins one (null = all)
+        retime: "{{replay_retime}}"        # original under sim time (the bag's /clock), wall otherwise
+        loop: false
+      playback:
+        initial_state: paused              # hold on the first frame until the release gate...
+        start_at_unix_s: "{{replay_start_at_unix_s}}"   # ...one instant for every producer of the replay
+        epoch_unix_ns: "{{replay_epoch_unix_ns}}"       # the bag's zero: frames sit where the bag is
+        from_s: "{{replay_from_s}}"        # rig --from/--to
+        to_s: "{{replay_to_s}}"
+        on_finish: hold                    # stay up at the end (keys served, `restart` accepted)
+      control: { initial_state: inactive } # never re-record unless asked (rig replay --active later)
+
 host_ports:                              # host-facing ports `rig doctor` checks for clashes across sensors
   #   (host networking -> a port is shared vehicle-wide). The enabled=true selector is enabled-aware, so a
   #   DISABLED webrtc-bridge is not flagged.

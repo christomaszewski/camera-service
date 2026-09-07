@@ -195,6 +195,13 @@ class Pacer:
         self._t0_src = None
         self._last_src = None
 
+    def anchor_now(self) -> None:
+        """Start the timeline NOW at the configured zero (a release from the boot hold): the
+        first wait then paces against this instant instead of anchoring itself, so a silent
+        lead-in is measured from the release, not from the first frame's arrival."""
+        if self.anchor_src_ns is not None:
+            self._t0_src, self._t0_wall = self.anchor_src_ns, time.monotonic_ns()
+
     def rebase(self) -> None:
         """Anchor the timeline at (last waited data ts, now). Called on set_speed and on
         resume; harmless before the first wait."""
@@ -299,14 +306,22 @@ class PlaybackState:
             log.warning("playback: start gate %.3f is %.1fs in the past -- releasing now",
                         at_unix_s, -delay)
             with self._cond:
-                self._state = PLAYING
-                self.since_unix_s = self._clock()
+                self._release()
             return
         self._gate_armed = True
         self._gate = threading.Timer(delay, self._fire_gate)
         self._gate.daemon = True
         self._gate.start()
         log.info("playback: paused; start gate in %.1fs (%.3f)", delay, at_unix_s)
+
+    def _release(self) -> None:
+        """Leave the boot hold (under the lock): playing, and the timeline starts NOW at the
+        configured zero -- frame 0 sits (ts_0 - epoch)/speed after this instant, not at it, and
+        position moves from 0 through any silent lead-in."""
+        self._state = PLAYING
+        self.since_unix_s = self._clock()
+        self.pacer.reset(self.pacer.anchor_src_ns)
+        self.pacer.anchor_now()
 
     def _fire_gate(self) -> None:
         if not self._gate_armed:
@@ -348,6 +363,24 @@ class PlaybackState:
         first = "pause" if self._state == PLAYING else "resume"
         return [first, "set_speed", "set_loop", "restart"]
 
+    def _timeline_position_ns(self) -> int:
+        """Position on the timeline: the last delivered frame's -- or, while PLAYING through
+        silence (the lead-in before a session that started minutes into the run, a gap between
+        sessions), where the timeline itself has got to: the pacer's anchor advanced by the wall
+        time since it, at `speed`. A viewer's scrubber moves through silence instead of sitting at
+        the last frame; never past the duration."""
+        pos = self._position_ns
+        p = self.pacer
+        if self._state == PLAYING and p._t0_src is not None and p.speed > 0:
+            # before the first delivered frame the cycle's base IS the anchor (the zero)
+            base = self._cycle_base_ns if self._cycle_base_ns is not None else p._t0_src
+            wall = (time.monotonic_ns() - p._t0_wall) * p.speed
+            timeline = int(wall) + (p._t0_src - base)
+            pos = max(pos, timeline)
+            if self.duration_s is not None:
+                pos = min(pos, int(self.duration_s * 1e9))
+        return max(0, pos)
+
     def descriptor(self) -> dict:
         with self._cond:
             return {
@@ -360,7 +393,7 @@ class PlaybackState:
                 "speed": self.pacer.speed,
                 "loop": self.loop,
                 "cycle": self._cycle,
-                "position_s": round(self._position_ns / 1e9, 3),
+                "position_s": round(self._timeline_position_ns() / 1e9, 3),
                 "duration_s": self.duration_s,
                 "frames": self._frames,
                 "since_unix_s": self.since_unix_s,
@@ -455,12 +488,10 @@ class PlaybackState:
             elif op == "resume":
                 if cur == PLAYING:
                     return self._result(True, noop=True)
-                self._state = PLAYING
-                if self._frames <= 1 and self.pacer.anchor_src_ns is not None:
-                    # released from the boot hold (at most the preroll frame out): the timeline
-                    # zero is NOW -- frame 0 sits (ts_0 - epoch)/speed after it, not at it
-                    self.pacer.reset(self.pacer.anchor_src_ns)
+                if self._frames == 0 and self.pacer.anchor_src_ns is not None:
+                    self._release()          # from the boot hold: the timeline starts NOW at its zero
                 else:
+                    self._state = PLAYING
                     self.pacer.rebase()      # the paused wall time must not be caught up in a burst
                 self._cond.notify_all()
             elif op == "set_speed":

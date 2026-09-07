@@ -475,12 +475,14 @@ def test_a_held_playback_republishes_its_last_frame_to_the_transport_only():
         p.source.playback = SimpleNamespace(state="playing")
         p._on_frame(_stamp(0, 10 ** 9), bytes(64))
         assert len(p.transport_src.pushed) == 1
-        assert p._still_tick() is True and len(p.transport_src.pushed) == 1      # playing: the feeder publishes
+        assert p._still_tick() is True and len(p.transport_src.pushed) == 1      # just published: idle
+        p._still_pushed_mono = 0.0                                               # playing through SILENCE
+        assert p._still_tick() is True and len(p.transport_src.pushed) == 2      # the frame again
         p.source.playback = SimpleNamespace(state="paused")
         p._still_pushed_mono = 0.0
-        assert p._still_tick() is True and len(p.transport_src.pushed) == 2      # held: the frame again
-        assert p.transport_src.pushed[1] == p.transport_src.pushed[0]            # the SAME frame
-        assert p._still_tick() is True and len(p.transport_src.pushed) == 2      # rate-limited
+        assert p._still_tick() is True and len(p.transport_src.pushed) == 3      # held: the frame again
+        assert p.transport_src.pushed[2] == p.transport_src.pushed[0]            # the SAME frame
+        assert p._still_tick() is True and len(p.transport_src.pushed) == 3      # rate-limited
         assert p.appsrc.pushed and len(p.appsrc.pushed) == 1                     # never the main/record feed
         p._stopping = True
         assert p._still_tick() is False

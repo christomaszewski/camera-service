@@ -427,9 +427,7 @@ class ReplaySource(GstPipelineSource):
         # too -- the decode pipeline simply waits on its own thread, exactly like a long gap.
         # A boot hold lets the FIRST frame through (consumers negotiate + show it), then holds.
         if self._playback.take_preroll():
-            self._playback.note_frame(st.timestamp_ns,
-                                      cycle_base_ns=self._epoch_ns + self._offset + self._skipped_ns)
-            return st
+            return st                      # a preview of the held frame, not playback progress
         if self._playback.wait_if_paused(cancel=self._stop_evt) == playback.STOP:
             return st
         self._pacer.wait(st.timestamp_ns, cancel=self._stop_evt)

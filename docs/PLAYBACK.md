@@ -75,7 +75,8 @@ UTF-8 JSON, `application/json`. Only `schema_version`, `service`, `instance`, `s
 ```
 
 - `state` — `playing` (data flowing, paced by `speed`), `paused` (held; consumers keep the last
-  frame — camera-service re-publishes it to the plugin transport at ~1 Hz, so a bridge or viewer
+  frame — camera-service re-publishes the last frame to the plugin transport at ~1 Hz whenever
+  nothing else reached it for a second, held or playing through silence, so a bridge or viewer
   attaching late still gets a picture; the recorder, if active, simply receives nothing; a
   playback that BOOTS paused lets its first frame out, then holds), `finished` (a non-looping source
   reached its end; any open recording session is finalized). What happens next is the producer's

@@ -306,7 +306,6 @@ def test_a_boot_hold_lets_exactly_the_first_frame_through_then_holds():
 
 def test_release_from_the_boot_hold_re_anchors_at_the_epoch_not_the_preroll_frame():
     pb = PlaybackState("replay", initial_state=PAUSED, pacer=Pacer(1.0, anchor_src_ns=0))
-    pb.note_frame(80_000_000, cycle_base_ns=0)          # the preroll frame, 80 ms after the zero
     pb.request("resume")
     t = time.monotonic_ns()
     pb.pacer.wait(80_000_000)                            # frame 0 is due 80 ms after release
@@ -316,6 +315,23 @@ def test_release_from_the_boot_hold_re_anchors_at_the_epoch_not_the_preroll_fram
     t = time.monotonic_ns()
     pb.pacer.wait(130_000_000)
     assert 0.03 < (time.monotonic_ns() - t) / 1e9 < 0.2
+
+
+def test_position_moves_through_silence_after_release_but_never_past_the_duration():
+    pb = PlaybackState("replay", initial_state=PAUSED, pacer=Pacer(1.0, anchor_src_ns=0), duration_s=1.0)
+    assert pb.descriptor()["position_s"] == 0       # held on the (un-noted) preroll frame
+    pb.request("resume")                            # released: the timeline starts NOW at the zero
+    time.sleep(0.12)
+    d = pb.descriptor()
+    assert 0.08 <= d["position_s"] <= 0.4           # moving through the silent lead-in from 0
+    time.sleep(1.0)
+    assert pb.descriptor()["position_s"] == 1.0     # clamped at the duration
+    pb.request("pause")
+    assert pb.descriptor()["position_s"] == 0       # held: nothing delivered yet
+    late = PlaybackState("replay", initial_state=PAUSED, pacer=Pacer(1.0, anchor_src_ns=0),
+                         start_at_unix_s=time.time() - 5, duration_s=9.0)
+    time.sleep(0.12)
+    assert late.state == PLAYING and 0.08 <= late.descriptor()["position_s"] <= 0.4   # past gate: same release
 
 
 def test_restart_is_the_one_control_left_when_a_restartable_source_finishes():
