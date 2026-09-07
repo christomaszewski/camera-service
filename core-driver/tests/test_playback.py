@@ -357,6 +357,30 @@ def test_descriptor_carries_the_timeline_fields_the_source_fills():
     assert pb.descriptor()["position_s"] == 2.5
 
 
+def test_discover_sessions_orders_older_headers_by_file_time():
+    # Runs recorded before the lifecycle arc have headers without `first_timestamp_ns`: they
+    # still replay, ordered by the sidecar's mtime (written at the session's end -- sessions
+    # never overlap, so end order IS start order). A header WITH the stamp sorts ahead of any
+    # without, by the stamp.
+    import json
+    import os
+    import tempfile
+    from pathlib import Path
+    from cam_driver.playback import discover_sessions
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        older = {}
+        for name, mtime in (("cam-old-b", 2_000), ("cam-old-a", 1_000)):     # names in reverse time order
+            base = _fake_session(d, name, 0, n=2)
+            hdr = json.loads(Path(base + ".json").read_text()); hdr.pop("first_timestamp_ns")
+            Path(base + ".json").write_text(json.dumps(hdr))
+            os.utime(base + ".json", (mtime, mtime))
+            older[name] = base
+        stamped = _fake_session(d, "cam-new", 5_000_000_000_000)
+        got = [r.base for r in discover_sessions(str(d))]
+        assert got == [older["cam-old-a"], older["cam-old-b"], stamped]
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
