@@ -408,6 +408,7 @@ chunk-parse path** via a patched chunk-emitting GV camera:
 - [core-driver/tools/usb_test.sh](core-driver/tools/usb_test.sh) — USB source: raw, **MJPEG stream-copy** (dual-output), color/FFV1, and a mid-stream **H.264 session gated to its first keyframe**
 - [core-driver/tools/rtsp_test.sh](core-driver/tools/rtsp_test.sh) — RTSP source: local fake server → stream-copy record + **RTCP→NTP provenance** (CSV-checked)
 - [core-driver/tools/rtsp_reconnect_test.sh](core-driver/tools/rtsp_reconnect_test.sh) — RTSP stall/recovery: kill + restart the server, assert detect → reopen → frames resume
+- [core-driver/tests/test_replay_source.py](core-driver/tests/test_replay_source.py) — **the replay source over a fabricated run** (dev container: real FFV1 parts + sidecars, the real reader, a fake consumer): sessions in timeline order with the gap capped / verbatim under an epoch, the window, the paused boot's one preview frame, restart from the end, shape refusal, provenance
 - [core-driver/tools/replay_test.sh](core-driver/tools/replay_test.sh) — **replay source roundtrips**: record (GRAY8/GRAY16 FFV1, MJPEG stream-copy) → replay → re-record; sidecar CSV **identical**, frames/bitstream **bit-identical**
 - [core-driver/tools/pcap_test.sh](core-driver/tools/pcap_test.sh) — **pcap source**: synthetic usbmon capture (known Y16 ramps + noise/ERR/truncated URBs) → full service → recording **bit-exact** with the capture's timestamps
 - [plugins/ros2-bridge/tools/bridge_test.sh](plugins/ros2-bridge/tools/bridge_test.sh) — full chain → ROS2 raw + compressed `Image`

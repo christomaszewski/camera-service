@@ -68,6 +68,55 @@ EOF
 '
 
 echo
+echo "########## TWO SESSIONS: activate/deactivate twice -> ONE replay plays both in order -> re-record ##########"
+docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
+  set -e
+  mkdir -p /data/recordings /tmp/cam
+  echo "=== 1. record TWO lifecycle sessions (boot active -> USR2 -> USR1 -> USR2) ==="
+  python3 main.py -c config/usb-fake.yaml >/tmp/rec2.log 2>&1 &
+  CORE=$!; sleep 3; kill -USR2 "$CORE"; sleep 2; kill -USR1 "$CORE"; sleep 3; kill -USR2 "$CORE"
+  sleep 1; kill -INT "$CORE"; wait "$CORE"
+  mapfile -t CSVS < <(ls /data/recordings/usbfake-*.csv | sort)
+  [ "${#CSVS[@]}" -eq 2 ] || { echo "FAIL: expected 2 recorded sessions, got ${#CSVS[@]}"; ls /data/recordings; exit 1; }
+  A_CSV=${CSVS[0]}; B_CSV=${CSVS[1]}
+  A_ROWS=$(($(wc -l < "$A_CSV") - 1)); B_ROWS=$(($(wc -l < "$B_CSV") - 1))
+  [ "$A_ROWS" -gt 0 ] && [ "$B_ROWS" -gt 0 ] || { echo "FAIL: a session recorded no frames ($A_ROWS/$B_ROWS)"; exit 1; }
+  echo "sessions: A=$A_ROWS rows, B=$B_ROWS rows"
+
+  echo "=== 2. one replay of the directory plays A then B (the recorded gap), re-recording ONE session ==="
+  timeout 180 python3 main.py -c config/replay-test.yaml >/tmp/replay2.log 2>&1 \
+    || { echo "FAIL: replay exited non-zero"; tail -30 /tmp/replay2.log; exit 1; }
+  grep -q "2 session(s)" /tmp/replay2.log || { echo "FAIL: the replay did not see 2 sessions"; grep "replay source" /tmp/replay2.log; exit 1; }
+  grep -q "session 1/2 done -> session 2" /tmp/replay2.log || { echo "FAIL: no session handover logged"; exit 1; }
+  grep -q "playback finished" /tmp/replay2.log || { echo "FAIL: no clean EOF finalize"; exit 1; }
+
+  echo "=== 3. the re-recorded sidecar is A followed by B: ids + stamps verbatim, nothing counted lost, provenance ==="
+  RE_CSV=$(ls /data/recordings/rerec-*.csv) || { echo "FAIL: no re-recorded CSV"; exit 1; }
+  RE_MKV=$(ls /data/recordings/rerec-*-00000.mkv)
+  cut -d, -f1,3,4,6,7 "$A_CSV" > /tmp/ab.csv; tail -n +2 "$B_CSV" | cut -d, -f1,3,4,6,7 >> /tmp/ab.csv
+  cut -d, -f1,3,4,6,7 "$RE_CSV" > /tmp/re.csv
+  diff /tmp/ab.csv /tmp/re.csv || { echo "FAIL: the re-recorded rows are not A followed by B"; exit 1; }
+  echo "CSV rows are A+B ($((A_ROWS + B_ROWS)) rows)"
+  python3 - "${RE_CSV%.csv}.json" "${A_CSV%.csv}" "${B_CSV%.csv}" <<PYCHECK
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d.get("replay_of") == [sys.argv[2], sys.argv[3]], d.get("replay_of")
+drops = d.get("drops") or {}
+assert drops.get("frames_missing", 0) == 0 and drops.get("source_gaps", 0) == 0, drops
+print("provenance ok: replay_of lists both sessions in order; frames_missing=0 across the boundary")
+PYCHECK
+
+  echo "=== 4. decoded frames must be A frames then B frames, bit-identical ==="
+  gst-launch-1.0 filesrc location="${A_CSV%.csv}-00000.mkv" ! matroskademux ! avdec_ffv1 ! filesink location=/tmp/a2.raw >/dev/null 2>&1
+  gst-launch-1.0 filesrc location="${B_CSV%.csv}-00000.mkv" ! matroskademux ! avdec_ffv1 ! filesink location=/tmp/b2.raw >/dev/null 2>&1
+  cat /tmp/a2.raw /tmp/b2.raw > /tmp/ab.raw
+  gst-launch-1.0 filesrc location="$RE_MKV" ! matroskademux ! avdec_ffv1 ! filesink location=/tmp/re.raw >/dev/null 2>&1
+  [ -s /tmp/ab.raw ] || { echo "FAIL: original decode produced nothing"; exit 1; }
+  cmp /tmp/ab.raw /tmp/re.raw || { echo "FAIL: replayed frames are not A+B bit-identical"; exit 1; }
+  echo "frames bit-identical across the session boundary ($(stat -c %s /tmp/ab.raw) bytes)"
+'
+
+echo
 echo "########## RAW GRAY16 (thermal shape): 16-bit ffv1 run -> replay roundtrip ##########"
 docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
   set -e
