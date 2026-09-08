@@ -197,6 +197,112 @@ def test_a_frame_that_does_not_match_the_pinned_config_stops_legibly():
     writer.stop()
 
 
+
+class _UnixfdWriter:
+    """A unixfdsink writer with memfd buffers -- the core's own unixfd output convention (offset = frame
+    id, offset_end = capture ns), or a plain writer that sets neither."""
+
+    def __init__(self, socket: str, *, width: int = W, height: int = H):
+        gi.require_version("GstAllocators", "1.0")
+        from gi.repository import GstAllocators  # noqa: WPS433
+        self.GA = GstAllocators
+        self.alloc = GstAllocators.FdAllocator.new()
+        try:
+            os.unlink(socket)
+        except FileNotFoundError:
+            pass
+        caps = f"video/x-raw,format=RGB,width={width},height={height},framerate=20/1"
+        self.pipeline = Gst.parse_launch(f'appsrc name=src is-live=true format=time caps="{caps}" '
+                                         f'! unixfdsink socket-path="{socket}" sync=false')
+        self.src = self.pipeline.get_by_name("src")
+        self.nbytes = width * height * 3
+        self.pipeline.set_state(Gst.State.PLAYING)
+
+    def push(self, frame_id: int, ts_ns: int, *, fill: int = 7, stamped: bool = True) -> None:
+        fd = os.memfd_create("t", 0)
+        os.ftruncate(fd, self.nbytes)
+        os.pwrite(fd, bytes([fill]) * self.nbytes, 0)
+        mem = self.GA.FdAllocator.alloc(self.alloc, fd, self.nbytes, self.GA.FdMemoryFlags.NONE)
+        buf = Gst.Buffer.new()
+        buf.insert_memory(-1, mem)
+        buf.pts = frame_id * 50_000_000
+        if stamped:
+            buf.offset = frame_id
+            buf.offset_end = ts_ns
+        assert self.src.emit("push-buffer", buf) == Gst.FlowReturn.OK
+
+    def stop(self) -> None:
+        self.pipeline.set_state(Gst.State.NULL)
+
+
+def _unixfd_available() -> bool:
+    if Gst.ElementFactory.find("unixfdsrc") is None or Gst.ElementFactory.find("unixfdsink") is None:
+        print(f"skip: unixfd framing needs GStreamer >= 1.24 (this host: {Gst.version_string()})")
+        return False
+    return True
+
+
+def _push_until(writer, src, c, n: int, start_id: int, t0: int, *, stamped: bool = True, fill0: int = 0, limit: int = 100) -> None:
+    """unixfdsink drops until the reader connects: keep pushing at 20 fps until n frames arrived."""
+    ctx = GLib.MainContext.default()
+    for i in range(limit):
+        writer.push(start_id + i, t0 + i * 50_000_000, fill=(fill0 + i) % 250, stamped=stamped)
+        time.sleep(0.05)
+        while ctx.iteration(False):
+            pass
+        if c.count() >= n or src.is_disconnected():
+            return
+    raise AssertionError(f"only {c.count()} frames after {limit} pushes")
+
+
+def test_unixfd_frames_self_describe_and_carry_the_writers_id_and_stamp_in_the_offsets():
+    if not _unixfd_available():
+        return
+    socket = _socket()
+    writer = _UnixfdWriter(socket)
+    src = _source(socket, framing="unixfd")
+    c = _Consumer()
+    src.start(c.on_frame)
+    t0 = 1_700_000_000_000_000_000
+    _push_until(writer, src, c, 3, 100, t0)
+    stamps = [st for st, _ in c.frames[:3]]
+    first = stamps[0].frame_id
+    assert first >= 100 and [st.frame_id for st in stamps] == [first, first + 1, first + 2]   # the writer's ids
+    assert [st.timestamp_ns for st in stamps] == [t0 + (fid - 100) * 50_000_000 for fid in (first, first + 1, first + 2)]
+    assert all(st.source == TimestampSource.CAMERA for st in stamps)
+    assert all(len(d) == RGB_BYTES for _, d in c.frames[:3])
+    assert src.active_timestamp_source == "camera" and src.geometry() == (0, 0, W, H)
+    # a plain unixfdsink writer (no offsets): arrival stamps, ids minted by the core
+    n = c.count()
+    _push_until(writer, src, c, n + 2, 500, t0, stamped=False)
+    late = [st for st, _ in c.frames[n:n + 2]]
+    assert all(st.source == TimestampSource.SYSTEM for st in late) and late[1].frame_id == late[0].frame_id + 1
+    assert src.active_timestamp_source == "system"
+    assert src.is_disconnected() is False
+    src.stop()
+    writer.stop()
+
+
+def test_unixfd_caps_that_do_not_match_the_pinned_config_stop_legibly():
+    if not _unixfd_available():
+        return
+    socket = _socket()
+    writer = _UnixfdWriter(socket, width=32, height=24)     # the config pins 64x48
+    src = _source(socket, framing="unixfd")
+    c = _Consumer()
+    src.start(c.on_frame)
+    _push_until(writer, src, c, 1, 1, 1_700_000_000_000_000_000)
+    _pump(lambda: src.is_disconnected())
+    assert c.count() == 0
+    try:
+        src.reopen()
+    except SourceConfigChanged as e:
+        assert "32x24" in str(e) and "RGB 64x48" in str(e), str(e)
+    else:
+        raise AssertionError("a caps mismatch must be a legible config stop")
+    src.stop()
+    writer.stop()
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

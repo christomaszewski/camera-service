@@ -460,3 +460,11 @@ def test_shm_config_is_validated():
 
 if __name__ == "__main__":
     _main()
+
+
+def test_shm_framing_unixfd_is_accepted_and_normalized():
+    c = parse_config({"camera": {"type": "shm"},
+                      "shm": {"socket_path": "/tmp/cam/in", "framing": "UnixFD", "pixel_format": "BayerRG8",
+                              "width": 320, "height": 240}})
+    assert c.shm.framing == "unixfd"
+    assert (c.shm.pixel_format, c.shm.width, c.shm.height) == ("BayerRG8", 320, 240)

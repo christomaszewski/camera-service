@@ -23,12 +23,18 @@ instance's `cam_<name>_sock` volume, runs with `ipc: host` (the shm plugin moves
 ## Input (`camera.type: shm` — the core reads, another process writes)
 
 The roles reverse: the **writer owns the socket**, the core is the client. Three framings, one
-source (`unixfd` input follows for hosts with GStreamer ≥ 1.24):
+source:
 
 | `shm.framing` | The writer sends | Stamps | Geometry / format |
 |---|---|---|---|
 | `raw` (default) | `video/x-raw` on a plain `shmsink` — any GStreamer pipeline | arrival (`system`), frame ids minted by the core — the USB/RTSP posture | PINNED in `shm:` (shm carries bytes, no caps) |
 | `header` | `application/x-cam-frame` — the transport header + pixels | the header's timestamp, frame id and provenance | PINNED in `shm:` and CHECKED per frame |
+| `unixfd` | native `video/x-raw` / `video/x-bayer` over `unixfdsink` (GStreamer ≥ 1.24 on BOTH sides: JP7) | `buffer.offset` = frame id, `offset_end` = capture ns (the core's own unixfd output convention) → `camera`; a writer that sets neither gets arrival stamps | self-describing caps, CHECKED against `shm:` per frame |
+
+A ready-made writer for a **ROS 2 image topic** is the [ros2-source](../plugins/ros2-source) plugin:
+`sensor_msgs/Image` or `CompressedImage` in, any of the three framings out, converted to the pinned
+format. On JP6 hosts (GStreamer 1.20) the core has no `unixfdsrc`, so `unixfd` framing is refused at
+open with the reason; `header` carries the same stamps there.
 
 Rules the writer follows:
 

@@ -120,7 +120,7 @@ class RtspConfig:
     reconnect_timeout_s: float = 5.0
 
 
-SHM_FRAMINGS = ("raw", "header")
+SHM_FRAMINGS = ("raw", "header", "unixfd")
 
 
 @dataclass
@@ -131,7 +131,10 @@ class ShmConfig:
     (framing: header, `application/x-cam-frame`) from a writer that owns real per-frame timestamps.
     The WRITER owns the socket; the core is the client and rides its restarts (docs/TRANSPORT.md)."""
     socket_path: str = "/tmp/cam/in"   # in the instance's socket volume; the writer runs with ipc: host
-    framing: str = "raw"               # raw = video/x-raw, caps pinned below | header = self-stamped
+    framing: str = "raw"               # raw = video/x-raw, caps pinned below | header = self-stamped |
+    #                                    unixfd = native caps over the writer's unixfdsink (GStreamer >= 1.24
+    #                                    on BOTH sides: JP7); frame id / capture ns ride buffer.offset /
+    #                                    offset_end like the core's own unixfd output, else arrival stamps
     pixel_format: str = "RGB"          # GStreamer raw format (or Aravis-style Mono8/BayerRG8). PINNED:
     #                                    shm carries bytes only, so raw frames take these caps; header
     #                                    frames are CHECKED against them (a mismatch is a legible stop)

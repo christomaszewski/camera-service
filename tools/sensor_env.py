@@ -314,6 +314,24 @@ def main() -> int:
                 sys.stderr.write(f"sensor_env: zenoh_shm_pool_size {pool!r} is not a byte count; "
                                  "not deriving CAM_ROS2_SHM_SIZE\n")
 
+    # ros2-source: a ROS 2 image topic FEEDING this (camera.type: shm) instance. Everything but the
+    # topic comes from the core's own `shm:` block, so the writer and the reader cannot disagree.
+    rs = by_name.get("ros2-source")
+    if rs is not None:
+        shm = cfg.get("shm") or {}
+        if stype != "shm":
+            sys.stderr.write(f"sensor_env: ros2-source feeds a `camera.type: shm` instance; this config's "
+                             f"camera.type is {stype!r} -- the core will not read what it writes\n")
+        env["CAM_SOURCE_TOPIC"] = str(rs.get("topic", "image_raw"))
+        env["CAM_SOURCE_TRANSPORT"] = str(shm.get("framing", "raw")).strip().lower()
+        env["CAM_SOURCE_SOCKET"] = str(shm.get("socket_path", "/tmp/cam/in"))
+        env["CAM_SOURCE_FORMAT"] = str(shm.get("pixel_format", "RGB"))
+        env["CAM_SOURCE_WIDTH"] = str(shm.get("width", 640))
+        env["CAM_SOURCE_HEIGHT"] = str(shm.get("height", 480))
+        env["CAM_SOURCE_FPS"] = str(cam.get("frame_rate", 10))
+        env["CAM_SOURCE_COMPRESSED"] = "true" if rs.get("compressed", False) else "false"
+        env["CAM_SOURCE_QOS"] = str(rs.get("qos", "sensor"))
+
     web = by_name.get("webrtc-bridge")
     if web is not None:
         env["CAM_WIDTH"] = str(web.get("width", 512))

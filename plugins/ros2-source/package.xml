@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>cam_ros2_source</name>
+  <version>0.0.1</version>
+  <description>Feeds a camera-service instance from a ROS 2 image topic: sensor_msgs/Image or
+    CompressedImage in, the instance's shm input out (raw / header framing on shmsink, or native
+    caps over unixfdsink), converted to the instance's pinned format.</description>
+  <maintainer email="maintainer@example.com">camera-service</maintainer>
+  <license>Apache-2.0</license>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <!-- GStreamer through PyGObject: python3-gi, python3-gst-1.0, gir1.2-gst-plugins-base-1.0 (the
+       FdAllocator for unixfd), gstreamer1.0-plugins-{base,good,bad} (videoconvert/videoscale,
+       jpegdec/pngdec, shmsink/unixfdsink): system packages, installed by the ros2-bridge image. -->
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

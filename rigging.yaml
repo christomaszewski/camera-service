@@ -63,6 +63,7 @@ examples:                                # repo-relative example configs. [0] is
   - core-driver/config/sensors/cam_rtsp.yaml
   - core-driver/config/sensors/cam_thermal.yaml
   - core-driver/config/sensors/cam_shm.yaml
+  - core-driver/config/sensors/cam_ros2.yaml
 
 launch_surface:                          # the files rig copies to the vehicle (NOT the source/build context)
   - cam-up
@@ -75,6 +76,7 @@ launch_surface:                          # the files rig copies to the vehicle (
   - docker-compose.input.yml              # playback input bind (pcap/replay); cam-up applies it for a
                                           #   playback source -- the capture/run lives on the host
   - plugins/ros2-bridge/compose.yml
+  - plugins/ros2-source/compose.yml       # a ROS 2 image topic feeding a shm-input instance (same image as ros2-bridge)
   - plugins/ros1-bridge/compose.yml
   - plugins/webrtc-bridge/compose.yml
 

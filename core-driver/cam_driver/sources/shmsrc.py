@@ -1,6 +1,6 @@
 """Shared-memory INPUT source (a GstPipelineSource): frames from another process's shmsink.
 
-Two framings, one socket (docs/TRANSPORT.md "Input"):
+Three framings, one socket (docs/TRANSPORT.md "Input"):
 
   raw     -- ANY GStreamer pipeline's `video/x-raw` on a plain shmsink: a simulator's render, a
              point-cloud preview, another instance's raw endpoint. shm carries bytes only (no caps,
@@ -9,6 +9,11 @@ Two framings, one socket (docs/TRANSPORT.md "Input"):
   header  -- the service's own transport (`application/x-cam-frame`, transport.FrameHeader) from a
              writer that owns real per-frame timestamps: the stamp, frame id and provenance come
              from the header; geometry/format are CHECKED against the pinned config.
+  unixfd  -- native caps over the writer's `unixfdsink` (GStreamer >= 1.24 on both sides: JP7) --
+             self-describing (`video/x-raw` or `video/x-bayer`), checked against the pinned config
+             per frame. The frame id and capture time ride buffer.offset / offset_end exactly as the
+             core's own unixfd OUTPUT sends them (docs/unixfd-migration.md); a writer that sets
+             neither gets arrival stamps and minted ids, like raw.
 
 The WRITER owns the socket; this source is the client. It waits for the socket to appear, and a
 writer restart is a reconnect, not a fault: a bus ERROR or data starvation flips is_disconnected()
@@ -35,13 +40,18 @@ from .gstbase import GstPipelineSource
 
 log = logging.getLogger(__name__)
 
+_OFFSET_NONE = 0xFFFFFFFFFFFFFFFF   # GST_BUFFER_OFFSET_NONE: the writer set no offset / offset_end
+
 
 class ShmSource(GstPipelineSource):
     def __init__(self, cfg):   # cfg = config.ShmConfig
         super().__init__()
         self.cfg = cfg
         self._header = cfg.framing == "header"
-        self._gst_format = parse_pixel_format(cfg.pixel_format)[0]
+        self._unixfd = cfg.framing == "unixfd"
+        parsed = parse_pixel_format(cfg.pixel_format)
+        self._gst_format = parsed[0]
+        self._bayer = parsed[2]                # CFA pattern when the pinned format is Bayer (unixfd caps)
         self._expected = bytes_per_frame(self._gst_format, cfg.width, cfg.height)
         self._reconnect = bool(getattr(cfg, "reconnect", True))
         self._reconnect_timeout_s = float(getattr(cfg, "reconnect_timeout_s", 5.0))
@@ -54,6 +64,9 @@ class ShmSource(GstPipelineSource):
     # ---- lifecycle ---------------------------------------------------------
     def open(self) -> None:
         super().open()
+        if self._unixfd and Gst.ElementFactory.find("unixfdsrc") is None:
+            raise RuntimeError(f"shm.framing: unixfd needs GStreamer >= 1.24 (unixfdsrc) on this host, which has "
+                               f"{Gst.version_string()} -- use framing: header (the same writer can send it)")
         present = os.path.exists(self.cfg.socket_path)
         log.info("shm source: %s (%s framing, %s %dx%d @ %s fps, %d bytes/frame)%s",
                  self.cfg.socket_path, self.cfg.framing, self.cfg.pixel_format, self.cfg.width,
@@ -66,6 +79,12 @@ class ShmSource(GstPipelineSource):
         bus = self._pipeline.get_bus()
         bus.add_signal_watch()
         bus.connect("message::error", self._on_bus_error)
+        bus.connect("message::eos", self._on_bus_eos)
+
+    def _on_bus_eos(self, _bus, _msg) -> None:
+        # unixfdsrc ends the stream when the writer closes the socket (shmsrc posts an ERROR instead)
+        log.warning("shm reader: the writer closed the stream; reconnecting")
+        self._errored = True
 
     def _on_bus_error(self, _bus, msg) -> None:
         err, dbg = msg.parse_error()
@@ -93,6 +112,10 @@ class ShmSource(GstPipelineSource):
     def _pipeline_desc(self) -> str:
         src = f'shmsrc socket-path="{self.cfg.socket_path}" is-live=true do-timestamp=true'
         raw_sink = "appsink name=rawsink emit-signals=true max-buffers=4 drop=true sync=false"
+        if self._unixfd:
+            # no caps filter: the stream describes itself and _on_raw checks it against the pinned
+            # config (a filter would fail negotiation silently, in the reconnect loop, forever)
+            return f'unixfdsrc socket-path="{self.cfg.socket_path}" ! {raw_sink}'
         if self._header:
             return f"{src} ! {transport.CAPS} ! {raw_sink}"
         fps = max(1, int(round(self.cfg.frame_rate or 10.0)))
@@ -147,6 +170,29 @@ class ShmSource(GstPipelineSource):
             stamp = FrameStamp(frame_id=int(hdr.frame_id), timestamp_ns=int(hdr.timestamp_ns), source=source,
                                system_ns=now, camera_ns=int(hdr.timestamp_ns), chunk_ns=None)
             self._last_data_ns = now
+        elif self._unixfd:
+            what = self._unixfd_mismatch(sample)
+            if what is not None:
+                if what == "":
+                    self._bad_headers += 1     # a sample with no caps: not a config matter, just dropped
+                    return Gst.FlowReturn.OK
+                self._fail_config(what)
+                return Gst.FlowReturn.OK
+            if len(data) != self._expected:
+                self._fail_config(f"a unixfd frame is {len(data)} bytes, {self._gst_format} "
+                                  f"{self.cfg.width}x{self.cfg.height} is {self._expected}")
+                return Gst.FlowReturn.OK
+            pixels = data
+            fid, ts = int(buf.offset), int(buf.offset_end)
+            if fid != _OFFSET_NONE and ts not in (0, _OFFSET_NONE):
+                # the core's own unixfd convention: offset = frame id, offset_end = absolute capture ns
+                self._last_source = TimestampSource.CAMERA
+                stamp = FrameStamp(frame_id=fid, timestamp_ns=ts, source=TimestampSource.CAMERA,
+                                   system_ns=now, camera_ns=ts, chunk_ns=None)
+                self._last_data_ns = now
+            else:
+                self._last_source = TimestampSource.SYSTEM
+                stamp = self._new_stamp(buf)   # a plain unixfdsink writer: arrival, minted id
         else:
             if len(data) != self._expected:
                 self._fail_config(f"a raw frame is {len(data)} bytes, {self._gst_format} "
@@ -159,6 +205,30 @@ class ShmSource(GstPipelineSource):
         if self._on_frame is not None:
             self._on_frame(stamp, pixels)
         return Gst.FlowReturn.OK
+
+    def _unixfd_mismatch(self, sample) -> str | None:
+        """None when the sample's caps are the pinned config; "" when it carries no caps at all;
+        else what differs, for the legible config stop."""
+        caps = sample.get_caps()
+        st = caps.get_structure(0) if caps is not None and caps.get_size() > 0 else None
+        if st is None:
+            return ""
+        name = st.get_name()
+        fmt = st.get_string("format") or "?"
+        w = st.get_int("width")[1] if st.has_field("width") else 0
+        h = st.get_int("height")[1] if st.has_field("height") else 0
+        pinned = f"{self.cfg.pixel_format} {self.cfg.width}x{self.cfg.height}"
+        if name == "video/x-bayer":
+            if self._bayer is None or fmt != self._bayer:
+                return f"the writer sends video/x-bayer {fmt} {w}x{h}, config pins {pinned}"
+        elif name == "video/x-raw":
+            if self._bayer is not None or fmt != self._gst_format:
+                return f"the writer sends video/x-raw {fmt} {w}x{h}, config pins {pinned}"
+        else:
+            return f"the writer sends {name}, not video/x-raw or video/x-bayer (config pins {pinned})"
+        if (w, h) != (self.cfg.width, self.cfg.height):
+            return f"the writer sends {fmt} {w}x{h}, config pins {pinned}"
+        return None
 
     # ---- introspection -----------------------------------------------------
     def geometry(self):
@@ -173,4 +243,4 @@ class ShmSource(GstPipelineSource):
 
     @property
     def active_timestamp_source(self) -> str:
-        return self._last_source.value if self._header else TimestampSource.SYSTEM.value
+        return self._last_source.value if (self._header or self._unixfd) else TimestampSource.SYSTEM.value

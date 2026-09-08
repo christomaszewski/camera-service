@@ -14,6 +14,8 @@ shm:
   socket_path: /tmp/cam/in   # the writer's shmsink socket, inside the socket volume
   framing: raw               # raw = any video/x-raw shmsink (caps pinned below)
   #                            header = application/x-cam-frame from a writer with real timestamps
+  #                            unixfd = native caps over the writer's unixfdsink (GStreamer >= 1.24 both
+  #                                     sides / JP7; frame id + capture ns in the buffer offsets)
   pixel_format: RGB          # PINNED: shm carries bytes only. A frame of another size/format stops
   width: 640                 #   the service legibly (a reopen cannot fix a config mismatch)
   height: 480

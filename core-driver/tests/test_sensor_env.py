@@ -252,3 +252,22 @@ def _main():
 
 if __name__ == "__main__":
     _main()
+
+
+def test_ros2_source_env_comes_from_the_shm_block_and_the_plugin_params():
+    cfg = {"name": "front_ros", "camera": {"type": "shm", "frame_rate": 15},
+           "shm": {"socket_path": "/tmp/cam/in", "framing": "Header", "pixel_format": "BayerRG8", "width": 1280, "height": 720},
+           "plugins": [{"name": "ros2-source", "isolation": "container",
+                        "params": {"topic": "/front/image_raw", "compressed": True, "qos": "reliable"}}]}
+    e = _env(cfg)
+    assert e["COMPOSE_PROFILES"] == "ros2-source"
+    assert e["CAM_SOURCE_TOPIC"] == "/front/image_raw"
+    assert e["CAM_SOURCE_TRANSPORT"] == "header"          # = shm.framing, normalized
+    assert e["CAM_SOURCE_SOCKET"] == "/tmp/cam/in"
+    assert (e["CAM_SOURCE_FORMAT"], e["CAM_SOURCE_WIDTH"], e["CAM_SOURCE_HEIGHT"]) == ("BayerRG8", "1280", "720")
+    assert e["CAM_SOURCE_FPS"] == "15"
+    assert (e["CAM_SOURCE_COMPRESSED"], e["CAM_SOURCE_QOS"]) == ("true", "reliable")
+    # defaults: raw framing, RGB 640x480, sensor qos, not compressed
+    e = _env({"name": "x", "camera": {"type": "shm"}, "plugins": [{"name": "ros2-source", "isolation": "container", "params": {"topic": "/t"}}]})
+    assert (e["CAM_SOURCE_TRANSPORT"], e["CAM_SOURCE_FORMAT"], e["CAM_SOURCE_WIDTH"], e["CAM_SOURCE_COMPRESSED"], e["CAM_SOURCE_QOS"]) == \
+        ("raw", "RGB", "640", "false", "sensor")

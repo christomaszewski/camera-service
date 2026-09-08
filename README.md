@@ -101,7 +101,8 @@ core-driver/            # the producer service
   main.py               # entry point
   config/camera.yaml    # camera + recording + preview settings
   Dockerfile
-plugins/                # consumer apps: ros2-bridge, ros1-bridge, webrtc-bridge (mqtt-telemetry, ... as examples)
+plugins/                # consumer apps: ros2-bridge, ros1-bridge, webrtc-bridge (mqtt-telemetry, ... as examples);
+                        #   ros2-source is the reverse: a ROS 2 image topic feeding a shm-input instance
 docker-compose.yml
 ```
 
