@@ -67,6 +67,7 @@ producer actually knows; **omit** what it can't substantiate.
   "fps": 30,                     // OPTIONAL
   "pixel_format": "GRAY8",       // OPTIONAL sensor format (GRAY8 / GRAY16_LE / bayer_rggb8 / ...)
   "source": "gige",              // OPTIONAL what kind of source the stream fronts: a live camera
+                                 //   (gige | usb | rtsp), another process's frames (shm), or playback
                                  //   (gige | usb | rtsp) or PLAYBACK (pcap | replay). A consumer uses it
                                  //   as a label; the CAPABILITY to control playback is advertised
                                  //   separately (PLAYBACK.md), never inferred from this field.

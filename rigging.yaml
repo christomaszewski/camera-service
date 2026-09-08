@@ -62,6 +62,7 @@ examples:                                # repo-relative example configs. [0] is
   - core-driver/config/sensors/cam_usb.yaml
   - core-driver/config/sensors/cam_rtsp.yaml
   - core-driver/config/sensors/cam_thermal.yaml
+  - core-driver/config/sensors/cam_shm.yaml
 
 launch_surface:                          # the files rig copies to the vehicle (NOT the source/build context)
   - cam-up

@@ -120,6 +120,30 @@ class RtspConfig:
     reconnect_timeout_s: float = 5.0
 
 
+SHM_FRAMINGS = ("raw", "header")
+
+
+@dataclass
+class ShmConfig:
+    """Same-host shared-memory INPUT (camera.type == shm): frames from another process's GStreamer
+    `shmsink` -- ANY pipeline's raw video (framing: raw -- a simulator's render, a point-cloud
+    preview, another instance's raw endpoint), or the service's own header transport
+    (framing: header, `application/x-cam-frame`) from a writer that owns real per-frame timestamps.
+    The WRITER owns the socket; the core is the client and rides its restarts (docs/TRANSPORT.md)."""
+    socket_path: str = "/tmp/cam/in"   # in the instance's socket volume; the writer runs with ipc: host
+    framing: str = "raw"               # raw = video/x-raw, caps pinned below | header = self-stamped
+    pixel_format: str = "RGB"          # GStreamer raw format (or Aravis-style Mono8/BayerRG8). PINNED:
+    #                                    shm carries bytes only, so raw frames take these caps; header
+    #                                    frames are CHECKED against them (a mismatch is a legible stop)
+    width: int = 640
+    height: int = 480
+
+    # General settings overlay slot (set under `camera:`); parse_config overlays them here.
+    frame_rate: float = 10.0           # the caps' framerate (raw); informational for header frames
+    reconnect: bool = True             # the writer comes and goes: reopen on data starvation / bus error
+    reconnect_timeout_s: float = 5.0
+
+
 @dataclass
 class ReplayConfig:
     """Recorded-run playback source (camera.type == replay): re-run the service against a run
@@ -306,6 +330,7 @@ class AppConfig:
     gige: GigeConfig = field(default_factory=GigeConfig)         # gige source params
     usb: UsbConfig = field(default_factory=UsbConfig)            # usb source params
     rtsp: RtspConfig = field(default_factory=RtspConfig)         # rtsp source params
+    shm: ShmConfig = field(default_factory=ShmConfig)            # shared-memory INPUT params
     replay: ReplayConfig = field(default_factory=ReplayConfig)   # recorded-run playback params
     pcap: PcapConfig = field(default_factory=PcapConfig)         # usbmon-capture playback params
     recording: RecordingConfig = field(default_factory=RecordingConfig)
@@ -378,6 +403,12 @@ def parse_config(raw: dict) -> AppConfig:
     gige.roi = _build(ROI, roi_raw) if roi_raw else None
     usb = _build(UsbConfig, raw.get("usb"))
     rtsp = _build(RtspConfig, raw.get("rtsp"))
+    shm = _build(ShmConfig, raw.get("shm"))
+    shm.framing = str(shm.framing or "raw").strip().lower()
+    if shm.framing not in SHM_FRAMINGS:
+        raise ValueError(f"shm.framing: expected one of {SHM_FRAMINGS}, got {shm.framing!r}")
+    if not shm.socket_path:
+        raise ValueError("shm.socket_path: required for camera.type: shm (the writer's shmsink socket)")
     replay = _build(ReplayConfig, raw.get("replay"))
     pcap = _build(PcapConfig, raw.get("pcap"))
     # Playback knobs that would otherwise fail late or silently: a negative speed is meaningless
@@ -398,7 +429,7 @@ def parse_config(raw: dict) -> AppConfig:
     # only overrides when actually given (else each source keeps its sensible default). The playback
     # sources (replay/pcap) derive their rate from the recorded data and never reconnect, so only the
     # frame_rate override slot applies to them.
-    for sc in (gige, usb, rtsp):
+    for sc in (gige, usb, rtsp, shm):
         if camera.frame_rate is not None:
             sc.frame_rate = camera.frame_rate
         sc.reconnect = camera.reconnect
@@ -454,6 +485,7 @@ def parse_config(raw: dict) -> AppConfig:
         gige=gige,
         usb=usb,
         rtsp=rtsp,
+        shm=shm,
         replay=replay,
         pcap=pcap,
         recording=_build(RecordingConfig, raw.get("recording")),

@@ -12,6 +12,12 @@ on JetPack 6 or 7; portable to Jetson Thor). Capture sources are pluggable behin
   delivered bitstream, RTCP→NTP per-frame timestamps (gst ≥ 1.24), reconnect with re-probe;
   validated on the Orin against a real 4K H.265 camera.
 
+One **input** source turns any other process on the host into a camera:
+- **shm** — frames from another process's GStreamer `shmsink`: any pipeline's raw video (a
+  simulator, a point-cloud preview, another instance's raw endpoint; caps pinned in config, arrival
+  stamps) or the service's own header transport from a writer with real timestamps. The writer
+  owns the socket; the core rides its restarts. See [docs/TRANSPORT.md](docs/TRANSPORT.md).
+
 Two **playback** sources re-run the service against previously captured data (dev/repro/
 roundtrip testing — recording, transport, and every plugin behave as if the camera were live):
 - **replay** — a recorded run (`.mkv` parts + sidecar CSV/JSON): frames come back with their

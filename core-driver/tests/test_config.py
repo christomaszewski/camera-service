@@ -435,5 +435,28 @@ def test_hold_on_finish_follows_the_control_plane_unless_told():
     assert hold_on_finish(parse_config({"playback": {"on_finish": "exit"}})) is False
 
 
+# ---- shm input block --------------------------------------------------------------------
+def test_shm_config_defaults_and_parse():
+    c = parse_config({})
+    assert (c.shm.socket_path, c.shm.framing, c.shm.pixel_format) == ("/tmp/cam/in", "raw", "RGB")
+    assert (c.shm.width, c.shm.height, c.shm.frame_rate) == (640, 480, 10.0) and c.shm.reconnect is True
+    c = parse_config({"camera": {"type": "shm", "frame_rate": 15, "reconnect": False},
+                      "shm": {"socket_path": "/tmp/cam/preview", "framing": "Header", "pixel_format": "GRAY8",
+                              "width": 1024, "height": 384}})
+    assert c.camera.type == "shm" and c.shm.framing == "header" and c.shm.socket_path == "/tmp/cam/preview"
+    assert (c.shm.pixel_format, c.shm.width, c.shm.height) == ("GRAY8", 1024, 384)
+    assert c.shm.frame_rate == 15.0 and c.shm.reconnect is False      # the general camera: block overlays
+
+
+def test_shm_config_is_validated():
+    for bad, needle in (({"framing": "framed"}, "shm.framing"), ({"socket_path": ""}, "shm.socket_path")):
+        try:
+            parse_config({"camera": {"type": "shm"}, "shm": bad})
+        except ValueError as e:
+            assert needle in str(e)
+        else:
+            raise AssertionError(f"{bad} must be refused")
+
+
 if __name__ == "__main__":
     _main()
