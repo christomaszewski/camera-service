@@ -68,7 +68,10 @@ if [ -z "$VARIANT" ]; then
   esac
 fi
 case "$VARIANT" in
+  # JP6 hosts inject drivers + devices only: the images carry the multimedia + nv plugin layer from
+  # NVIDIA's r36.4 apt repo (L4T_VERSION pins it to the host's L4T, e.g. 36.4.4-20250616085344).
   jp6) BASE_IMAGE="${BASE_IMAGE:-nvcr.io/nvidia/l4t-base:r36.2.0}"
+       L4T_MULTIMEDIA="${L4T_MULTIMEDIA:-r36.4}"
        IMAGES="${IMAGES:-cam-core ros2-bridge ros1-bridge webrtc-bridge}" ;;
   # dev: cam-dev REPLACES cam-core (no l4t base, no NVENC -- ffv1 record, x264enc preview). The two
   # bridges are not l4t-based and build unchanged off-Jetson, so the bench box can run the whole
@@ -81,11 +84,14 @@ case "$VARIANT" in
   jp6m) BASE_IMAGE="${BASE_IMAGE:-ubuntu:26.04}"
         WEBRTC_BASE="${WEBRTC_BASE:-ubuntu:26.04}"
         GST_RS_TAG="${GST_RS_TAG:-0.15.3}"
+        L4T_MULTIMEDIA="${L4T_MULTIMEDIA:-r36.4}"
         IMAGES="${IMAGES:-cam-core cam-dev ros2-bridge webrtc-bridge}" ;;
   *)   BASE_IMAGE="${BASE_IMAGE:-ubuntu:24.04}"
        IMAGES="${IMAGES:-cam-core ros2-bridge webrtc-bridge}" ;;
 esac
 ROS_DISTRO="${ROS_DISTRO:-lyrical}"
+L4T_MULTIMEDIA="${L4T_MULTIMEDIA:-}"
+L4T_VERSION="${L4T_VERSION:-}"
 PUSH="${PUSH:-1}"
 PLATFORM_FLAG="${PLATFORM_FLAG:-}"
 
@@ -106,12 +112,14 @@ build_one() {                      # build_one <image-name> <dockerfile> [extra 
 
 for img in $IMAGES; do
   case "$img" in
-    cam-core)     build_one cam-core     core-driver/Dockerfile           --build-arg "BASE_IMAGE=$BASE_IMAGE" ;;
+    cam-core)     build_one cam-core     core-driver/Dockerfile           --build-arg "BASE_IMAGE=$BASE_IMAGE" \
+                     --build-arg "L4T_MULTIMEDIA=$L4T_MULTIMEDIA" --build-arg "L4T_VERSION=$L4T_VERSION" ;;
     cam-dev)      build_one cam-dev      core-driver/Dockerfile.dev       --build-arg "BASE=$BASE_IMAGE" ;;   # NB: the dev image's arg is BASE, not BASE_IMAGE
     ros2-bridge)   build_one ros2-bridge   plugins/ros2-bridge/Dockerfile   --build-arg "ROS_DISTRO=$ROS_DISTRO" ;;
     ros1-bridge)   build_one ros1-bridge   plugins/ros1-bridge/Dockerfile ;;   # Noetic (ROS_DISTRO baked in)
     webrtc-bridge) build_one webrtc-bridge plugins/webrtc-bridge/Dockerfile \
-                     ${WEBRTC_BASE:+--build-arg "BASE_IMAGE=$WEBRTC_BASE"} ${GST_RS_TAG:+--build-arg "GST_RS_TAG=$GST_RS_TAG"} ;;
+                     ${WEBRTC_BASE:+--build-arg "BASE_IMAGE=$WEBRTC_BASE"} ${GST_RS_TAG:+--build-arg "GST_RS_TAG=$GST_RS_TAG"} \
+                     --build-arg "L4T_MULTIMEDIA=$L4T_MULTIMEDIA" --build-arg "L4T_VERSION=$L4T_VERSION" ;;
     *) echo "build-images: unknown image '$img' (want: cam-core|cam-dev|ros2-bridge|ros1-bridge|webrtc-bridge)" >&2; exit 1 ;;
   esac
 done

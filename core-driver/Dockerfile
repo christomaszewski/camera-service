@@ -15,6 +15,34 @@
 # `python3 -c "import gi; gi.require_version('Aravis','0.8')"`.
 ARG BASE_IMAGE=nvcr.io/nvidia/l4t-base:r36.2.0
 ARG ARAVIS_VERSION=0.8.34
+ARG L4T_MULTIMEDIA=
+ARG L4T_VERSION=
+
+# ---- l4t: JetPack 6's multimedia + GStreamer plugin layer, EXTRACTED from NVIDIA's apt repo ----
+# On a JP6 host the nvidia runtime injects drivers + device nodes only (drivers.csv / devices.csv);
+# the multimedia libraries (NvBufSurface, libnvv4l2 + the v4l2 codec plugin, libnvtvmr ...) and the
+# nvv4l2* / nvvidconv GStreamer plugins are the CONTAINER's to carry -- NVIDIA's l4t-jetpack image
+# installs them from the same repo. `dpkg-deb -x`, no maintainer scripts (nvidia-l4t-core's would
+# refuse a non-Jetson build host). L4T_MULTIMEDIA names the release line (r36.4); L4T_VERSION pins
+# the package version to the host's L4T (36.4.4-... for an R36.4.4 host); empty = no layer (JP7's
+# CDI injects the whole stack; dev has none). docs/jp6-modern-userspace.md "Finding on JP6".
+FROM ubuntu:22.04 AS l4t
+ARG L4T_MULTIMEDIA
+ARG L4T_VERSION
+RUN mkdir -p /l4t/usr/lib/aarch64-linux-gnu \
+    && if [ -n "$L4T_MULTIMEDIA" ]; then \
+         apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+         && curl -fsSL https://repo.download.nvidia.com/jetson/jetson-ota-public.asc -o /etc/apt/trusted.gpg.d/jetson.asc \
+         && printf 'deb https://repo.download.nvidia.com/jetson/common %s main\ndeb https://repo.download.nvidia.com/jetson/t234 %s main\n' "$L4T_MULTIMEDIA" "$L4T_MULTIMEDIA" > /etc/apt/sources.list.d/nvidia-l4t.list \
+         && apt-get update && cd /tmp \
+         && for p in nvidia-l4t-core nvidia-l4t-nvsci nvidia-l4t-multimedia-utils nvidia-l4t-multimedia nvidia-l4t-gstreamer; do \
+              apt-get download "$p${L4T_VERSION:+=$L4T_VERSION}" && dpkg-deb -x "$p"_*.deb /l4t; \
+            done \
+         # the plugins the stack uses; the camera / display ones would only fail the registry scan here
+         && cd /l4t/usr/lib/aarch64-linux-gnu/gstreamer-1.0 \
+         && ls | grep -vE '^libgst(nvvidconv|nvvideo4linux2|nvjpeg|nvunixfd|nvtee|nvcompositor)\.so$' | xargs -r rm -f \
+         && rm -rf /l4t/usr/share /l4t/etc /l4t/usr/bin /l4t/opt /l4t/usr/src /l4t/usr/include /l4t/var; \
+       fi
 
 # ---- builder: compile Aravis (+ the GStreamer plugin + GI typelib) from source ----
 FROM ${BASE_IMAGE} AS builder
@@ -37,6 +65,7 @@ RUN cd /tmp \
 
 # ---- runtime: base + runtime deps + the Aravis install (no build toolchain) ----
 FROM ${BASE_IMAGE}
+ARG L4T_MULTIMEDIA
 ENV DEBIAN_FRONTEND=noninteractive
 # kmod: libnvtvmr runs `lsmod` during NVENC init, else nvv4l2h26{4,5}enc aborts. Runtime libs only.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -52,6 +81,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -f /usr/lib/*/gstreamer-1.0/libgstonnx.so /usr/lib/*/libonnxruntime.so* \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /opt/aravis/usr/local /usr/local
+# JP6's multimedia layer (empty unless L4T_MULTIMEDIA): nvidia/*.so, the six nv GStreamer plugins, the
+# v4l2 codec plugin, and libv4l2.so.0.0.999999 -> nvidia/libnvv4l2.so (NVIDIA's libv4l2 replaces the
+# distro's through the version trick; the ldconfig below picks it). Files the runtime injects on top
+# (drivers.csv) shadow the same paths -- the host's driver build always wins where it is mounted.
+COPY --from=l4t /l4t/usr/lib/aarch64-linux-gnu/ /usr/lib/aarch64-linux-gnu/
 # The L4T libraries the host injects at runtime (CSV on JP6, CDI on JP7) land in
 # /usr/lib/aarch64-linux-gnu/nvidia (r36) or tegra{,-egl} (r35). An l4t-base image already lists those dirs for the
 # linker; a plain Ubuntu base does not, and then libgstnvvideo4linux2.so cannot resolve

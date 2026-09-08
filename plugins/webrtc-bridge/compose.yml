@@ -16,6 +16,8 @@ services:
         # 26.04 = 1.28 <-> 0.15 (tools/jp6-modern/cam-up-jp6m exports both).
         BASE_IMAGE: ${CAM_WEBRTC_BASE:-ubuntu:24.04}
         GST_RS_TAG: ${CAM_GST_RS_TAG:-0.13.7}
+        L4T_MULTIMEDIA: ${CAM_L4T_MULTIMEDIA:-}
+        L4T_VERSION: ${CAM_L4T_VERSION:-}
     init: true
     network_mode: ${CAM_NETWORK:-host}     # host = expose signalling + WebRTC media to viewers
     ipc: host                               # share /dev/shm with the core (JP6 raw endpoint; harmless for unixfd)

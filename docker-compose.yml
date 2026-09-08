@@ -33,6 +33,9 @@ services:
         # JetPack base is pure waste). On a JP7 host cam-up sets this to ubuntu:24.04. NVENC is
         # injected at runtime (CSV on JP6, CDI on JP7), so no CUDA base is ever needed.
         BASE_IMAGE: ${CAM_CORE_BASE:-nvcr.io/nvidia/l4t-base:r36.2.0}
+        # JP6: the multimedia + nv plugin layer from NVIDIA's apt repo (empty = none; see the Dockerfile)
+        L4T_MULTIMEDIA: ${CAM_L4T_MULTIMEDIA:-}
+        L4T_VERSION: ${CAM_L4T_VERSION:-}
     init: true                          # tini reaps orphans; the supervisor manages its children
     network_mode: ${CAM_NETWORK:-host} # GigE Vision broadcast discovery needs host networking
     ipc: host                           # publish /dev/shm so consumers can read the transport
