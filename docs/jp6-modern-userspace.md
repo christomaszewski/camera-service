@@ -1,5 +1,8 @@
 # JP6 with a modern userspace — test plan (branch `jp6-modern`)
 
+> The vehicle-side steps for just this experiment, inside a baked rig deployment, are
+> [jp6m-vehicle-runbook.md](jp6m-vehicle-runbook.md).
+>
 > The day's full procedure — preflight, today's baseline with the real camera, this experiment,
 > robustness, the rig shape, the write-up — is [hardware-test-procedure.md](hardware-test-procedure.md).
 
