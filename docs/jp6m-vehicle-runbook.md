@@ -33,7 +33,7 @@ cd $ART && ./rig status                             # the deployment as shipped:
 > runtime injects drivers + devices only, the multimedia / nv-plugin layer is the container's (see the
 > plan's "Finding on JP6"). Two things follow. `--hostlibs` mounts the host's own layer in, to answer
 > whether 1.20-built plugins run in 1.28 without a rebuild; and images built from the branch after
-> `c2f57d9` CARRY the layer (`RIG_TARGET_PLATFORM=jp6m tools/build-images.sh $R jp6m` again, pull),
+> `6c0c8c2` CARRY the layer (`RIG_TARGET_PLATFORM=jp6m tools/build-images.sh $R jp6m` again, pull),
 > after which the plain csv probe should light up.
 
 ```bash
