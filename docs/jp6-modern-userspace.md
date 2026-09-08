@@ -216,6 +216,30 @@ Attach `jp6m-results/` and the `stack-check.sh` output for each mode, and fill i
 - **only cdi works** → productize on cdi: one `nvidia-ctk cdi generate --mode=csv` per host, then the
   JP7 overlay as-is.
 
+## Finding on JP6 (R36.4.4, nvidia-container-toolkit 1.16.2) — the first probe
+
+The first on-vehicle probe (2026-09-08) returned `nvvidconv: no` in every csv cell, with no load
+error at all: **JetPack 6's runtime injects the driver userspace and the device nodes only**
+(`/etc/nvidia-container-runtime/host-files-for-container.d/` holds `drivers.csv` and `devices.csv`;
+there is no `l4t.csv`). The multimedia layer — NvBufSurface, NVIDIA's libv4l2 with the v4l2 codec
+plugin, libnvtvmr — and the `nvv4l2*` / `nvvidconv` GStreamer plugins are the container's to carry,
+which is what NVIDIA's `l4t-jetpack` image does by installing them from the L4T apt repo. Neither our
+`l4t-base` jp6 image nor the 26.04 one ever had them, so the baseline could not hardware-encode in a
+container on this host either. Two consequences:
+
+1. **`probe.sh --hostlibs`** answers the version-skew question without a rebuild: it bind-mounts the
+   host's own `/usr/lib/aarch64-linux-gnu/nvidia` and its `libgstnv*.so` plugins into the container
+   (read-only, under `/opt/hostnv`, on `LD_LIBRARY_PATH` / `GST_PLUGIN_PATH`) and binds the v4l2 codec
+   plugin file where libv4l2 dlopens it. Green there = the host's 1.20-built plugins run in 1.28.
+2. **The images now carry the layer.** Both Dockerfiles have an `l4t` stage that extracts
+   `nvidia-l4t-{core,nvsci,multimedia-utils,multimedia,gstreamer}` from `repo.download.nvidia.com/jetson`
+   (`L4T_MULTIMEDIA=r36.4`, `L4T_VERSION` pinned to the host's package version, `36.4.4-20250616085344`
+   here) into `/usr/lib/aarch64-linux-gnu`: 111 `nvidia/*.so`, the six plugins the stack uses, the
+   v4l2 codec plugin, and `libv4l2.so.0.0.999999 -> nvidia/libnvv4l2.so` so NVIDIA's libv4l2 wins
+   through ldconfig. What the runtime injects (`drivers.csv`: libcuda, libnvrm…) shadows the same
+   paths, so the host's driver build always wins where it is mounted. `build-images.sh` sets it for
+   the `jp6` AND `jp6m` variants — the baseline gets NVENC in containers by the same change.
+
 ## Under a rig deployment (a baked artifact on the vehicle)
 
 The wrapper is for a bare checkout. Inside a rig deployment the same switch is four `env:` lines in

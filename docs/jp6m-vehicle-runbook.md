@@ -29,8 +29,16 @@ cd $ART && ./rig status                             # the deployment as shipped:
 
 ## 2. The probe (15 min) — read this before touching the row
 
+> First result on this host (R36.4.4): every csv cell `nvvidconv: no` with no load error — JetPack 6's
+> runtime injects drivers + devices only, the multimedia / nv-plugin layer is the container's (see the
+> plan's "Finding on JP6"). Two things follow. `--hostlibs` mounts the host's own layer in, to answer
+> whether 1.20-built plugins run in 1.28 without a rebuild; and images built from the branch after
+> `c2f57d9` CARRY the layer (`RIG_TARGET_PLATFORM=jp6m tools/build-images.sh $R jp6m` again, pull),
+> after which the plain csv probe should light up.
+
 ```bash
-~/jp6-modern/probe.sh --images $R/cam-core:jp6m,$R/webrtc-bridge:jp6m     # csv + cdi
+~/jp6-modern/probe.sh --hostlibs --images $R/cam-core:jp6m,$R/webrtc-bridge:jp6m   # the host's layer, mounted in
+~/jp6-modern/probe.sh --images $R/cam-core:jp6m,$R/webrtc-bridge:jp6m              # csv + cdi (images with the baked layer)
 cat jp6m-results/summary.txt
 ```
 Per cell, in order: `ldd` unresolved libraries (`ok`), plugin load reasons (no `blacklist` /
