@@ -72,6 +72,8 @@ launch_surface:                          # the files rig copies to the vehicle (
   - docker-compose.dev.yml
   - docker-compose.external-config.yml
   - docker-compose.jp7.yml                # the JP7 (runc + CDI NVENC) overlay; cam-up applies it per host
+  - docker-compose.jp6.yml                # the JP6 overlay: the v4l2 codec device nodes the r36 runtime's
+                                          #   devices.csv lacks; cam-up applies it on a jp6 host
   - docker-compose.usb.yml                # USB v4l2 device overlay; cam-up applies it for a real usb source
   - docker-compose.input.yml              # playback input bind (pcap/replay); cam-up applies it for a
                                           #   playback source -- the capture/run lives on the host

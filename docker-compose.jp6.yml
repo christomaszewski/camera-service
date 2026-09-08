@@ -1,0 +1,21 @@
+# JetPack 6 override (applied by `cam-up` for platform jp6 -- auto-detected on an R36 host, or --jp6).
+#
+# The r36 nvidia runtime injects the driver libraries plus the device nodes its devices.csv lists.
+# On nvidia-container-toolkit 1.16 that list has the nvhost-* nodes but NOT the v4l2 codec nodes the
+# r36 multimedia plugins actually open, so nvv4l2h26{4,5}enc / nvv4l2decoder fail inside every
+# container with "Cannot identify device '/dev/v4l2-nvenc'" (measured on an R36.4.4 Orin,
+# docs/jp6-modern-userspace.md "Finding on JP6"). Grant them explicitly to the two containers that
+# encode. The multimedia + nv-plugin layer itself is BAKED into the jp6 images (the Dockerfiles'
+# l4t stage) -- JetPack 6 leaves that layer to the container.
+#
+# Not for the dev platform (a bench box has no such nodes: compose would refuse to create the
+# container) and not for JP7, whose CDI spec carries the nodes.
+services:
+  core-driver:
+    devices:
+      - /dev/v4l2-nvenc:/dev/v4l2-nvenc
+      - /dev/v4l2-nvdec:/dev/v4l2-nvdec
+  webrtc-bridge:
+    devices:
+      - /dev/v4l2-nvenc:/dev/v4l2-nvenc
+      - /dev/v4l2-nvdec:/dev/v4l2-nvdec

@@ -54,6 +54,12 @@ Decision: csv green → step 3 as written; only cdi green → step 3 with the `C
 from step 6 included from the start; neither green → stop, keep `jp6m-results/`, and read the Triage
 section of [jp6-modern-userspace.md](jp6-modern-userspace.md).
 
+> Second finding: with the host's layer mounted in, the plugins DO load in 1.28 — the last gap was
+> `/dev/v4l2-nvenc` / `-nvdec`, which toolkit 1.16's devices.csv omits. Images from `476782b`+ bake the
+> layer, `docker-compose.jp6.yml` (in an artifact baked from the branch) grants the nodes. For the cdi
+> variant (step 6) add the nodes to the host's devices.csv BEFORE generating the spec (step 1):
+> `printf 'dev, /dev/v4l2-nvenc\ndev, /dev/v4l2-nvdec\n' | sudo tee -a /etc/nvidia-container-runtime/host-files-for-container.d/devices.csv`
+
 ## 3. Switch the row to the modern images (csv mode)
 
 Append to the per-host file — it merges over the baked `vehicle.yaml` key by key, so the identity

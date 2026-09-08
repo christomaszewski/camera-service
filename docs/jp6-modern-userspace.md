@@ -240,6 +240,20 @@ container on this host either. Two consequences:
    paths, so the host's driver build always wins where it is mounted. `build-images.sh` sets it for
    the `jp6` AND `jp6m` variants — the baseline gets NVENC in containers by the same change.
 
+### Second probe (`--hostlibs`): the plugins load in 1.28; the device nodes were the last gap
+
+With the host's own r36.4 layer mounted in, the 1.20-built `libgstnvvidconv.so` / `libgstnvvideo4linux2.so`
+loaded and registered inside GStreamer 1.28 (`nvvidconv`, `nvv4l2h264enc`, `nvv4l2h265enc`: yes) —
+the version-skew question is answered. The encode pipelines then failed on
+`Cannot identify device '/dev/v4l2-nvenc'`: toolkit 1.16's `devices.csv` lists the `nvhost-*` nodes but
+not the v4l2 codec nodes the r36 plugins open, in every injection mode (a csv-mode CDI spec inherits
+the list). Fixes: the probe grants the nodes the CSV lacks itself (every mode), and
+`docker-compose.jp6.yml` grants `/dev/v4l2-nvenc` + `/dev/v4l2-nvdec` to the core and the webrtc
+bridge on a jp6 host (`cam-up` applies it, `rigging.yaml` ships it). For the cdi variant on a JP6 host,
+add the two nodes to the host's `devices.csv` before generating the spec:
+`printf 'dev, /dev/v4l2-nvenc\ndev, /dev/v4l2-nvdec\n' | sudo tee -a /etc/nvidia-container-runtime/host-files-for-container.d/devices.csv`
+then `sudo nvidia-ctk cdi generate --mode=csv --output=/etc/cdi/nvidia.yaml`.
+
 ## Under a rig deployment (a baked artifact on the vehicle)
 
 The wrapper is for a bare checkout. Inside a rig deployment the same switch is four `env:` lines in

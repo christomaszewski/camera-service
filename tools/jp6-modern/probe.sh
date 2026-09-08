@@ -62,7 +62,33 @@ say "## host"
   echo "host nvidia lib dir: $(ls -d /usr/lib/aarch64-linux-gnu/nvidia 2>/dev/null || ls -d /usr/lib/aarch64-linux-gnu/tegra 2>/dev/null || echo none) ($(ls /usr/lib/aarch64-linux-gnu/nvidia /usr/lib/aarch64-linux-gnu/tegra 2>/dev/null | wc -l) files)"
   echo "host libv4l2: $(ls /usr/lib/aarch64-linux-gnu/libv4l2.so* 2>/dev/null | tr '\n' ' ')  nv v4l plugins: $(ls /usr/lib/aarch64-linux-gnu/libv4l/plugins/nv 2>/dev/null | tr '\n' ' ')"
   echo "csv gst/multimedia lines: $(cat /etc/nvidia-container-runtime/host-files-for-container.d/*.csv 2>/dev/null | grep -ciE 'gstreamer|nvbufsurface|nvv4l2|libv4l')"
+  present=""; missing=""
+  for d in /dev/v4l2-nvenc /dev/v4l2-nvdec /dev/v4l2-nvjpg /dev/nvhost-msenc /dev/nvhost-nvdec /dev/nvhost-vic /dev/nvmap; do
+    [ -e "$d" ] || continue
+    if cat /etc/nvidia-container-runtime/host-files-for-container.d/*.csv 2>/dev/null | awk -F'[, ]+' '/^dev/{print $2}' | grep -qx "$d"; then present="$present $d"; else missing="$missing $d"; fi
+  done
+  echo "codec device nodes in devices.csv:${present:- none}"
+  echo "codec device nodes the host has but the csv lacks (the probe grants these itself):${missing:- none}"
 } | tee -a "$SUMMARY"
+
+# The v4l2 codec device nodes. JetPack 6's devices.csv (nvidia-container-toolkit 1.16) lists the
+# nvhost-* nodes but NOT /dev/v4l2-nvenc / -nvdec / -nvjpg, which the r36 plugins open -- so
+# nvv4l2h26xenc fails with "Cannot identify device '/dev/v4l2-nvenc'" in every injection mode.
+# Every mode grants the ones the host has and the CSV lists nowhere (a csv-mode CDI spec inherits
+# the same gap). The stack's fix is docker-compose.jp6.yml.
+NV_DEVICES=(/dev/v4l2-nvenc /dev/v4l2-nvdec /dev/v4l2-nvjpg /dev/nvhost-msenc /dev/nvhost-nvdec /dev/nvhost-nvjpg /dev/nvhost-vic /dev/nvmap)
+csv_devices() { cat /etc/nvidia-container-runtime/host-files-for-container.d/*.csv 2>/dev/null | awk -F'[, ]+' '/^dev/{print $2}'; }
+device_args() {
+  local covered a=()
+  covered="$(csv_devices)"
+  for d in "${NV_DEVICES[@]}"; do
+    [ -e "$d" ] || continue
+    printf '%s\n' "$covered" | grep -qx "$d" && continue
+    a+=(--device "$d")
+  done
+  [ ${#a[@]} -gt 0 ] && printf '%s\n' "${a[@]}"
+  return 0
+}
 
 # hostlibs: the host's multimedia userspace, read-only, at paths that cannot collide with what the
 # runtime injects (the runtime bind-mounts single files into /usr/lib/aarch64-linux-gnu/nvidia --
@@ -156,6 +182,9 @@ for mode in ${MODES//,/ }; do
     cdi) RT=(--device nvidia.com/gpu=all) ;;
     hostlibs) RT=(--runtime nvidia); while IFS= read -r x; do RT+=("$x"); done < <(hostlibs_args) ;;
     none) RT=() ;;
+  esac
+  case "$mode" in
+    csv|cdi|hostlibs) while IFS= read -r x; do [ -n "$x" ] && RT+=("$x"); done < <(device_args) ;;
     *) say "!! unknown mode $mode (csv|cdi|hostlibs|none)"; continue ;;
   esac
   for img in ${IMAGES//,/ }; do
