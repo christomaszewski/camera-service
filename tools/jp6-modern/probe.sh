@@ -75,11 +75,12 @@ hostlibs_args() {
   for p in nvvidconv nvvideo4linux2 nvjpeg nvunixfd nvtee nvcompositor; do
     f="/usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgst$p.so"; [ -e "$f" ] && a+=(-v "$f:/opt/hostnv/gst/libgst$p.so:ro")
   done
-  [ -d /usr/lib/aarch64-linux-gnu/libv4l/plugins/nv ] && a+=(-v "/usr/lib/aarch64-linux-gnu/libv4l/plugins/nv:/usr/lib/aarch64-linux-gnu/libv4l/plugins/nv:ro")
-  # NVIDIA's patched libv4l2 / libv4lconvert (JP5/JP6 ship *.999999): mounted under their sonames so
-  # LD_LIBRARY_PATH prefers them over the container's
-  for l in libv4l2 libv4lconvert; do
-    f=$(ls /usr/lib/aarch64-linux-gnu/$l.so.0.0.999999 2>/dev/null | head -1); [ -n "$f" ] && a+=(-v "$f:/opt/hostnv/libv4l/$l.so.0:ro")
+  # the v4l2 codec plugin: on r36 the host's libv4l/plugins/nv/ entries are RELATIVE symlinks into
+  # nvidia/, which would dangle inside the container -- bind the real file where libv4l2 dlopens it.
+  # NVIDIA's own libv4l2 (nvidia/libv4l2.so.0 -> libnvv4l2.so) rides in the nvidia dir mount and wins
+  # through LD_LIBRARY_PATH.
+  for pl in libv4l2_nvvideocodec.so; do
+    f="$nvdir/$pl"; [ -e "$f" ] && a+=(-v "$f:/usr/lib/aarch64-linux-gnu/libv4l/plugins/nv/$pl:ro")
   done
   a+=(-e JP6M_HOSTLIBS=1)
   printf '%s\n' "${a[@]}"
@@ -92,9 +93,9 @@ set -u
 FRAMES="$1"; KIND="$2"
 line() { printf '%s\n' "$*"; }
 if [ "${JP6M_HOSTLIBS:-}" = 1 ]; then
-  export LD_LIBRARY_PATH="/opt/hostnv/libv4l:/opt/hostnv/nvidia:${LD_LIBRARY_PATH:-}"
+  export LD_LIBRARY_PATH="/opt/hostnv/nvidia:${LD_LIBRARY_PATH:-}"
   export GST_PLUGIN_PATH="/opt/hostnv/gst:${GST_PLUGIN_PATH:-}"
-  line "hostlibs: nvidia libs $(ls /opt/hostnv/nvidia 2>/dev/null | wc -l), gst plugins $(ls /opt/hostnv/gst 2>/dev/null | tr '\n' ' '), libv4l $(ls /opt/hostnv/libv4l 2>/dev/null | tr '\n' ' ')"
+  line "hostlibs: nvidia libs $(ls /opt/hostnv/nvidia 2>/dev/null | wc -l), gst plugins $(ls /opt/hostnv/gst 2>/dev/null | tr '\n' ' '), v4l plugin $(ls /usr/lib/aarch64-linux-gnu/libv4l/plugins/nv 2>/dev/null | tr '\n' ' '), libv4l2 -> $(readlink -f "$(ldconfig -p 2>/dev/null | grep -m1 'libv4l2.so.0 ' | awk '{print \$NF}')" 2>/dev/null)"
 fi
 line "os: $(. /etc/os-release; echo "$PRETTY_NAME") glibc $(ldd --version | head -1 | awk '{print $NF}')"
 line "gstreamer: $(gst-inspect-1.0 --version | head -1)"
