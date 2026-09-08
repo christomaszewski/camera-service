@@ -1,85 +1,42 @@
-# jp6m on the vehicle — step by step
+# jp6m on the vehicle — step by step (the platform way)
 
-Starting point: a `rig build` for platform **jp6**, baked, shipped, and running on the JetPack 6
-vehicle as `$ART` (the extracted artifact directory); the camera row is `<cam>`; the vehicle id is
-`<id>` (from `/etc/rig/vehicle.local.yaml`). The modern images were built on the build host with
+Where things stand (2026-09-08): the probe is green on uav6 (R36.4.4) — the 26.04 / GStreamer 1.28
+containers hardware-encode, bit-exact — and `jp6m` is a platform (`a1fd924`+): rig builds, pins and
+runs the set like any other; no per-host `env:` swap. This is the day's remaining sequence. The
+registry is `<registry:port>` (`R=10.160.1.69:5000` on this bench), the camera row `<cam>`, the vehicle
+id `<id>`, the extracted artifact `$ART`. Budget: ~2 h for one camera.
+
+## 1. Build host: pull, declare the platform, build, bake, ship (30–50 min, mostly the webrtc Rust build once)
 
 ```bash
-RIG_TARGET_PLATFORM=jp6m tools/build-images.sh <registry:port> jp6m
+cd camera-service && git pull                          # branch jp6-modern, a1fd924 or later; the checkout services.yaml routes to
+```
+Declare the vehicle's platform as `jp6m` wherever the deployment declares it for the build (the same
+place that produced today's jp6 build — the deployment's `vehicle.local.yaml`, or the fleet roster),
+then from the deployment directory:
+```bash
+rig build                                              # the -jp6m set: cam-core, ros2-bridge, webrtc-bridge -> <registry>/<image>:<tag>-jp6m
+rig bake --tag <t>                                     # pins those digests
+scp var/artifacts/<t>.tar.gz <vehicle>:~/
+```
+(`rig build` builds every platform the fleet declares; a fleet with jp6 AND jp6m vehicles gets both sets.)
+
+## 2. Vehicle: provision, extract, up (10 min)
+
+```bash
+sudo rig provision --platform jp6m                     # -> /etc/rig/vehicle.local.yaml; cam-up reads it at up
+grep -v '^#' /etc/rig/vehicle.local.yaml               # no leftover env: block from the swap route
+tar xzf ~/<t>.tar.gz && cd <t> && ./run.sh up          # or ./rig up
+./rig status                                           # router, <cam>, dashboard: running / healthy
+docker ps --format '{{.Names}}\t{{.Image}}' | grep "^<cam>-vehicle-<id>"   # the three containers on ...:<t>-jp6m
 ```
 
-and are in the registry as `<registry:port>/cam-core:jp6m`, `webrtc-bridge:jp6m`, `ros2-bridge:jp6m`
-(and `cam-dev:jp6m`, the bench image, unused here). The experiment's scripts were copied to
-`~/jp6-modern` on the vehicle (`scp -r camera-service/tools/jp6-modern <vehicle>:~/jp6-modern`).
-Everything below happens inside that deployment. Budget: about two hours for one camera. The long
-form, with the baseline and the robustness passes, is [hardware-test-procedure.md](hardware-test-procedure.md).
+## 3. Optional: the plain probe on the pinned images (5 min)
 
-Write `R=<registry:port>` once in the shell you use; the commands below say `$R`.
-
-## 1. Prerequisites (10 min)
-
+Already answered by the host-libs run; this just confirms the pinned images ask the runtime themselves:
 ```bash
-R=<registry:port>
-docker pull $R/cam-core:jp6m && docker pull $R/webrtc-bridge:jp6m && docker pull $R/ros2-bridge:jp6m
-docker images | grep ":jp6m"
-nvidia-ctk --version                                # >= 1.13
-sudo nvidia-ctk cdi generate --mode=csv --output=/etc/cdi/nvidia.yaml && grep -c hostPath /etc/cdi/nvidia.yaml   # for the cdi rows
-cd $ART && ./rig status                             # the deployment as shipped: router, <cam>, dashboard up
-```
-
-## 2. The probe (15 min) — read this before touching the row
-
-> First result on this host (R36.4.4): every csv cell `nvvidconv: no`. Root cause (plan, "Finding on
-> JP6"): a plain-Ubuntu image never set NVIDIA_VISIBLE_DEVICES, so `--runtime nvidia` injected nothing.
-> Images from `1d7faa8`+ set it; the probe passes it in every runtime mode; `--hostlibs` is the
-> no-rebuild variant that proved the 1.28 userspace green on 2026-09-08.
-
-```bash
-~/jp6-modern/probe.sh --hostlibs --images $R/cam-core:jp6m,$R/webrtc-bridge:jp6m   # the host's layer, mounted in
-~/jp6-modern/probe.sh --images $R/cam-core:jp6m,$R/webrtc-bridge:jp6m              # csv + cdi (images with the baked layer)
-cat jp6m-results/summary.txt
-```
-Per cell, in order: `ldd` unresolved libraries (`ok`), plugin load reasons (no `blacklist` /
-`undefined symbol`), elements (`nvvidconv`, `nvv4l2h264enc`, `nvv4l2h265enc`, `nvv4l2decoder`,
-`unixfdsink` all `yes`), the two NVENC throughput lines hardware-fast against the `x264enc` baseline,
-`NVENC LOSSLESS PASS`, and `webrtcsink 0.15.3` with `nvv4l2h264enc` in its rankable encoders.
-The control row — the same probe against the core image the artifact pinned:
-```bash
-~/jp6-modern/probe.sh --images $(docker images --format '{{.Repository}}:{{.Tag}}' | grep cam-core | grep -v jp6m | head -1)
-```
-
-Decision: csv green → step 3 as written; only cdi green → step 3 with the `CAM_PLATFORM: jp7` line
-from step 6 included from the start; neither green → stop, keep `jp6m-results/`, and read the Triage
-section of [jp6-modern-userspace.md](jp6-modern-userspace.md).
-
-> Resolved (fourth probe, green): the CSV-mode runtime injects the host's whole multimedia + plugin
-> layer and the codec device nodes -- into a container that sets NVIDIA_VISIBLE_DEVICES. Images from
-> `1d7faa8`+ set it; `docker-compose.jp6.yml` (in an artifact baked from the branch) repeats it. The
-> cdi variant needs nothing extra on this host (its devices.csv lists the codec nodes).
-
-## 3. Switch the row to the modern images (csv mode)
-
-Append to the per-host file — it merges over the baked `vehicle.yaml` key by key, so the identity
-lines it already has stay:
-```bash
-sudo tee -a /etc/rig/vehicle.local.yaml <<YAML
-env:
-  CAM_TRANSPORT: unixfd
-  CAM_CORE_IMAGE: $R/cam-core:jp6m
-  CAM_WEBRTC_IMAGE: $R/webrtc-bridge:jp6m
-  CAM_ROS2_IMAGE: $R/ros2-bridge:jp6m
-YAML
-tail -6 /etc/rig/vehicle.local.yaml               # the refs expanded, not "$R"
-```
-Then through rig, not `run.sh` (its compose-only scripts carry the digests pinned at bake):
-```bash
-cd $ART
-./rig down <cam>
-./rig pull <cam>                                    # cam-up honours the per-image variables: fetches the three refs
-./rig new-run jp6m-csv
-./rig up <cam>
-./rig status                                        # <cam>: running, healthy within ~60 s
-docker ps --format '{{.Names}}\t{{.Image}}' | grep "^<cam>-vehicle-<id>"   # the three containers on :jp6m
+~/jp6-modern/probe.sh --modes csv --images $(docker ps --format '{{.Image}}' | grep cam-core | head -1),$(docker ps --format '{{.Image}}' | grep webrtc-bridge | head -1)
+cat jp6m-results/summary.txt                           # nvvidconv yes, NVENC fps, NVENC LOSSLESS PASS -- no --hostlibs
 ```
 
 ## 4. Verdicts from the running row (10 min)
@@ -88,79 +45,77 @@ docker ps --format '{{.Names}}\t{{.Image}}' | grep "^<cam>-vehicle-<id>"   # the
 ~/jp6-modern/stack-check.sh $ART/config/sensors/<cam>.yaml --project <cam>-vehicle-<id>
 ./rig logs <cam> | grep -iE "chunk|1588|ptp|timestamp source|encoder=|transport endpoint|health:" | head -20
 ```
-Want, in that output:
-- core `healthy`, `gst-inspect-1.0 version 1.28.x`
-- `recorder: encoder=hw-hevc-lossless` (Mono8 / Bayer8; `ffv1` is right for a 16-bit camera)
-- `plugin transport endpoint (unixfd)` — the 1.28 core; no ERROR lines
-- `chunk mode enabled`, `GevIEEE1588Status=Slave`, `Active timestamp source = ptp_chunk` — the same as the
-  baseline row gave (the code is the same; only the userspace changed)
-- `health: frames=N, no drops` climbing at the frame rate
-- webrtc-bridge: `webrtcsink 0.15.3`, inventory with `nvv4l2h264enc=rank …`. If it reads `ABSENT`, the
-  L4T stack is not reaching that container (the bridge gets the nvidia runtime in the JP6 shape —
-  check `docker inspect <cam>-vehicle-<id>-webrtc-bridge-1 --format '{{.HostConfig.Runtime}}'`). To
-  make it the encoder actually used, add `GST_PLUGIN_FEATURE_RANK: nvv4l2h264enc:MAX` under the
-  webrtc-bridge `params:` in `$ART/config/sensors/<cam>.yaml` and `./rig down <cam> && ./rig up <cam>`.
-- ros2-bridge: `CamUnixfdBridge` loaded, and
-  `docker exec <cam>-vehicle-<id>-ros2-bridge-1 bash -c "source /opt/ros/lyrical/setup.bash; ros2 topic hz --no-daemon /<cam>/image_raw"`
-  at the camera's rate.
+Want: core `healthy` on `1.28.x`; `recorder: encoder=hw-hevc-lossless` (Mono8 / Bayer8; `ffv1` for
+16-bit); `plugin transport endpoint (unixfd)`; no ERROR lines; `chunk mode enabled`,
+`GevIEEE1588Status=Slave`, `Active timestamp source = ptp_chunk` — the same lines the jp6 baseline gave;
+`health: frames=N, no drops` climbing; webrtc-bridge `webrtcsink 0.15.3` with `nvv4l2h264enc=rank …`
+(`GST_PLUGIN_FEATURE_RANK: nvv4l2h264enc:MAX` in its params makes it the pick); ros2-bridge
+`CamUnixfdBridge` and `ros2 topic hz --no-daemon /<cam>/image_raw` at the camera's rate.
 
 ## 5. A recording, bit-exact, and the operator's view (20 min)
 
 ```bash
+./rig new-run jp6m
 C=<cam>-vehicle-<id>-core-driver-1
 docker kill -s USR1 $C; sleep 60; docker kill -s USR2 $C        # or the dashboard tile's ● / ● again
 docker logs $C 2>&1 | grep -E "session .* (open|finalized)|sidecar" | tail -4
-./rig runs                                                       # the open run holds recordings/<cam>/
+./rig runs
 ```
-Take the directory from the `finalized` line, then:
+From the `finalized` line's directory: the mkv decodes (`docker exec $C gst-discoverer-1.0 <mkv>`), the
+sidecar CSV carries chunk / camera / system stamps, and the bit-exact gate on the pinned image:
 ```bash
-d=<dir>; f=$(ls -t $d/*-00000.mkv | head -1)
-docker exec $C gst-discoverer-1.0 "$f" | grep -E "Duration|video|Width|Height"
-head -3 $d/*.csv                                                 # chunk_ns / camera_ns / system_ns per frame
-docker run --rm --runtime nvidia --network host $R/cam-core:jp6m tools/nvenc_lossless_test.py --frames 60   # NVENC LOSSLESS PASS
+docker run --rm --runtime nvidia --network host $(docker ps --format '{{.Image}}' | grep cam-core | head -1) tools/nvenc_lossless_test.py --frames 60
 ```
-Dashboard: the camera plays; the tile's pill follows the session; the webrtc bridge's
-`lat[cap->enc]` p50/p95 in `docker logs <cam>-vehicle-<id>-webrtc-bridge-1`. Numbers for the table:
-```bash
-docker stats --no-stream | grep "<cam>-vehicle"
-tegrastats --interval 1000 | head -3
-./rig end-run
-```
-
-## 6. The cdi variant (20 min)
-
-Same swap plus the platform hint (cam-up honours `CAM_PLATFORM` over the provisioned platform and
-applies the runc + CDI overlay to the core and the webrtc bridge). Add one line under `env:` in
-`/etc/rig/vehicle.local.yaml`:
-```yaml
-  CAM_PLATFORM: jp7
-```
-then
-```bash
-cd $ART && ./rig down <cam> && ./rig new-run jp6m-cdi && ./rig up <cam>
-docker inspect <cam>-vehicle-<id>-core-driver-1 --format 'runtime={{.HostConfig.Runtime}} cdi={{.HostConfig.DeviceRequests}}'
-```
-Repeat step 4, and the bit-exact line with `--device nvidia.com/gpu=all` instead of `--runtime nvidia`;
+Dashboard: the feed plays; the tile's pill follows the session; the bridge's `lat[cap->enc]` p50/p95.
+Numbers: `docker stats --no-stream | grep "<cam>-vehicle"`, `tegrastats --interval 1000 | head -3`; then
 `./rig end-run`.
 
-## 7. The rig way from here on (no env swap)
+Watch one number: the probe's lossless-HEVC line ran at 15 fps for a 3 MP frame (the GRAY8 → NV24
+conversion before NVENC is software). Compare against your camera's resolution × rate; the jp6 baseline
+runs the identical path, so it is a property of the recorder on this Orin, not of 1.28.
 
-`jp6m` is a platform now (`0195bd6`+). On the vehicle `sudo rig provision --platform jp6m` (it lands in
-`/etc/rig/vehicle.local.yaml`), the same `platform: jp6m` wherever the build host's deployment declares
-this vehicle's platform, then `rig build` (the `-jp6m` set: cam-core, ros2-bridge, webrtc-bridge),
-`rig bake`, ship, `./run.sh up`. cam-up sees `jp6m` and applies the JP6 runtime shape with the bridges on
-unixfd; the four `env:` lines from step 3 go away. Back to the classic stack: `--platform jp6`, rebuild,
-rebake.
+## 6. A/B against the jp6 baseline (15 min)
 
-## 8. Back to the baseline, and what to keep
+Keep the jp6 artifact extracted beside this one. `./rig down` here, `sudo rig provision --platform jp6`,
+`./run.sh up` in the jp6 artifact, `./rig new-run baseline`, and take the same lines and numbers: encoder,
+transport (`shm+header`), timestamp source, frames / drops, topic Hz, latency percentiles, CPU. Then back:
+`./rig down`, `--platform jp6m`, `./run.sh up` here.
 
-Remove the appended `env:` block from `/etc/rig/vehicle.local.yaml` (leave the identity keys), then:
-```bash
-cd $ART && ./rig down <cam> && ./rig up <cam>                    # or ./run.sh up
-./rig status
-```
-Keep: `jp6m-results/` (written where you ran the probe), the `stack-check.sh` output per mode,
-`./rig logs <cam>` per mode, one sidecar `.csv` + `.json` per run, the bit-exact output per mode,
-`docker stats` and a `tegrastats` line per mode, `./rig runs`, and the dashboard's latency line.
-The results table and the decision rule are at the end of
+## 7. Robustness (30 min, optional today)
+
+Camera cable out 20 s and back (reopen lines, session survives), `docker restart $C` (bridges
+reconnect alone), a bridge restart (tile / topic recover), `./rig down <cam> && ./rig up <cam>` under an
+open run, a reboot. Record recovery times.
+
+## 8. Optional: the cdi shape (20 min)
+
+Same images, the JP7 runtime shape on this host: `sudo nvidia-ctk cdi generate --mode=csv
+--output=/etc/cdi/nvidia.yaml` once, then in `/etc/rig/vehicle.local.yaml` an `env:` with
+`CAM_PLATFORM: jp7` (the runc + CDI overlay) and `CAM_IMAGE_TAG: <t>-jp6m` (keeps the pinned tag; the
+jp7 label would otherwise ask for `-jp7` images), `./rig down <cam> && ./rig up <cam>`, step 4 again,
+the bit-exact line with `--device nvidia.com/gpu=all`. Remove the `env:` afterwards.
+
+## 9. Keep
+
+`jp6m-results/`, the `stack-check.sh` output and `./rig logs <cam>` per configuration, one sidecar
+`.csv` + `.json` per run, the bit-exact outputs, `docker stats` + a `tegrastats` line per
+configuration, `./rig runs`, the dashboard's latency line, and `metadata.yaml` of each artifact. The
+results table and the decision rule are at the end of
 [hardware-test-procedure.md](hardware-test-procedure.md).
+
+---
+
+## Appendix — the env-swap route (an artifact baked before the branch)
+
+Images from `1d7faa8`+ pulled or loaded on the vehicle, and in `/etc/rig/vehicle.local.yaml`:
+```yaml
+env:
+  CAM_TRANSPORT: unixfd
+  CAM_CORE_IMAGE: <registry:port>/cam-core:jp6m
+  CAM_WEBRTC_IMAGE: <registry:port>/webrtc-bridge:jp6m
+  CAM_ROS2_IMAGE: <registry:port>/ros2-bridge:jp6m
+```
+then `./rig down <cam> && ./rig pull <cam> && ./rig up <cam>` (through `./rig`, not `run.sh`, whose
+compose-only scripts carry the baked digests). Steps 4–9 as above. Only for an artifact whose vendored
+`cam-up` predates `docker-compose.jp6.yml`; its images must set `NVIDIA_VISIBLE_DEVICES` themselves,
+which `1d7faa8`+ do.
