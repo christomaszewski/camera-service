@@ -6,6 +6,11 @@ starts fine and then can't find its data), and one shape -- a path already insid
 root -- must emit NOTHING, because compose merges volumes by target and a second read-only
 bind there would replace the recordings mount.
 
+And the BAYER LABEL under playback: the bridges' CAM_BAYER / CAM_ROS_ENCODING hint is derived
+from the camera pixel_format, and a `rig replay` config names the source `replay` -- a block with
+no pixel_format -- while the camera's own block is still in the file. It must inherit, and only
+a playback source may.
+
 Run: python3 core-driver/tests/test_sensor_env.py
 """
 import contextlib
@@ -138,6 +143,103 @@ def test_a_yaml_param_cannot_forge_an_input_bind():
                                   "CAM_INPUT_ROOT": "/etc", "CAM_INPUT_DIR": "/etc"}}]
     e = _env(cfg)
     assert e["CAM_INPUT_SRC"] == "./input" and e["CAM_INPUT_DST"] == "/input"
+
+
+# ---- the Bayer label under playback (the rig-replay label regression) -------------------------
+
+def _bridged(cfg):
+    """Both bridges on, as a sensor deployment runs them: the label env is only derived for a
+    config that runs a bridge."""
+    cfg["plugins"] = [{"name": "ros2-bridge", "enabled": True, "isolation": "container",
+                       "params": {"topic": "image_raw"}},
+                      {"name": "webrtc-bridge", "enabled": True, "isolation": "container",
+                       "params": {"port": 8443}}]
+    return cfg
+
+
+def _replay_of(live_block, live, path="/data/recordings/runs/7/recordings/cam"):
+    """A rig-rendered replay config: the instance's own yaml (its live block intact) with
+    `camera.type: replay` + a replay: block patched on top -- what `rig replay`'s overrides
+    (rigging.yaml `replay.source`) produce."""
+    return _bridged({"name": "cam", "camera": {"type": "replay"}, live_block: live,
+                     "replay": {"path": path, "retime": "original", "loop": False}})
+
+
+def test_replay_inherits_the_bayer_label_from_the_live_block():
+    # THE REPLAY-LABEL REGRESSION. rig replay patches camera.type to `replay`; the replay: block
+    # names no pixel_format (the recording's sidecar carries it), and reading only the active
+    # block dropped CAM_BAYER / CAM_ROS_ENCODING to '' -- a color camera replayed as a gray
+    # mosaic on the JP6/dev header transport, its topic mono8 instead of bayer_rggb8.
+    e = _env(_replay_of("gige", {"pixel_format": "BayerRG8", "packet_size": 9000}))
+    assert e["CAM_SOURCE_TYPE"] == "replay"            # still a playback source (the REPLAY chip)
+    assert e["CAM_ROS_ENCODING"] == "bayer_rggb8"
+    assert e["CAM_BAYER"] == "rggb"
+
+
+def test_replay_of_a_16bit_thermal_stays_on_the_mono_path():
+    e = _env(_replay_of("usb", {"pixel_format": "GRAY16_LE", "width": 640, "height": 512}))
+    assert e["CAM_ROS_ENCODING"] == "" and e["CAM_BAYER"] == ""   # mono16 comes off the header
+
+
+def test_replay_of_a_capture_fed_instance_inherits_the_pcap_pin():
+    cfg = _replay_of("pcap", {"path": "/x/thermal.pcapng", "pixel_format": "GRAY16_LE"})
+    e = _env(cfg)
+    assert e["CAM_ROS_ENCODING"] == "" and e["CAM_BAYER"] == ""
+    cfg["pcap"]["pixel_format"] = "BayerGR8"           # not a UVC shape, but the rule is uniform
+    assert _env(cfg)["CAM_BAYER"] == "grbg"
+
+
+def test_replay_with_no_live_block_stays_mono():
+    e = _env(_bridged(_replay("/mnt/archive/run-2026-08-01")))
+    assert e["CAM_ROS_ENCODING"] == "" and e["CAM_BAYER"] == ""
+
+
+def test_a_live_source_never_borrows_another_blocks_format():
+    # An rtsp camera has no pixel_format by design (the format comes off the decoded stream); a
+    # stale gige: block left in the file must not relabel it.
+    e = _env(_bridged({"name": "cam", "camera": {"type": "rtsp"}, "rtsp": {"url": "rtsp://x/y"},
+                       "gige": {"pixel_format": "BayerRG8"}}))
+    assert e["CAM_ROS_ENCODING"] == "" and e["CAM_BAYER"] == ""
+
+
+def test_the_active_playback_blocks_format_wins_over_a_stale_one():
+    e = _env(_bridged({"name": "cam", "camera": {"type": "pcap"},
+                       "pcap": {"path": "t.pcapng", "pixel_format": "GRAY8"},
+                       "gige": {"pixel_format": "BayerRG8"}}))
+    assert e["CAM_ROS_ENCODING"] == "" and e["CAM_BAYER"] == ""
+
+
+def test_disagreeing_source_blocks_take_the_first_and_say_so():
+    cfg = _replay_of("gige", {"pixel_format": "BayerRG8"})
+    cfg["usb"] = {"pixel_format": "GRAY16_LE"}
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        e = _env(cfg)
+    assert e["CAM_BAYER"] == "rggb"
+    assert "disagree" in err.getvalue() and "usb: GRAY16_LE" in err.getvalue()
+
+
+def test_the_stdlib_parser_sees_the_same_file_as_pyyaml():
+    # A vehicle host without PyYAML runs the fallback parser, on the file rig RENDERED -- which
+    # PyYAML dumped, so its plugins list items sit at column 0 ("- name:" flush with `plugins:`),
+    # not indented as a hand-written config has them. The fallback must read that shape (it
+    # used to drop the whole plugins list -> no compose profiles -> no bridges), the playback
+    # block (the input bind -- it used to skip pcap/replay, binding an absolute replay path as
+    # the bare-name input folder) AND the live block (the inherited label): one env from one
+    # file, whichever parser runs. yaml.safe_dump in _env is exactly rig's dump shape.
+    cfg = _replay_of("gige", {"pixel_format": "BayerRG8"}, path="/mnt/archive/run-2026-08-01")
+    with_yaml = _env(cfg)
+    sensor_env._HAVE_YAML = False
+    try:
+        without = _env(cfg)
+    finally:
+        sensor_env._HAVE_YAML = True
+    for k in ("COMPOSE_PROFILES", "CAM_SOURCE_TYPE", "CAM_INPUT_SRC", "CAM_INPUT_DST",
+              "CAM_ROS_TOPIC", "CAM_ROS_ENCODING", "CAM_BAYER", "CAM_SIGNALLING_PORT"):
+        assert without.get(k) == with_yaml.get(k), (k, without.get(k), with_yaml.get(k))
+    assert without["COMPOSE_PROFILES"] == "ros2-bridge,webrtc-bridge"
+    assert without["CAM_BAYER"] == "rggb"
+    assert without["CAM_INPUT_SRC"] == "/mnt/archive/run-2026-08-01"
 
 
 def _main():

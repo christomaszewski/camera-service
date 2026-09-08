@@ -9,6 +9,14 @@
 #   (CFA-tiled runs are un-tiled automatically); stream-copy runs (USB-MJPEG / RTSP)
 #   re-deliver the original bitstream: recording again is byte-faithful.
 #
+# One thing the run does NOT carry to the BRIDGES: the Bayer label. On the JP6/dev frame header a
+# CFA mosaic rides as plain GRAY8, so the ros2/webrtc bridges label (and debayer) it from a launch-
+# time hint cam-up derives from the camera's pixel_format (CAM_ROS_ENCODING / CAM_BAYER,
+# tools/sensor_env.py). A replay: block names none, so cam-up inherits it from the camera's own
+# live block (gige:/usb:) left beside it -- which is what `rig replay` renders (the instance's yaml
+# with `camera.type: replay` patched on top). Keep that block to replay a Bayer camera in color;
+# this bare config has none and stays mono.
+#
 # Run (dev container):
 #   docker run --rm -v "$PWD/core-driver:/app" -v /path/to/data:/replay cam-dev \
 #     python3 main.py -c config/replay.yaml

@@ -68,6 +68,45 @@ def ros_bayer_encoding(pixel_format: str) -> str:
     return "bayer_" + pat + ("16" if any(t in pf for t in ("16", "12", "10")) else "8")
 
 
+_LIVE_BLOCKS = ("gige", "usb", "rtsp")       # a live camera names its pixel_format in its own block
+_PLAYBACK_TYPES = ("pcap", "replay")         # that camera's data, played back from the host
+
+
+def source_pixel_format(cfg, stype):
+    """The camera pixel_format the bridges label the stream with (-> CAM_ROS_ENCODING / CAM_BAYER).
+
+    A LIVE source names it in its own block (rtsp never does: '' -> the mono path; its format
+    comes off the decoded stream). A PLAYBACK source is that camera's data played back: `pcap`
+    pins the format in its own block, but `replay` reads it from the recording's sidecar, so the
+    replay: block has no pixel_format at all -- while the bridges still need the launch-time hint
+    (on the JP6/dev frame header a Bayer mosaic rides as plain GRAY8; only CAM_BAYER /
+    CAM_ROS_ENCODING relabel it -- docs/unixfd-migration.md). `rig replay` renders the instance's
+    OWN yaml with `camera.type: replay` patched on top, so the camera's live block -- and its
+    pixel_format -- is still in the file: a playback block that names no format INHERITS it from
+    the other source blocks (gige/usb/rtsp first, then pcap for a replay of a capture-fed run).
+    Only a playback source inherits, and the active block always wins: a live rtsp camera beside
+    a stale gige: block stays mono, and a pcap pinned GRAY8 is GRAY8 whatever gige: says."""
+    src = cfg.get(stype) or {}
+    pf = str(src.get("pixel_format") or "")
+    if pf or stype not in _PLAYBACK_TYPES:
+        return pf
+    found = []                                   # (block, pixel_format) of every other source block
+    for block in _LIVE_BLOCKS + _PLAYBACK_TYPES:
+        if block == stype:
+            continue
+        other = cfg.get(block) or {}
+        opf = str(other.get("pixel_format") or "") if isinstance(other, dict) else ""
+        if opf:
+            found.append((block, opf))
+    if not found:
+        return ""
+    if len({opf for _, opf in found}) > 1:
+        sys.stderr.write(f"sensor_env: {stype} names no pixel_format and the file's other source "
+                         f"blocks disagree ({', '.join(f'{b}: {p}' for b, p in found)}); labeling "
+                         f"the stream {found[0][1]} ({found[0][0]})\n")
+    return found[0][1]
+
+
 def _scalar(tok):
     """Resolve a YAML scalar the way safe_load would for the value kinds our configs use."""
     t = tok.strip()
@@ -101,9 +140,12 @@ def _decomment(raw):
 
 def _load_fallback(text):
     """Stdlib-only parser for OUR sensor-config subset, used only when PyYAML is absent: top-level
-    `name`, the `camera`/`gige`/`usb`/`rtsp` maps (flat scalars), and a `plugins` list of maps with
-    scalar keys + a nested `params` map. Indent-width agnostic; '#' comments; scalar leaves. NOT general YAML."""
-    cfg = {"name": None, "camera": {}, "gige": {}, "usb": {}, "rtsp": {}, "plugins": []}
+    `name`, the source maps (`camera`/`gige`/`usb`/`rtsp` + the playback `pcap`/`replay`: flat
+    scalars -- `path` drives the input bind, `pixel_format` the bridges' label), and a `plugins`
+    list of maps with scalar keys + a nested `params` map. Indent-width agnostic; '#' comments;
+    scalar leaves. NOT general YAML."""
+    cfg = {"name": None, "camera": {}, "gige": {}, "usb": {}, "rtsp": {}, "pcap": {}, "replay": {},
+           "plugins": []}
     section = None       # current top-level section name
     cur = None           # current plugin map
     key_indent = None    # indent of the current plugin's direct keys
@@ -115,8 +157,11 @@ def _load_fallback(text):
         indent = len(line) - len(line.lstrip())
         s = line.strip()
 
-        if indent == 0:                                  # top-level: a `key:` section, or a scalar
-            cur = None; key_indent = None; in_params = False
+        # A plugins list item may sit at column 0 ("- name: ros2-bridge" flush with `plugins:`):
+        # that is how PyYAML dumps a sequence under a map -- and rig renders every instance
+        # config that way -- while hand-written configs indent it. Both are the same list.
+        if indent == 0 and not (section == "plugins" and s.startswith("- ")):
+            cur = None; key_indent = None; in_params = False   # top-level: a `key:` section, or a scalar
             if s.endswith(":"):
                 section = s[:-1].strip()
             else:
@@ -126,7 +171,8 @@ def _load_fallback(text):
                     cfg["name"] = _scalar(v)
             continue
 
-        if section in ("camera", "gige", "usb", "rtsp"):  # flat scalar keys (type, pixel_format, ...)
+        if section in ("camera",) + _LIVE_BLOCKS + _PLAYBACK_TYPES:   # flat scalar keys (type,
+            #                                                            pixel_format, path, ...)
             k, _, v = s.partition(":")
             if v.strip():
                 cfg[section][k.strip()] = _scalar(v)
@@ -173,8 +219,9 @@ def main() -> int:
     name = str(cfg.get("name") or "camera")
     cam = cfg.get("camera") or {}
     stype = str(cam.get("type") or "gige")           # general `camera.type` selects the source block
-    src = cfg.get(stype) or {}                        # the active source block (gige/usb/rtsp)
-    pixfmt = str(src.get("pixel_format") or "")       # for Bayer derivation (rtsp has none -> '' -> mono path)
+    src = cfg.get(stype) or {}                        # the active source block (gige/usb/rtsp/pcap/replay)
+    pixfmt = source_pixel_format(cfg, stype)          # for Bayer derivation ('' = mono path; a playback
+    #                                                    source inherits the live block's -- see the helper)
     plugins = [p for p in (cfg.get("plugins") or [])
                if isinstance(p, dict) and p.get("name")
                and p.get("enabled", True)
