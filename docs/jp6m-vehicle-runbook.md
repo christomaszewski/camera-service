@@ -24,7 +24,9 @@ pushes `<registry>/<image>:jp6m`; then use those refs in step 4 and `./rig pull 
 ```bash
 docker load < ~/jp6m-images.tar
 docker images | grep -E ":jp6m"                     # cam-core, webrtc-bridge, ros2-bridge
-git clone -b jp6-modern https://github.com/christomaszewski/camera-service ~/camera-service   # only for tools/jp6-modern/*
+# the two scripts: not in the artifact you shipped (they joined the launch surface after it), so copy them
+# from the build host -- or clone the branch if the vehicle has internet
+scp -r camera-service/tools/jp6-modern <vehicle>:~/jp6-modern     # probe.sh + stack-check.sh are bash + docker only
 nvidia-ctk --version                                # >= 1.13
 sudo nvidia-ctk cdi generate --mode=csv --output=/etc/cdi/nvidia.yaml && grep -c hostPath /etc/cdi/nvidia.yaml   # for the cdi rows
 cd $ART && ./rig status                             # the deployment as shipped: router, <cam>, dashboard up
@@ -33,8 +35,7 @@ cd $ART && ./rig status                             # the deployment as shipped:
 ## 3. The probe (15 min) — read this before touching the row
 
 ```bash
-cd ~/camera-service
-tools/jp6-modern/probe.sh --images cam-core:jp6m,webrtc-bridge:jp6m     # csv + cdi
+~/jp6-modern/probe.sh --images cam-core:jp6m,webrtc-bridge:jp6m     # csv + cdi
 cat jp6m-results/summary.txt
 ```
 Per cell, in order: `ldd` unresolved libraries (`ok`), plugin load reasons (no `blacklist` /
@@ -42,7 +43,7 @@ Per cell, in order: `ldd` unresolved libraries (`ok`), plugin load reasons (no `
 `unixfdsink` all `yes`), the two NVENC throughput lines hardware-fast against the `x264enc` baseline,
 `NVENC LOSSLESS PASS`, and `webrtcsink 0.15.3` with `nvv4l2h264enc` in its rankable encoders.
 To see the same probe against the image the artifact pinned (the control row):
-`tools/jp6-modern/probe.sh --images $(docker images --format '{{.Repository}}:{{.Tag}}' | grep cam-core | grep -v jp6m | head -1)`.
+`~/jp6-modern/probe.sh --images $(docker images --format '{{.Repository}}:{{.Tag}}' | grep cam-core | grep -v jp6m | head -1)`.
 
 Decision: csv green → step 4 as written; only cdi green → step 4 with the `CAM_PLATFORM: jp7` line
 from step 7 included from the start; neither green → stop, keep `jp6m-results/`, and read the Triage
@@ -75,7 +76,7 @@ docker ps --format '{{.Names}}\t{{.Image}}' | grep "^<cam>-vehicle-<id>"   # the
 ## 5. Verdicts from the running row (10 min)
 
 ```bash
-~/camera-service/tools/jp6-modern/stack-check.sh $ART/config/sensors/<cam>.yaml --project <cam>-vehicle-<id>
+~/jp6-modern/stack-check.sh $ART/config/sensors/<cam>.yaml --project <cam>-vehicle-<id>
 ./rig logs <cam> | grep -iE "chunk|1588|ptp|timestamp source|encoder=|transport endpoint|health:" | head -20
 ```
 Want, in that output:
@@ -136,7 +137,7 @@ sudo sed -i '/^env:$/,$d' /etc/rig/vehicle.local.yaml            # drop the appe
 cd $ART && ./rig down <cam> && ./rig up <cam>                    # or ./run.sh up
 ./rig status
 ```
-Keep: `~/camera-service/jp6m-results/`, the `stack-check.sh` output per mode, `./rig logs <cam>` per
+Keep: `jp6m-results/` (written where you ran the probe), the `stack-check.sh` output per mode, `./rig logs <cam>` per
 mode, one sidecar `.csv` + `.json` per run, the bit-exact output per mode, `docker stats` and a
 `tegrastats` line per mode, `./rig runs`, and the dashboard's latency line. The results table and the
 decision rule are at the end of [hardware-test-procedure.md](hardware-test-procedure.md).

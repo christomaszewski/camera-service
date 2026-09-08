@@ -79,6 +79,11 @@ launch_surface:                          # the files rig copies to the vehicle (
   - plugins/ros2-source/compose.yml       # a ROS 2 image topic feeding a shm-input instance (same image as ros2-bridge)
   - plugins/ros1-bridge/compose.yml
   - plugins/webrtc-bridge/compose.yml
+  # The jp6m experiment's on-vehicle scripts (docs/jp6m-vehicle-runbook.md): the probe and the
+  # running-stack checker are plain bash + docker, so a bake can carry them next to cam-up.
+  - tools/jp6-modern/probe.sh
+  - tools/jp6-modern/stack-check.sh
+  - tools/jp6-modern/cam-up-jp6m
 
 external_volumes:                        # rig removes these only on FINAL teardown (`rig down --purge`),
   - "cam_{name}_sock"                   #   never on a restart; {name} is the instance name
