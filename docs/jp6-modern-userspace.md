@@ -1,5 +1,8 @@
 # JP6 with a modern userspace — test plan (branch `jp6-modern`)
 
+> The day's full procedure — preflight, today's baseline with the real camera, this experiment,
+> robustness, the rig shape, the write-up — is [hardware-test-procedure.md](hardware-test-procedure.md).
+
 **Question.** Can a JetPack 6 host (L4T r36, Ubuntu 22.04, GStreamer 1.20) run the camera stack in
 **Ubuntu 26.04 containers** — GStreamer **1.28**, gst-plugins-rs **0.15** `webrtcsink` — with the
 host's NVIDIA multimedia stack (`nvvidconv`, `nvv4l2h264enc`, `nvv4l2h265enc`, `nvv4l2decoder`,
