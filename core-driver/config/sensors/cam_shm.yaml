@@ -1,0 +1,44 @@
+# A shared-memory INPUT instance: frames from another process's GStreamer shmsink on this host --
+# a simulator's render, a point-cloud preview service, any pipeline that ends in `shmsink`. The
+# writer owns the socket (in this instance's cam_<name>_sock volume, run with ipc: host); this
+# service is the client and rides the writer's restarts. docs/TRANSPORT.md "Input".
+service: camera-service
+# name: tap                  # the instance name (rig's row supplies it)
+camera:
+  type: shm
+  frame_rate: 10.0           # the caps' framerate for raw framing; informational for header frames
+  reconnect: true            # a writer that restarts is a reconnect, not a fault
+  reconnect_timeout_s: 5.0
+
+shm:
+  socket_path: /tmp/cam/in   # the writer's shmsink socket, inside the socket volume
+  framing: raw               # raw = any video/x-raw shmsink (caps pinned below)
+  #                            header = application/x-cam-frame from a writer with real timestamps
+  #                            unixfd = native caps over the writer's unixfdsink (GStreamer >= 1.24 both
+  #                                     sides / JP7; frame id + capture ns in the buffer offsets)
+  pixel_format: RGB          # PINNED: shm carries bytes only. A frame of another size/format stops
+  width: 640                 #   the service legibly (a reopen cannot fix a config mismatch)
+  height: 480
+
+recording:
+  enabled: true
+  encoder: auto              # ffv1 on hosts without NVENC
+  name_prefix: tap
+  segment_seconds: 60
+
+control:
+  initial_state: inactive    # stream only until activated
+
+preview:
+  enabled: false
+
+transport:
+  plugin_endpoint:
+    enabled: true
+    socket_path: /tmp/cam/frames
+
+plugins:
+  - name: webrtc-bridge
+    enabled: true
+    params:
+      port: 8444             # host networking: one signalling port per instance

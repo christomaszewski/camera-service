@@ -9,6 +9,8 @@ source /ws/install/setup.bash
 # Bounded (~30s) so a never-arriving core doesn't hang us forever -- then start anyway and let GStreamer
 # surface the real error. The socket differs by transport: unixfd (JP7) -> /tmp/cam/unixfd, shm+header
 # (JP6) -> /tmp/cam/frames; mirror the same selection the launch file makes from CAM_PLATFORM/TRANSPORT.
+# ros2-source OWNS its socket (the core is its client): nothing to wait for -- its compose sets CAM_WAIT_SOCKET=0.
+if [ "${CAM_WAIT_SOCKET:-1}" = 0 ]; then exec "$@"; fi
 transport="${CAM_TRANSPORT:-}"
 if [ "$transport" != unixfd ] && [ "$transport" != header ]; then
   [ "${CAM_PLATFORM:-}" = jp7 ] && transport=unixfd || transport=header

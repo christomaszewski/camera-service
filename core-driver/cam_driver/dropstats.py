@@ -37,6 +37,11 @@ class DropStats:
         self._last_fid = frame_id
         return gap
 
+    def resync(self) -> None:
+        """The next frame id is a KNOWN discontinuity (a replay crossing into its next recorded
+        session): expect nothing, count no gap."""
+        self._last_fid = None
+
     def note_enqueue_failure(self) -> None:
         self.enqueue_failures += 1
 
@@ -59,3 +64,11 @@ class DropStats:
             "publish_drops": self.publish_drops,
             "pts_rebases": self.pts_rebases,
         }
+
+    @staticmethod
+    def delta(now: dict, start: dict) -> dict:
+        """Counters accumulated between two summary() snapshots: a recording SESSION's share of the
+        process-lifetime accounting. The process counters never reset -- they are the live link-health
+        signal and must keep seeing gaps while nobody is recording -- so a session attests its own
+        fidelity as the difference between the snapshot taken when it opened and the one at close."""
+        return {k: now[k] - start.get(k, 0) for k in now}

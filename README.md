@@ -12,12 +12,27 @@ on JetPack 6 or 7; portable to Jetson Thor). Capture sources are pluggable behin
   delivered bitstream, RTCP→NTP per-frame timestamps (gst ≥ 1.24), reconnect with re-probe;
   validated on the Orin against a real 4K H.265 camera.
 
+One **input** source turns any other process on the host into a camera:
+- **shm** — frames from another process's GStreamer `shmsink`: any pipeline's raw video (a
+  simulator, a point-cloud preview, another instance's raw endpoint; caps pinned in config, arrival
+  stamps) or the service's own header transport from a writer with real timestamps. The writer
+  owns the socket; the core rides its restarts. See [docs/TRANSPORT.md](docs/TRANSPORT.md).
+
+Two **playback** sources re-run the service against previously captured data (dev/repro/
+roundtrip testing — recording, transport, and every plugin behave as if the camera were live):
+- **replay** — a recorded run (`.mkv` parts + sidecar CSV/JSON): frames come back with their
+  ORIGINAL per-frame stamps and provenance; lossless runs decode bit-exact, stream-copy runs
+  re-deliver the original bitstream. See [`config/replay.yaml`](core-driver/config/replay.yaml).
+- **pcap** — a Wireshark-on-Linux (usbmon) capture of a USB/UVC camera (e.g. a 16-bit thermal
+  core's Y16, or MJPEG), reassembled back into frames with capture-time stamps. See
+  [`config/pcap-thermal.yaml`](core-driver/config/pcap-thermal.yaml).
+
 Whatever the source, the core attaches a **per-frame hardware timestamp** (PTP/chunk on GigE,
 v4l2 SOF on USB, RTCP→NTP on RTSP — with a graceful provenance-tracked fallback ladder),
 records a **lossless, temporally-compressed** video file, and fans the stream out to consumer
 "plugins" (ROS2, ROS1, WebRTC, MQTT, ...).
 
-> **Design & decisions** → [docs/DESIGN.md](docs/DESIGN.md) · **Status & roadmap** → [docs/ROADMAP.md](docs/ROADMAP.md) · **PTP experiment** → [docs/ptp-timestamp-experiment.md](docs/ptp-timestamp-experiment.md) · **JetPack 7 (Orin) bring-up** → [docs/jetpack7-bringup.md](docs/jetpack7-bringup.md)
+> **Design & decisions** → [docs/DESIGN.md](docs/DESIGN.md) · **Status & roadmap** → [docs/ROADMAP.md](docs/ROADMAP.md) · **Lifecycle control (standby/active over Zenoh)** → [docs/LIFECYCLE.md](docs/LIFECYCLE.md) · **PTP experiment** → [docs/ptp-timestamp-experiment.md](docs/ptp-timestamp-experiment.md) · **JetPack 7 (Orin) bring-up** → [docs/jetpack7-bringup.md](docs/jetpack7-bringup.md)
 
 ## Why it's built this way
 
@@ -86,7 +101,8 @@ core-driver/            # the producer service
   main.py               # entry point
   config/camera.yaml    # camera + recording + preview settings
   Dockerfile
-plugins/                # consumer apps: ros2-bridge, ros1-bridge, webrtc-bridge (mqtt-telemetry, ... as examples)
+plugins/                # consumer apps: ros2-bridge, ros1-bridge, webrtc-bridge (mqtt-telemetry, ... as examples);
+                        #   ros2-source is the reverse: a ROS 2 image topic feeding a shm-input instance
 docker-compose.yml
 ```
 
@@ -154,8 +170,66 @@ The chunk-PTP parsing the fake camera *can't* drive is covered by a hardware-fre
 python3 core-driver/tests/test_timestamps.py     # or: pytest core-driver/tests
 ```
 
-(A networked fake — real GVSP, for discovery/packet-path testing — is available as a
-commented `fake-camera` service in `docker-compose.yml`.)
+(A networked fake — real GVSP with chunk data, for discovery/packet-path testing — is the
+patched-Aravis emitter in [`tools/gvsp-chunk-emitter/`](tools/gvsp-chunk-emitter).)
+
+### Playback sources (replay a recording or a pcap)
+
+Previously captured data can drive the whole service — no camera, but *real* frames:
+
+```bash
+# Replay a recorded run (mkv parts + sidecar): original stamps/provenance, optional
+# re-record (lossless runs roundtrip bit-exact -- that's what replay_test.sh asserts):
+docker run --rm -v "$PWD/core-driver:/app" -v /path/to/run:/replay cam-dev \
+  python3 main.py -c config/replay.yaml
+
+# Replay a Wireshark/usbmon capture of a USB (UVC) camera -- e.g. a Y16 thermal core:
+docker run --rm -v "$PWD/core-driver:/app" -v /path/to/captures:/input cam-dev \
+  python3 main.py -c config/pcap-thermal.yaml
+```
+
+**Through `cam-up`** the input mount is derived from the config -- no `-v` to remember. A
+playback source (`camera.type: pcap` or `replay`) makes cam-up apply
+[`docker-compose.input.yml`](docker-compose.input.yml), which binds the data in **read-only**.
+The path in the YAML picks the shape:
+
+```yaml
+pcap:
+  path: /data/captures/thermal.pcapng   # ABSOLUTE -> bound to ITSELF (host path == container
+  #                                       path), so one path is true on both sides and `rig bake`
+  #                                       leaves it literal. Same self-mapping as the usb overlay.
+  path: thermal.pcapng                  # BARE NAME -> resolved under the deployment's input
+  #                                       FOLDER, so the config travels between boxes unchanged.
+```
+
+For a bare name the folder comes from **`CAM_INPUT_DIR`** (an absolute host path is self-mapped;
+unset falls back to `./input` -> `/input`, the mount point above):
+
+```bash
+CAM_INPUT_DIR=/data/captures ./cam-up config/sensors/cam_thermal_pcap.yaml up
+```
+
+A `replay.path` already inside the data root (`/data/recordings`, or `$RIG_DATA_DIR`) needs no
+extra mount -- the base compose already binds that root read-write, so cam-up leaves it alone
+rather than shadowing it with a read-only bind.
+
+Both pace to the data's own timestamps (`speed`, `loop`, `retime: wall` knobs) and fail
+legibly — the pcap parser can even tell you the camera's real format/geometry when the config
+mismatches, if the capture includes the device enumeration. A `replay` plays **every session**
+a run directory holds for the instance (one per lifecycle activate), in timeline order with
+the recorded gaps between them; `replay.run` pins one. At end-of-data the recording
+finalizes and the process either **holds** (keys served, `restart` accepted — the default
+whenever the control plane is on, so a run rig brought up does not exit-and-restart under
+compose) or exits 0 (`playback.on_finish: exit`, the bare-tool shape; `loop: true` makes a
+long-lived fake camera for plugin development either way). The `playback:` block also
+places a replay on a *shared* timeline — `initial_state: paused` + `start_at_unix_s` (a
+release gate every producer of a replay gets), `epoch_unix_ns` (the zero the bag player
+counts from), `from_s`/`to_s` (a window) — see [docs/PLAYBACK.md](docs/PLAYBACK.md)
+"Timeline". A playback source feeds the recording through *blocking* appsrcs, so `speed: 0`
+(as fast as the pipeline drains) is lossless: the reader waits for the encoder instead of
+dropping. One caveat: a run containing a recorded gap longer than 60 s replays with that gap
+collapsed in the re-recorded `pts_ns` (the PTS guard treats a larger forward step as a
+clock-source change; the sidecar keeps the true stamps).
 
 ### Dev container (run the producer without a Jetson)
 
@@ -252,6 +326,57 @@ Docker Compose **profiles**, and brings up that sensor's stack:
 ./core-driver/tools/supervisor_test.sh   # validate the in-image supervisor path
 ```
 
+### Standby / active (lifecycle control)
+
+The camera streams to consumers in **either** state; a transition switches the lossless **recorder**,
+which runs as a *session* with its own run prefix + sidecar (`<prefix>-00000.mkv` + `.csv/.json`),
+finalized on every deactivate — any number of times per process. `control.initial_state` picks the
+boot state (`active`, the default: record from the first frame; `inactive`: standby until told); a
+**crash restart resumes the last commanded state**, a clean stop forgets it. Local control needs
+nothing but signals (the supervisor forwards them to the core):
+
+```bash
+docker kill -s USR1 <core container>     # activate: open a recording session
+docker kill -s USR2 <core container>     # deactivate: finalize it (files closed within ~5 s)
+```
+
+Sessions are named `<prefix>-<UTCstamp>` (an orchestrator's `run_id` is folded in), a stream-copy
+H.264/H.265 session waits for the next keyframe before muxing (attested as
+`session.skipped_awaiting_keyframe` in the JSON), and the JSON sidecar carries the session's own
+counters (`session.*`) beside the drop summary — which is the session's *delta* of the process
+counters. See [DESIGN.md](docs/DESIGN.md) ("Lifecycle") and `control:` in
+[camera.example.yaml](core-driver/config/sensors/camera.example.yaml).
+
+**Over Zenoh** ([docs/LIFECYCLE.md](docs/LIFECYCLE.md) — the contract the dashboard / orchestrator
+binds to; any rig service can implement the same keys): presence (a liveliness token) + the state
+descriptor at `fleet/<VEHICLE_ID>/svc/<name>/lifecycle`, transitions via a `get` on
+`…/lifecycle/change_state` with `{"transition": "activate"}` (the reply comes when the files are
+closed), and every transition published on `…/lifecycle/state`. The core's session is a **peer**:
+it connects to the vehicle's `rmw_zenohd` when there is one (`ZENOH_CONNECT`, default
+`tcp/localhost:7447`) and scouts a stock `zenohd` otherwise — it also runs with **no router at all**,
+and a router that comes up later gets linked within seconds. Best-effort by construction: no binding
+or no router means signals only, never a stopped camera.
+
+```bash
+# from any host with the python binding, e.g. the dev container: `python3 -c ...` or the probe
+python3 core-driver/tools/lifecycle_probe.py --connect tcp/<vehicle>:7447 --steps wait-put get activate wait-state:active
+```
+
+### Playback control (pcap / replay sources)
+
+A source that plays a recording back is controllable at runtime over the **same** zenoh session
+([docs/PLAYBACK.md](docs/PLAYBACK.md)): presence + descriptor at `fleet/<VEHICLE_ID>/svc/<name>/playback`
+(state `playing | paused | finished`, `speed`, `loop`, `cycle`, `position_s`), requests via a `get` on
+`…/playback/control` with `{"op": "pause" | "resume" | "set_speed" | "set_loop" | "restart", …}`, and
+every change (plus ~1 Hz position while playing) on `…/playback/state`. A finished replay holds and
+accepts `restart`; the descriptor also says which session of the run is playing (`source_path`,
+`session`/`sessions`) and the timeline zero (`epoch_unix_ns`). **A live camera never
+declares these keys** — the capability is advertised, not inferred from `source:` in the media
+descriptor — so a viewer offers playback controls exactly where there is playback to control.
+Recording is independent: pausing playback while a session is active simply records nothing (no gap
+is written, because nothing was played); `speed` changes how fast frames reach the recorder, not the
+file; `restart` records the data again from its start into the same session.
+
 ## Status & roadmap
 
 - [x] **P0** project scaffold + container
@@ -275,14 +400,24 @@ Docker Compose **profiles**, and brings up that sensor's stack:
   **JetPack 7 bring-up** ✅ (JP7.2 Orin: CDI injection, `unixfd` transport shipped —
   [docs/jetpack7-bringup.md](docs/jetpack7-bringup.md)); disk-full + NVENC session budget next, then
   Thor portability (`nvunixfd` zero-copy, sm_110 is Thor-only).
+- [x] **P6** lifecycle control plane — **standby/active with a per-session recorder** (`inactive` boots
+  streaming-only; SIGUSR1/SIGUSR2 open and finalize recording sessions; a crash restart resumes the last
+  commanded state) and the **zenoh control plane** ([docs/LIFECYCLE.md](docs/LIFECYCLE.md):
+  `fleet/<vehicle>/svc/<instance>/lifecycle…`, peer mode, no router required). Validated in containers —
+  [`lifecycle_test.sh`](core-driver/tools/lifecycle_test.sh) incl. router-less zenoh round-trips; the
+  `rmw_zenohd` + dashboard path is the remaining on-vehicle check.
 
 ### Testing tools (no Jetson, no camera)
 The data path is validated by actually running it in containers — including the **real Aravis
 chunk-parse path** via a patched chunk-emitting GV camera:
 - [core-driver/tools/dev_test.sh](core-driver/tools/dev_test.sh) — producer: capture → timestamp → encoder-fallback probe → FFV1 → shm
-- [core-driver/tools/usb_test.sh](core-driver/tools/usb_test.sh) — USB source: raw, **MJPEG stream-copy** (dual-output), and color/FFV1 paths
+- [core-driver/tools/lifecycle_test.sh](core-driver/tools/lifecycle_test.sh) — **standby/active lifecycle**: boot `inactive` (consumers fed, nothing recorded) → SIGUSR1/SIGUSR2 recording sessions as finalized runs (threshold-split segments, CSV rows, self-attesting JSON) → KILL + restart resumes `active`; then the **zenoh control plane with no router** (presence, descriptor, `change_state` round-trips, state publications, DELETE on stop — the probe stands in for a router)
+- [core-driver/tools/usb_test.sh](core-driver/tools/usb_test.sh) — USB source: raw, **MJPEG stream-copy** (dual-output), color/FFV1, and a mid-stream **H.264 session gated to its first keyframe**
 - [core-driver/tools/rtsp_test.sh](core-driver/tools/rtsp_test.sh) — RTSP source: local fake server → stream-copy record + **RTCP→NTP provenance** (CSV-checked)
 - [core-driver/tools/rtsp_reconnect_test.sh](core-driver/tools/rtsp_reconnect_test.sh) — RTSP stall/recovery: kill + restart the server, assert detect → reopen → frames resume
+- [core-driver/tests/test_replay_source.py](core-driver/tests/test_replay_source.py) — **the replay source over a fabricated run** (dev container: real FFV1 parts + sidecars, the real reader, a fake consumer): sessions in timeline order with the gap capped / verbatim under an epoch, the window, the paused boot's one preview frame, restart from the end, shape refusal, provenance
+- [core-driver/tools/replay_test.sh](core-driver/tools/replay_test.sh) — **replay source roundtrips**: record (GRAY8/GRAY16 FFV1, MJPEG stream-copy) → replay → re-record; sidecar CSV **identical**, frames/bitstream **bit-identical**
+- [core-driver/tools/pcap_test.sh](core-driver/tools/pcap_test.sh) — **pcap source**: synthetic usbmon capture (known Y16 ramps + noise/ERR/truncated URBs) → full service → recording **bit-exact** with the capture's timestamps
 - [plugins/ros2-bridge/tools/bridge_test.sh](plugins/ros2-bridge/tools/bridge_test.sh) — full chain → ROS2 raw + compressed `Image`
 - [core-driver/tools/supervisor_test.sh](core-driver/tools/supervisor_test.sh) — supervisor spawn / manage / clean teardown
 - [tools/gvsp-chunk-emitter/gvsp_test.sh](tools/gvsp-chunk-emitter) — **real GVSP + chunk-timestamp extraction** (patched Aravis fake camera)

@@ -49,6 +49,7 @@ def _supervisor(services):
     sup.services = services
     sup._stopping = False
     sup._exit_rc = 0
+    sup._playback = False
     return sup
 
 
@@ -75,6 +76,24 @@ def test_unexpectedly_clean_core_exit_is_still_a_failure():
     # The core returning 0 on its own means it stopped without being asked to -- the sensor is dead
     # either way, and reporting success would tell compose/rig that nothing is wrong.
     sup = _supervisor([_dead_core(0)])
+    sup._monitor()
+    assert sup._exit_rc == 1
+
+
+def test_finished_playback_is_a_clean_exit():
+    # A replay/pcap core is FINITE: it exits 0 on its own when the data runs out and the recording
+    # has finalized. That is the sensor's success, not its death -- the plugins are still torn down,
+    # but the status must not read as a failure (rig status would otherwise show a dead sensor).
+    sup = _supervisor([_dead_core(0)])
+    sup._playback = True
+    sup._monitor()
+    assert sup._exit_rc == 0
+
+
+def test_playback_core_dying_midway_is_still_a_failure():
+    # ...while a playback that died before end-of-data keeps its own non-zero status.
+    sup = _supervisor([_dead_core(1)])
+    sup._playback = True
     sup._monitor()
     assert sup._exit_rc == 1
 

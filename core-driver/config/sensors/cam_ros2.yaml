@@ -1,0 +1,51 @@
+# A ROS 2 image topic as a camera: the ros2-source plugin subscribes to `topic` and feeds this
+# shm-input instance (plugins/ros2-source/README.md). Everything downstream is the live-camera path
+# -- recording, WebRTC preview, discovery, replay. The `shm:` block is the single source of truth:
+# the writer converts every frame to the pinned format and framing, the core checks them.
+service: camera-service
+# name: front_ros            # the instance name (rig's row supplies it)
+camera:
+  type: shm
+  frame_rate: 15.0           # the caps' framerate (raw / unixfd); informational for header frames
+  reconnect: true
+  reconnect_timeout_s: 5.0
+
+shm:
+  socket_path: /tmp/cam/in   # owned by the ros2-source container, in this instance's socket volume
+  framing: header            # header = the topic's header.stamp travels as the capture time
+  #                            raw    = the core stamps on arrival (any host)
+  #                            unixfd = native caps over unixfdsink (GStreamer >= 1.24 both sides / JP7)
+  pixel_format: RGB          # PINNED: frames are converted to this. Bayer{RG,GR,GB,BG}8 keeps a mosaic
+  width: 640
+  height: 480
+
+recording:
+  enabled: true
+  encoder: auto
+  name_prefix: front_ros
+  segment_seconds: 60
+
+control:
+  initial_state: inactive
+
+preview:
+  enabled: false
+
+transport:
+  plugin_endpoint:
+    enabled: true
+    socket_path: /tmp/cam/frames
+
+plugins:
+  - name: ros2-source
+    enabled: true
+    isolation: container
+    params:
+      topic: /front/image_raw   # absolute topic name on the vehicle graph
+      # compressed: true        # the topic is sensor_msgs/CompressedImage (jpeg / png)
+      # qos: sensor             # sensor (best effort, default) | reliable
+  - name: webrtc-bridge
+    enabled: true
+    isolation: container
+    params:
+      port: 8445               # host networking: one signalling port per instance

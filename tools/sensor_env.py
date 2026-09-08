@@ -40,6 +40,8 @@ _ENV_KEY = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 _RESERVED_KEYS = {
     "COMPOSE_PROJECT_NAME", "COMPOSE_PROFILES", "CAM_INSTANCE", "CAM_SOCK_VOLUME",
     "CAM_SOURCE_TYPE", "CAM_DEVICE", "CAM_CONFIG", "CAM_NETWORK", "CAM_PLATFORM",
+    "CAM_INPUT_SRC", "CAM_INPUT_DST", "CAM_INPUT_ROOT", "CAM_INPUT_DIR",   # the playback input
+    #                              bind -- a YAML param must never be able to mount a host path
     "PATH", "HOME", "SHELL", "IFS", "TMPDIR", "PYTHONPATH", "LD_LIBRARY_PATH", "LD_PRELOAD",
 }
 _RESERVED_PREFIXES = ("RIG_",)   # rig-owned host facts (data dir, image tag) -- never per-sensor YAML
@@ -64,6 +66,45 @@ def ros_bayer_encoding(pixel_format: str) -> str:
         return ""
     pf = pixel_format or ""
     return "bayer_" + pat + ("16" if any(t in pf for t in ("16", "12", "10")) else "8")
+
+
+_LIVE_BLOCKS = ("gige", "usb", "rtsp")       # a live camera names its pixel_format in its own block
+_PLAYBACK_TYPES = ("pcap", "replay")         # that camera's data, played back from the host
+
+
+def source_pixel_format(cfg, stype):
+    """The camera pixel_format the bridges label the stream with (-> CAM_ROS_ENCODING / CAM_BAYER).
+
+    A LIVE source names it in its own block (rtsp never does: '' -> the mono path; its format
+    comes off the decoded stream). A PLAYBACK source is that camera's data played back: `pcap`
+    pins the format in its own block, but `replay` reads it from the recording's sidecar, so the
+    replay: block has no pixel_format at all -- while the bridges still need the launch-time hint
+    (on the JP6/dev frame header a Bayer mosaic rides as plain GRAY8; only CAM_BAYER /
+    CAM_ROS_ENCODING relabel it -- docs/unixfd-migration.md). `rig replay` renders the instance's
+    OWN yaml with `camera.type: replay` patched on top, so the camera's live block -- and its
+    pixel_format -- is still in the file: a playback block that names no format INHERITS it from
+    the other source blocks (gige/usb/rtsp first, then pcap for a replay of a capture-fed run).
+    Only a playback source inherits, and the active block always wins: a live rtsp camera beside
+    a stale gige: block stays mono, and a pcap pinned GRAY8 is GRAY8 whatever gige: says."""
+    src = cfg.get(stype) or {}
+    pf = str(src.get("pixel_format") or "")
+    if pf or stype not in _PLAYBACK_TYPES:
+        return pf
+    found = []                                   # (block, pixel_format) of every other source block
+    for block in _LIVE_BLOCKS + _PLAYBACK_TYPES:
+        if block == stype:
+            continue
+        other = cfg.get(block) or {}
+        opf = str(other.get("pixel_format") or "") if isinstance(other, dict) else ""
+        if opf:
+            found.append((block, opf))
+    if not found:
+        return ""
+    if len({opf for _, opf in found}) > 1:
+        sys.stderr.write(f"sensor_env: {stype} names no pixel_format and the file's other source "
+                         f"blocks disagree ({', '.join(f'{b}: {p}' for b, p in found)}); labeling "
+                         f"the stream {found[0][1]} ({found[0][0]})\n")
+    return found[0][1]
 
 
 def _scalar(tok):
@@ -99,9 +140,12 @@ def _decomment(raw):
 
 def _load_fallback(text):
     """Stdlib-only parser for OUR sensor-config subset, used only when PyYAML is absent: top-level
-    `name`, the `camera`/`gige`/`usb`/`rtsp` maps (flat scalars), and a `plugins` list of maps with
-    scalar keys + a nested `params` map. Indent-width agnostic; '#' comments; scalar leaves. NOT general YAML."""
-    cfg = {"name": None, "camera": {}, "gige": {}, "usb": {}, "rtsp": {}, "plugins": []}
+    `name`, the source maps (`camera`/`gige`/`usb`/`rtsp` + the playback `pcap`/`replay`: flat
+    scalars -- `path` drives the input bind, `pixel_format` the bridges' label), and a `plugins`
+    list of maps with scalar keys + a nested `params` map. Indent-width agnostic; '#' comments;
+    scalar leaves. NOT general YAML."""
+    cfg = {"name": None, "camera": {}, "gige": {}, "usb": {}, "rtsp": {}, "pcap": {}, "replay": {},
+           "plugins": []}
     section = None       # current top-level section name
     cur = None           # current plugin map
     key_indent = None    # indent of the current plugin's direct keys
@@ -113,8 +157,11 @@ def _load_fallback(text):
         indent = len(line) - len(line.lstrip())
         s = line.strip()
 
-        if indent == 0:                                  # top-level: a `key:` section, or a scalar
-            cur = None; key_indent = None; in_params = False
+        # A plugins list item may sit at column 0 ("- name: ros2-bridge" flush with `plugins:`):
+        # that is how PyYAML dumps a sequence under a map -- and rig renders every instance
+        # config that way -- while hand-written configs indent it. Both are the same list.
+        if indent == 0 and not (section == "plugins" and s.startswith("- ")):
+            cur = None; key_indent = None; in_params = False   # top-level: a `key:` section, or a scalar
             if s.endswith(":"):
                 section = s[:-1].strip()
             else:
@@ -124,7 +171,8 @@ def _load_fallback(text):
                     cfg["name"] = _scalar(v)
             continue
 
-        if section in ("camera", "gige", "usb", "rtsp"):  # flat scalar keys (type, pixel_format, ...)
+        if section in ("camera",) + _LIVE_BLOCKS + _PLAYBACK_TYPES:   # flat scalar keys (type,
+            #                                                            pixel_format, path, ...)
             k, _, v = s.partition(":")
             if v.strip():
                 cfg[section][k.strip()] = _scalar(v)
@@ -171,8 +219,9 @@ def main() -> int:
     name = str(cfg.get("name") or "camera")
     cam = cfg.get("camera") or {}
     stype = str(cam.get("type") or "gige")           # general `camera.type` selects the source block
-    src = cfg.get(stype) or {}                        # the active source block (gige/usb/rtsp)
-    pixfmt = str(src.get("pixel_format") or "")       # for Bayer derivation (rtsp has none -> '' -> mono path)
+    src = cfg.get(stype) or {}                        # the active source block (gige/usb/rtsp/pcap/replay)
+    pixfmt = source_pixel_format(cfg, stype)          # for Bayer derivation ('' = mono path; a playback
+    #                                                    source inherits the live block's -- see the helper)
     plugins = [p for p in (cfg.get("plugins") or [])
                if isinstance(p, dict) and p.get("name")
                and p.get("enabled", True)
@@ -192,6 +241,38 @@ def main() -> int:
     # CAM_DEVICE to apply docker-compose.usb.yml (gige/rtsp need no device, so it's absent for them).
     if stype == "usb" and not src.get("fake", False):
         env["CAM_DEVICE"] = str(src.get("device", "/dev/video0"))
+    # A playback source (pcap/replay) reads its data from the host -- cam-up reads CAM_INPUT_SRC to
+    # apply docker-compose.input.yml. Two shapes, matching config.resolve_input_path:
+    #   ABSOLUTE path in the config -> bind that exact path to ITSELF (host == container), so the
+    #     config names one true path and `rig bake` leaves it literal. Same self-mapping trick as
+    #     the usb device overlay, and for the same reason: no host probing, no readlink at bake.
+    #   BARE/relative name -> bind the deployment's input FOLDER; only the folder is
+    #     deployment-specific, so the config stays portable. Host side from CAM_INPUT_DIR (dev
+    #     default ./input); container side is that same path when it's absolute (self-mapped
+    #     again), else /input -- the mount point the README has always documented by hand.
+    # Pure string work: whether the path EXISTS is a runtime fact on the target, never probed here.
+    if stype in ("pcap", "replay"):
+        ipath = str(src.get("path") or "").strip()
+        if ipath.startswith("/"):
+            # ALREADY COVERED? The data root is bind-mounted read-write by the base compose
+            # (${RIG_DATA_DIR:-./recordings} -> ${RIG_DATA_DIR:-/data/recordings}), and the
+            # documented replay shape (`replay.path: /data/recordings`) points straight into it.
+            # Compose merges volumes BY TARGET, so a second, read-only bind on that same target
+            # REPLACES the first -- which would both flip the recordings dir read-only (breaking a
+            # replay that re-records) and swap its host side to a path that need not exist. Emit
+            # nothing and let the existing mount serve it.
+            droot = (os.environ.get("RIG_DATA_DIR") or "/data/recordings").strip().rstrip("/")
+            if ipath == droot or ipath.startswith(droot + "/"):
+                pass
+            else:
+                # Self-pinned: no input ROOT is exported, because none is consulted -- an absolute
+                # config path resolves to itself. Leaving CAM_INPUT_ROOT unset keeps the
+                # container's CAM_INPUT_DIR empty rather than showing a "root" that is really a file.
+                env["CAM_INPUT_SRC"] = env["CAM_INPUT_DST"] = ipath
+        else:
+            idir = (os.environ.get("CAM_INPUT_DIR") or "").strip().rstrip("/")
+            env["CAM_INPUT_SRC"] = idir or "./input"
+            env["CAM_INPUT_DST"] = env["CAM_INPUT_ROOT"] = idir if idir.startswith("/") else "/input"
 
     ros = by_name.get("ros2-bridge") or by_name.get("ros1-bridge")   # same topic/frame_id/encoding/debayer params
     if ros is not None:
@@ -232,6 +313,24 @@ def main() -> int:
             except (TypeError, ValueError):
                 sys.stderr.write(f"sensor_env: zenoh_shm_pool_size {pool!r} is not a byte count; "
                                  "not deriving CAM_ROS2_SHM_SIZE\n")
+
+    # ros2-source: a ROS 2 image topic FEEDING this (camera.type: shm) instance. Everything but the
+    # topic comes from the core's own `shm:` block, so the writer and the reader cannot disagree.
+    rs = by_name.get("ros2-source")
+    if rs is not None:
+        shm = cfg.get("shm") or {}
+        if stype != "shm":
+            sys.stderr.write(f"sensor_env: ros2-source feeds a `camera.type: shm` instance; this config's "
+                             f"camera.type is {stype!r} -- the core will not read what it writes\n")
+        env["CAM_SOURCE_TOPIC"] = str(rs.get("topic", "image_raw"))
+        env["CAM_SOURCE_TRANSPORT"] = str(shm.get("framing", "raw")).strip().lower()
+        env["CAM_SOURCE_SOCKET"] = str(shm.get("socket_path", "/tmp/cam/in"))
+        env["CAM_SOURCE_FORMAT"] = str(shm.get("pixel_format", "RGB"))
+        env["CAM_SOURCE_WIDTH"] = str(shm.get("width", 640))
+        env["CAM_SOURCE_HEIGHT"] = str(shm.get("height", 480))
+        env["CAM_SOURCE_FPS"] = str(cam.get("frame_rate", 10))
+        env["CAM_SOURCE_COMPRESSED"] = "true" if rs.get("compressed", False) else "false"
+        env["CAM_SOURCE_QOS"] = str(rs.get("qos", "sensor"))
 
     web = by_name.get("webrtc-bridge")
     if web is not None:

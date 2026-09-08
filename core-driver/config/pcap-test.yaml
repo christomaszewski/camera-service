@@ -1,0 +1,34 @@
+# Test config: replay a SYNTHETIC usbmon capture of a fake Y16 thermal camera
+# (tests/uvcpcap_fixture.py writes /tmp/test.pcap) and record it. Used by
+# tools/pcap_test.sh: the FFV1 recording must decode bit-exact to the fixture's
+# known ramp frames and the sidecar CSV must carry the capture's timestamps.
+camera:
+  type: pcap
+
+pcap:
+  path: /tmp/test.pcap
+  pixel_format: GRAY16_LE
+  width: 64
+  height: 48
+  speed: 20                  # 20x realtime: quick, but still paced so the recorder's
+  #                            queue never overflows (a drop would break the exact
+  #                            timestamp comparison the test asserts)
+
+recording:
+  enabled: true
+  encoder: ffv1              # explicit: CPU + robust in the dev image (no NVENC)
+  name_prefix: pcaptest
+  segment_seconds: 30
+
+preview:
+  enabled: false
+
+transport:
+  plugin_endpoint:
+    enabled: true
+    socket_path: /tmp/cam/frames
+  raw_endpoint:
+    enabled: false
+    socket_path: /tmp/cam/raw
+
+plugins: []

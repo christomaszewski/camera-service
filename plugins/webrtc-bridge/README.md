@@ -66,8 +66,9 @@ by the I420 conversion). *How* the bridge decides differs by transport:
   `bayer2rgb`. A **wrong** pattern only mis-tints the preview — it cannot crash negotiation the way
   the raw-shm static front-end could. 16-bit formats ignore `CAM_BAYER` (no 16-bit `bayer2rgb`).
 - **raw shm (legacy): decided from config.** Raw shm carries no caps, so the config is the only
-  truth: `CAM_BAYER` non-empty (sensor_env derives it from the camera `pixel_format`) labels the
-  stream `video/x-bayer` and statically inserts `bayer2rgb`.
+  truth: `CAM_BAYER` non-empty (sensor_env derives it from the camera `pixel_format`; a `replay`/
+  `pcap` source inherits the live block's, so a replayed Bayer camera previews in color on the
+  header and raw-shm paths too) labels the stream `video/x-bayer` and statically inserts `bayer2rgb`.
 
 ## Why a sibling container (not in-image)
 

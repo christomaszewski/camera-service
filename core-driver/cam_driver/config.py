@@ -4,14 +4,14 @@ Unknown keys in the YAML are ignored (with the dataclass defaults applied) so th
 config file can carry forward-looking knobs without breaking older code.
 
 Schema (symmetric across source types):
-  camera:   GENERAL settings + `type` (gige|usb|rtsp) -> selects the source frontend.
-  gige:/usb:/rtsp:   the SELECTED source's specifics.
+  camera:   GENERAL settings + `type` (gige|usb|rtsp|replay|pcap) -> selects the source frontend.
+  gige:/usb:/rtsp:/replay:/pcap:   the SELECTED source's specifics.
 The `camera.frame_rate` + reconnect knobs are general; parse_config overlays them onto the active
 source's effective config, so the source code reads them from its own block while the YAML sets them
 ONCE under `camera:`.
 
-One file, two consumers: the `camera`/`<source>`/`recording`/`preview`/`transport` sections drive the
-core pipeline; the `plugins` list is for the per-sensor supervisor / cam-up (spawns each enabled plugin).
+One file, two consumers: the `camera`/`<source>`/`recording`/`preview`/`transport`/`control` sections
+drive the core pipeline; the `plugins` list is for the per-sensor supervisor / cam-up (spawns each enabled plugin).
 """
 from __future__ import annotations
 
@@ -40,7 +40,8 @@ class CameraConfig:
     specifics live in the matching gige:/usb:/rtsp: block. frame_rate + the reconnect knobs are general
     -- parse_config overlays them onto the active source's config (the source reads them from its own
     block; the YAML sets them once here)."""
-    type: str = "gige"                       # gige (GVSP/Aravis) | usb (v4l2) | rtsp
+    type: str = "gige"                       # gige (GVSP/Aravis) | usb (v4l2) | rtsp |
+    #                                          replay (recorded run) | pcap (usbmon capture)
     frame_rate: Optional[float] = None       # target/delivered fps: gige requests it, usb pins it, rtsp informational
     # Reconnect/backoff: recover from a source dropping/stalling without dying or corrupting the recording
     # -- the pipeline stays up while a watchdog re-opens the source (gige: control-lost/no-buffer; usb:
@@ -117,6 +118,82 @@ class RtspConfig:
     frame_rate: float = 30.0          # informational; the stream sets the real rate
     reconnect: bool = True            # auto-recover a stalled stream (camera ACKs PLAY then streams no media)
     reconnect_timeout_s: float = 5.0
+
+
+SHM_FRAMINGS = ("raw", "header", "unixfd")
+
+
+@dataclass
+class ShmConfig:
+    """Same-host shared-memory INPUT (camera.type == shm): frames from another process's GStreamer
+    `shmsink` -- ANY pipeline's raw video (framing: raw -- a simulator's render, a point-cloud
+    preview, another instance's raw endpoint), or the service's own header transport
+    (framing: header, `application/x-cam-frame`) from a writer that owns real per-frame timestamps.
+    The WRITER owns the socket; the core is the client and rides its restarts (docs/TRANSPORT.md)."""
+    socket_path: str = "/tmp/cam/in"   # in the instance's socket volume; the writer runs with ipc: host
+    framing: str = "raw"               # raw = video/x-raw, caps pinned below | header = self-stamped |
+    #                                    unixfd = native caps over the writer's unixfdsink (GStreamer >= 1.24
+    #                                    on BOTH sides: JP7); frame id / capture ns ride buffer.offset /
+    #                                    offset_end like the core's own unixfd output, else arrival stamps
+    pixel_format: str = "RGB"          # GStreamer raw format (or Aravis-style Mono8/BayerRG8). PINNED:
+    #                                    shm carries bytes only, so raw frames take these caps; header
+    #                                    frames are CHECKED against them (a mismatch is a legible stop)
+    width: int = 640
+    height: int = 480
+
+    # General settings overlay slot (set under `camera:`); parse_config overlays them here.
+    frame_rate: float = 10.0           # the caps' framerate (raw); informational for header frames
+    reconnect: bool = True             # the writer comes and goes: reopen on data starvation / bus error
+    reconnect_timeout_s: float = 5.0
+
+
+@dataclass
+class ReplayConfig:
+    """Recorded-run playback source (camera.type == replay): re-run the service against a run
+    THIS service previously recorded (<prefix>-NNNNN.mkv parts + <prefix>.csv/.json sidecar).
+    Frames are re-delivered with their sidecar-recorded per-frame stamps (provenance intact),
+    so plugins/recording downstream behave as if the original camera were live."""
+    path: str = ""                # a run directory (EVERY session inside plays, in timeline order),
+    #                               or one session's prefix path (<dir>/<prefix>-<stamp>)
+    run: str = ""                 # pin one session's prefix when `path` is a dir holding several
+    # The silence between two sessions is the recorded gap -- capped here so a directory that
+    # accumulated runs over days does not wait days between them. 0 = verbatim. Forced verbatim
+    # when playback.epoch_unix_ns places the replay on a shared timeline (a collapsed gap would
+    # put every later session in the wrong place against the bag).
+    gap_max_s: float = 5.0
+    speed: float = 1.0            # pacing: 1.0 = realtime by sidecar timestamps, 2.0 = 2x,
+    #                               0 = as fast as the pipeline drains (tests / batch reprocess)
+    loop: bool = False            # restart at EOF, shifting timestamps to stay monotonic
+    retime: str = "original"      # original = faithful historical stamps | wall = rebase the run
+    #                               onto NOW at start (live consumers see fresh timestamps)
+    decoder: str = "auto"         # consumer decode branch for stream-copy runs: auto | software
+
+    # General settings overlay slot (set under `camera:`); replay derives its real rate from the
+    # sidecar, so frame_rate here only overrides the derived value when explicitly set.
+    frame_rate: Optional[float] = None
+
+
+@dataclass
+class PcapConfig:
+    """usbmon-capture playback source (camera.type == pcap): replay a Wireshark-on-Linux pcap/
+    pcapng of a USB (UVC) camera -- e.g. a 16-bit thermal core (uncompressed Y16 -> GRAY16_LE)
+    or an MJPEG webcam. pixel_format/width/height are pinned here exactly like a real UVC cam;
+    the reassembled frames are validated against them (mismatch = a legible startup error)."""
+    path: str = ""                    # the .pcap/.pcapng file
+    pixel_format: str = "GRAY16_LE"   # raw (GRAY16_LE/GRAY8/YUY2/...) or MJPEG
+    width: int = 640
+    height: int = 512
+    # usbmon stream pin; None = auto-detect the busiest UVC-looking IN endpoint. Partial pins
+    # (e.g. just device:) constrain the auto-detection.
+    bus: Optional[int] = None
+    device: Optional[int] = None
+    endpoint: Optional[int] = None
+    speed: float = 1.0                # pacing by capture timestamps (see ReplayConfig.speed)
+    loop: bool = False
+    retime: str = "original"          # original | wall (see ReplayConfig.retime)
+
+    # General settings overlay slot; the capture's own timing sets the real rate.
+    frame_rate: Optional[float] = None
 
 
 @dataclass
@@ -196,15 +273,74 @@ class PluginConfig:
     params: dict = field(default_factory=dict)   # plugin-specific (e.g. ROS params); consumed by the supervisor
 
 
+LIFECYCLE_STATES = ("active", "inactive")
+PLAYBACK_STATES = ("playing", "paused")
+PLAYBACK_ON_FINISH = ("auto", "hold", "exit")
+
+
+@dataclass
+class PlaybackConfig:
+    """Runtime playback policy shared by the playback sources (camera.type == replay | pcap): how
+    playback STARTS, where its timeline ZERO is, and what happens at the END (docs/PLAYBACK.md).
+    The per-source blocks (replay:/pcap:) keep what is about the DATA -- path, speed, loop, retime;
+    this block is about the run an orchestrator composes several producers into."""
+    initial_state: str = "playing"    # playing | paused (hold the first frame until `resume` or the gate below)
+    # Release gate: resume itself at this wall instant. rig hands every producer of a replay the same
+    # one, so N cameras and a bag player start together instead of at their own container start.
+    start_at_unix_s: Optional[float] = None
+    # Timeline zero shared with sibling producers (the bag's start): frame k is released
+    # (ts_k - epoch)/speed after playback starts, WHEREVER the first recorded frame sits -- a session
+    # recorded 10 min into the run comes out 10 min after release, where the bag is. None = the
+    # data's own first stamp (playback starts on frame 0, the pre-epoch behaviour). Frames before
+    # the epoch are skipped (they are before the shared zero).
+    epoch_unix_ns: Optional[int] = None
+    from_s: Optional[float] = None    # window: skip frames before epoch + from_s
+    to_s: Optional[float] = None      # window: finish at epoch + to_s (exclusive)
+    # At end-of-data: hold = stay up, keys served, `restart` accepted (an orchestrated run, where a
+    # 0-exit under compose `restart: unless-stopped` would just start over) | exit = finalize + exit 0
+    # (the bare `python3 main.py` tool) | auto = hold iff the control plane is enabled, i.e. iff
+    # something could ever restart it.
+    on_finish: str = "auto"
+
+
+@dataclass
+class ControlConfig:
+    """Lifecycle control: the state the core BOOTS into, how a restart remembers it, and the zenoh
+    control plane that switches it at runtime (docs/LIFECYCLE.md). The camera streams to consumers in
+    EITHER state; what a transition switches is the high-fidelity recorder (a recording SESSION with
+    its own prefix + sidecar). SIGUSR1 (activate) / SIGUSR2 (deactivate) on the core process always
+    work too, control plane or not."""
+    # active   = record from the first frame -- today's behaviour, and the default so every existing
+    #            config is unchanged. inactive = stream only; the recorder waits for an activate.
+    #            A `recording.enabled: false` config boots inactive regardless (nothing can activate it).
+    initial_state: str = "active"
+    # A CRASH restart resumes the last commanded state (kept in a file in the socket volume, which
+    # outlives the container); a graceful stop forgets it, so `down`/`up` boots from initial_state.
+    resume_state: bool = True
+    state_file: str = ""      # default: <dir of transport.plugin_endpoint.socket_path>/lifecycle.state
+    # The zenoh control plane: presence + state + change_state at fleet/<VEHICLE_ID>/svc/<CAM_INSTANCE>/
+    # lifecycle. Best-effort -- a missing binding or an unreachable router never stops capture.
+    enabled: bool = True
+    # Zenoh endpoints to connect to, comma-separated; "" = multicast scouting only. None (unset) defers
+    # to the ZENOH_CONNECT env, then tcp/localhost:7447 (the vehicle's rmw_zenohd). A stock zenohd /
+    # zenoh-bridge-remote-api on the same segment is also found by scouting, router or not.
+    zenoh_connect: Optional[str] = None
+
+
 @dataclass
 class AppConfig:
     camera: CameraConfig = field(default_factory=CameraConfig)   # GENERAL settings + source `type`
     gige: GigeConfig = field(default_factory=GigeConfig)         # gige source params
     usb: UsbConfig = field(default_factory=UsbConfig)            # usb source params
     rtsp: RtspConfig = field(default_factory=RtspConfig)         # rtsp source params
+    shm: ShmConfig = field(default_factory=ShmConfig)            # shared-memory INPUT params
+    replay: ReplayConfig = field(default_factory=ReplayConfig)   # recorded-run playback params
+    pcap: PcapConfig = field(default_factory=PcapConfig)         # usbmon-capture playback params
     recording: RecordingConfig = field(default_factory=RecordingConfig)
     preview: PreviewConfig = field(default_factory=PreviewConfig)
     transport: TransportConfig = field(default_factory=TransportConfig)
+    control: ControlConfig = field(default_factory=ControlConfig)
+    playback: PlaybackConfig = field(default_factory=PlaybackConfig)   # start / timeline / end policy
     plugins: list = field(default_factory=list)   # list[PluginConfig], for the plugin supervisor
 
 
@@ -270,15 +406,40 @@ def parse_config(raw: dict) -> AppConfig:
     gige.roi = _build(ROI, roi_raw) if roi_raw else None
     usb = _build(UsbConfig, raw.get("usb"))
     rtsp = _build(RtspConfig, raw.get("rtsp"))
+    shm = _build(ShmConfig, raw.get("shm"))
+    shm.framing = str(shm.framing or "raw").strip().lower()
+    if shm.framing not in SHM_FRAMINGS:
+        raise ValueError(f"shm.framing: expected one of {SHM_FRAMINGS}, got {shm.framing!r}")
+    if not shm.socket_path:
+        raise ValueError("shm.socket_path: required for camera.type: shm (the writer's shmsink socket)")
+    replay = _build(ReplayConfig, raw.get("replay"))
+    pcap = _build(PcapConfig, raw.get("pcap"))
+    # Playback knobs that would otherwise fail late or silently: a negative speed is meaningless
+    # (0 = as fast as the pipeline drains), and an unset pcap path surfaced as a bare
+    # FileNotFoundError('') deep in the parser instead of naming the knob.
+    for block, sc in (("replay", replay), ("pcap", pcap)):
+        if sc.speed < 0:
+            raise ValueError(f"{block}.speed: must be >= 0 (0 = as fast as the pipeline drains), "
+                             f"got {sc.speed!r}")
+    if replay.gap_max_s < 0:
+        raise ValueError(f"replay.gap_max_s: must be >= 0 (0 = play recorded gaps verbatim), "
+                         f"got {replay.gap_max_s!r}")
+    if camera.type == "pcap" and not pcap.path:
+        raise ValueError("pcap.path: required for camera.type: pcap (the .pcap/.pcapng file to replay)")
 
     # Overlay the GENERAL camera settings onto each source's effective config -- the source code reads
     # frame_rate/reconnect from its own block, but the YAML sets them ONCE under `camera:`. frame_rate
-    # only overrides when actually given (else each source keeps its sensible default).
-    for sc in (gige, usb, rtsp):
+    # only overrides when actually given (else each source keeps its sensible default). The playback
+    # sources (replay/pcap) derive their rate from the recorded data and never reconnect, so only the
+    # frame_rate override slot applies to them.
+    for sc in (gige, usb, rtsp, shm):
         if camera.frame_rate is not None:
             sc.frame_rate = camera.frame_rate
         sc.reconnect = camera.reconnect
         sc.reconnect_timeout_s = camera.reconnect_timeout_s
+    for sc in (replay, pcap):
+        if camera.frame_rate is not None:
+            sc.frame_rate = camera.frame_rate
 
     defaults = TransportConfig()
     tr_raw = dict(raw.get("transport", {}) or {})
@@ -302,16 +463,60 @@ def parse_config(raw: dict) -> AppConfig:
             isolation=str(p.get("isolation", "process")),
             params={**flat, **nested}))
 
+    control = _build(ControlConfig, raw.get("control"))
+    # _coerce only checks numeric fields; a typo'd state would otherwise boot the wrong way silently.
+    control.initial_state = str(control.initial_state or "active").strip().lower()
+    if control.initial_state not in LIFECYCLE_STATES:
+        raise ValueError(f"ControlConfig.initial_state: expected one of {LIFECYCLE_STATES}, "
+                         f"got {control.initial_state!r}")
+
+    pb = _build(PlaybackConfig, raw.get("playback"))
+    pb.initial_state = str(pb.initial_state or "playing").strip().lower()
+    if pb.initial_state not in PLAYBACK_STATES:
+        raise ValueError(f"playback.initial_state: expected one of {PLAYBACK_STATES}, "
+                         f"got {pb.initial_state!r}")
+    pb.on_finish = str(pb.on_finish or "auto").strip().lower()
+    if pb.on_finish not in PLAYBACK_ON_FINISH:
+        raise ValueError(f"playback.on_finish: expected one of {PLAYBACK_ON_FINISH}, got {pb.on_finish!r}")
+    if pb.from_s is not None and pb.from_s < 0:
+        raise ValueError(f"playback.from_s: must be >= 0 (seconds from the epoch), got {pb.from_s!r}")
+    if pb.to_s is not None and pb.to_s <= (pb.from_s or 0):
+        raise ValueError(f"playback.to_s: must be > from_s ({pb.from_s or 0}), got {pb.to_s!r}")
+
     return AppConfig(
         camera=camera,
         gige=gige,
         usb=usb,
         rtsp=rtsp,
+        shm=shm,
+        replay=replay,
+        pcap=pcap,
         recording=_build(RecordingConfig, raw.get("recording")),
         preview=_build(PreviewConfig, raw.get("preview")),
         transport=transport_cfg,
+        control=control,
+        playback=pb,
         plugins=plugins,
     )
+
+
+def hold_on_finish(cfg: AppConfig) -> bool:
+    """Whether a finished playback keeps the process up (docs/PLAYBACK.md `finished`): explicit
+    hold/exit, else hold exactly when the control plane could restart it."""
+    if cfg.playback.on_finish == "hold":
+        return True
+    if cfg.playback.on_finish == "exit":
+        return False
+    return bool(cfg.control.enabled)
+
+
+def lifecycle_state_file(cfg: AppConfig) -> str:
+    """Where the last commanded lifecycle state is remembered across a crash restart: next to the
+    transport sockets by default (the external per-sensor socket volume outlives the container)."""
+    if cfg.control.state_file:
+        return cfg.control.state_file
+    sock_dir = os.path.dirname(cfg.transport.plugin_endpoint.socket_path) or "/tmp/cam"
+    return os.path.join(sock_dir, "lifecycle.state")
 
 
 def resolve_recording_dir(output_dir: str, rig_data_dir: str = "", instance: str = "") -> str:
@@ -376,6 +581,34 @@ def resolve_recording_dir(output_dir: str, rig_data_dir: str = "", instance: str
                     "layout instead", output_dir, base)
     inst = (instance or "").strip()
     return f"{base}/{inst}" if inst else base
+
+
+def resolve_input_path(path: str, input_dir: str = "") -> str:
+    """Resolve a playback source's input path (pcap.path / replay.path) for a deploy.
+
+    Semantics follow the SHAPE of the path, mirroring resolve_recording_dir -- no magic values:
+      ""        -> "" (untouched; camera.type: pcap already errors on an unset path at load)
+      absolute  -> a VERBATIM pin. cam-up bind-mounts that exact host path into the core at the
+                   SAME path (docker-compose.input.yml), so the config names ONE path that is
+                   true on the host and in the container, and a `rig bake` leaves it literal
+                   instead of pulling a host layout into the deployment artifact.
+      relative  -> resolved under the input mount: <input_dir>/<path>. A bare `thermal.pcapng`
+                   is the common shape -- the capture is one of several in a shared captures
+                   directory, and only the FOLDER is deployment-specific.
+
+    cam-up exports CAM_INPUT_DIR into the container as the container-side path of that mount
+    (/input by default, or the host dir self-mapped when CAM_INPUT_DIR is an absolute host path).
+    Without it -- a bare `docker run` -- a relative path falls back to /input, which is the mount
+    point the README and config/pcap-thermal.yaml have always documented by hand.
+
+    No filesystem probing here: existence is a RUNTIME fact on the target (the source fails
+    legibly naming the resolved path), never a bake-box probe -- same rule as the usb device
+    overlay."""
+    p = (path or "").strip()
+    if not p or p.startswith("/"):
+        return p
+    root = (input_dir or "").strip().rstrip("/") or "/input"
+    return f"{root}/{p}"
 
 
 def unique_run_prefix(output_dir: str, name_prefix: str, _now=None) -> str:

@@ -1,0 +1,30 @@
+# Test config: LOOP the newest run in /data/recordings as fast as the pipeline drains and
+# re-record it. Used by tools/replay_test.sh stage 5: frame ids repeat per cycle, so the
+# re-recorded pts_ns must still be strictly monotonic (the PTS memo is keyed on the stamp,
+# not the id alone), and speed: 0 must be lossless (blocking recording appsrcs).
+camera:
+  type: replay
+
+replay:
+  path: /data/recordings
+  speed: 0                   # as fast as the pipeline drains -- the reader waits for the encoder
+  loop: true                 # ...forever; the test stops it with SIGINT after a few cycles
+
+recording:
+  enabled: true
+  encoder: auto
+  name_prefix: rerec
+  segment_seconds: 30
+
+preview:
+  enabled: false
+
+transport:
+  plugin_endpoint:
+    enabled: true
+    socket_path: /tmp/cam/frames
+  raw_endpoint:
+    enabled: false
+    socket_path: /tmp/cam/raw
+
+plugins: []

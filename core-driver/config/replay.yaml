@@ -1,0 +1,66 @@
+# Recorded-run playback: re-run the service against a run it previously recorded --
+# at-desk repro of field captures, plugin/bridge development against real data, and
+# lossless roundtrip testing. The replay source reads the run's .mkv parts + sidecar
+# CSV/JSON and re-delivers every frame with its ORIGINAL stamp (frame_id, timestamps,
+# provenance), so recording/transport/plugins downstream behave as if the camera were live.
+#
+# The recorded codec/geometry/format all come from the run itself -- nothing to configure:
+#   lossless runs (ffv1 / hevc-lossless) decode back to the exact recorded bytes
+#   (CFA-tiled runs are un-tiled automatically); stream-copy runs (USB-MJPEG / RTSP)
+#   re-deliver the original bitstream: recording again is byte-faithful.
+#
+# One thing the run does NOT carry to the BRIDGES: the Bayer label. On the JP6/dev frame header a
+# CFA mosaic rides as plain GRAY8, so the ros2/webrtc bridges label (and debayer) it from a launch-
+# time hint cam-up derives from the camera's pixel_format (CAM_ROS_ENCODING / CAM_BAYER,
+# tools/sensor_env.py). A replay: block names none, so cam-up inherits it from the camera's own
+# live block (gige:/usb:) left beside it -- which is what `rig replay` renders (the instance's yaml
+# with `camera.type: replay` patched on top). Keep that block to replay a Bayer camera in color;
+# this bare config has none and stays mono.
+#
+# Run (dev container):
+#   docker run --rm -v "$PWD/core-driver:/app" -v /path/to/data:/replay cam-dev \
+#     python3 main.py -c config/replay.yaml
+# Or with the full stack: point replay.path under your RIG_DATA_DIR and use cam-up as usual.
+camera:
+  type: replay
+
+replay:
+  path: /replay              # a run directory (EVERY session inside plays, in timeline order,
+  #                            with the recorded gaps between them) or one session's prefix path
+  #                            like /replay/cam-20260827-041627
+  # run: cam-20260827-041627 # pin a single session when the directory holds several
+  # gap_max_s: 5             # cap the silence between sessions (0 = the recorded gap verbatim;
+  #                            always verbatim under playback.epoch_unix_ns)
+  speed: 1.0                 # 1.0 = realtime by the sidecar timestamps; 2.0 = 2x; 0 = as
+  #                            fast as the pipeline drains (batch reprocessing -- note the
+  #                            recorder may drop frames if it can't keep up at 0)
+  loop: false                # keep replaying (timestamps shifted to stay monotonic) --
+  #                            useful as a long-lived fake camera for plugin development
+  retime: original           # original = faithful historical stamps | wall = rebase the
+  #                            run onto NOW at start (live consumers see fresh timestamps)
+
+playback:                    # how playback STARTS / where its timeline ZERO is / what the END does
+  on_finish: exit            #   hold (stay up, keys served, `restart` accepted -- what an orchestrated
+  #                            run wants; the default whenever the control plane is enabled) | exit
+  #                            (exit 0 at end-of-data: this bare-tool config) | auto
+#   initial_state: paused    #   playing (default) | paused: hold the first frame until `resume`
+#   start_at_unix_s: 1757240100.0   # ...or until this wall instant (a release gate an orchestrator
+#                            #   hands every producer of a replay, so they start together)
+#   epoch_unix_ns: 1757240100000000000  # the timeline zero shared with sibling producers (the bag's
+#                            #   start): frames are released (ts - epoch)/speed after release,
+#                            #   wherever the first recorded one sits; earlier frames are skipped.
+#                            #   Unset = the run's own first frame.
+#   from_s: 0                #   window on that timeline: skip before from_s, finish at to_s
+#   to_s: 600
+
+recording:
+  enabled: false             # flip on to re-record the replay (lossless roundtrip testing);
+  #                            output_dir/name_prefix work as for any camera
+  name_prefix: replay
+
+transport:
+  plugin_endpoint:
+    enabled: true            # plugins (ros2/webrtc/...) consume the replay like a live camera
+    socket_path: /tmp/cam/frames
+
+plugins: []
