@@ -114,6 +114,11 @@ COPY --from=l4t /l4t/usr/lib/aarch64-linux-gnu/ /usr/lib/aarch64-linux-gnu/
 # the CSV/CDI-mounted nvv4l2* plugins resolve inside a plain Ubuntu base (HW encode in webrtcsink).
 RUN printf '/usr/lib/aarch64-linux-gnu/nvidia\n/usr/lib/aarch64-linux-gnu/tegra\n/usr/lib/aarch64-linux-gnu/tegra-egl\n' > /etc/ld.so.conf.d/nvidia-tegra.conf \
     && ldconfig
+# The nvidia runtime in CSV mode (JetPack 6) injects drivers + device nodes ONLY into a container that
+# asks: NVIDIA_VISIBLE_DEVICES must be set (NVIDIA's l4t-base image sets both of these; a plain Ubuntu
+# base does not, and then `--runtime nvidia` is silently plain runc -- measured on an R36.4.4 Orin:
+# no libraries, no /dev/v4l2-nvenc). Inert under CDI (JP7) and on a box without the runtime (dev).
+ENV NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=all
 ENV GST_PLUGIN_PATH=/usr/local/lib/gstreamer-1.0 \
     LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib/x86_64-linux-gnu:/usr/local/lib/aarch64-linux-gnu:/usr/lib/aarch64-linux-gnu/nvidia:/usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra-egl
 

@@ -10,12 +10,20 @@
 #
 # Not for the dev platform (a bench box has no such nodes: compose would refuse to create the
 # container) and not for JP7, whose CDI spec carries the nodes.
+# And the runtime only injects into a container that asks: NVIDIA_VISIBLE_DEVICES must be set (the
+# images set it since 6ace926+; a plain-Ubuntu image without it gets plain runc under `runtime: nvidia`).
 services:
   core-driver:
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
     devices:
       - /dev/v4l2-nvenc:/dev/v4l2-nvenc
       - /dev/v4l2-nvdec:/dev/v4l2-nvdec
   webrtc-bridge:
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
     devices:
       - /dev/v4l2-nvenc:/dev/v4l2-nvenc
       - /dev/v4l2-nvdec:/dev/v4l2-nvdec

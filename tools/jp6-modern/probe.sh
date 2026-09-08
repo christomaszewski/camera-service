@@ -127,6 +127,7 @@ line "os: $(. /etc/os-release; echo "$PRETTY_NAME") glibc $(ldd --version | head
 line "gstreamer: $(gst-inspect-1.0 --version | head -1)"
 line "nvidia dir (r36): $(ls /usr/lib/aarch64-linux-gnu/nvidia 2>/dev/null | wc -l) libs; tegra dir (r35): $(ls /usr/lib/aarch64-linux-gnu/tegra 2>/dev/null | wc -l) libs; ld.so.conf lists them: $(grep -rsE 'nvidia|tegra' /etc/ld.so.conf.d/ >/dev/null && echo yes || echo NO)"
 line "ldcache has nvbufsurface: $(ldconfig -p 2>/dev/null | grep -c nvbufsurface)"
+line "runtime asked (NVIDIA_VISIBLE_DEVICES): ${NVIDIA_VISIBLE_DEVICES:-UNSET -- the CSV runtime injects nothing}"
 line "devices: $(ls /dev/nvhost-msenc /dev/nvhost-nvdec /dev/nvhost-vic /dev/v4l2-nvenc /dev/v4l2-nvdec /dev/nvmap 2>/dev/null | tr '\n' ' ')"
 line "nv plugins in container: $(ls /usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstnv*.so /opt/hostnv/gst/libgstnv*.so 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')"
 line ""
@@ -178,9 +179,11 @@ INNER
 
 for mode in ${MODES//,/ }; do
   case "$mode" in
-    csv) RT=(--runtime nvidia) ;;
+    # the CSV-mode runtime injects only into a container that asks (NVIDIA_VISIBLE_DEVICES); a plain
+    # Ubuntu image does not ask by itself, so every runtime mode says it here
+    csv) RT=(--runtime nvidia -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=all) ;;
     cdi) RT=(--device nvidia.com/gpu=all) ;;
-    hostlibs) RT=(--runtime nvidia); while IFS= read -r x; do RT+=("$x"); done < <(hostlibs_args) ;;
+    hostlibs) RT=(--runtime nvidia -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=all); while IFS= read -r x; do RT+=("$x"); done < <(hostlibs_args) ;;
     none) RT=() ;;
   esac
   case "$mode" in

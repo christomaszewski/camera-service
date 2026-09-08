@@ -254,6 +254,16 @@ add the two nodes to the host's `devices.csv` before generating the spec:
 `printf 'dev, /dev/v4l2-nvenc\ndev, /dev/v4l2-nvdec\n' | sudo tee -a /etc/nvidia-container-runtime/host-files-for-container.d/devices.csv`
 then `sudo nvidia-ctk cdi generate --mode=csv --output=/etc/cdi/nvidia.yaml`.
 
+### Third probe: the runtime injects only into a container that asks
+
+The same host-libs run with the codec nodes present in `devices.csv` still had no `/dev/v4l2-nvenc`
+in the container. The CSV-mode nvidia runtime injects **only when `NVIDIA_VISIBLE_DEVICES` is set** in
+the container; NVIDIA's `l4t-base` sets it (so the baseline core inherits it), a plain Ubuntu base
+does not, and `--runtime nvidia` then behaves like plain runc — which is what the very first probe
+saw (no libraries at all) and why the plain-Ubuntu webrtc bridge never had NVENC on JP6. Both
+Dockerfiles now set `NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=all` (inert under CDI and
+on dev), `docker-compose.jp6.yml` sets them too, and the probe passes them in every runtime mode.
+
 ## Under a rig deployment (a baked artifact on the vehicle)
 
 The wrapper is for a bare checkout. Inside a rig deployment the same switch is four `env:` lines in

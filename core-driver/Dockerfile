@@ -102,6 +102,11 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1
 RUN pip3 install --no-cache-dir eclipse-zenoh==1.9.0
 
 # Make the locally-installed Aravis typelib + libs + gst plugin discoverable (Jetson = aarch64).
+# The nvidia runtime in CSV mode (JetPack 6) injects drivers + device nodes ONLY into a container that
+# asks: NVIDIA_VISIBLE_DEVICES must be set (NVIDIA's l4t-base image sets both of these; a plain Ubuntu
+# base does not, and then `--runtime nvidia` is silently plain runc -- measured on an R36.4.4 Orin:
+# no libraries, no /dev/v4l2-nvenc). Inert under CDI (JP7) and on a box without the runtime (dev).
+ENV NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=all
 ENV GI_TYPELIB_PATH=/usr/local/lib/aarch64-linux-gnu/girepository-1.0:/usr/lib/aarch64-linux-gnu/girepository-1.0 \
     LD_LIBRARY_PATH=/usr/local/lib/aarch64-linux-gnu:/usr/local/lib:/usr/lib/aarch64-linux-gnu/nvidia:/usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra-egl \
     GST_PLUGIN_PATH=/usr/local/lib/aarch64-linux-gnu/gstreamer-1.0
