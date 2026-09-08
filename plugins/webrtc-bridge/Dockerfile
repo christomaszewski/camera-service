@@ -15,6 +15,18 @@ ARG GST_RS_TAG=0.13.7
 ARG L4T_MULTIMEDIA=
 ARG L4T_VERSION=
 
+# Pinned Rust toolchain + cargo-c (+ --locked): unpinned, this build broke in the field with NO repo
+# change (2026-06-10, fresh JP6 host): rustup grabbed the just-released stable and an UNLOCKED
+# `cargo install cargo-c` resolved a fresh dep set whose `time` crate fails trait coherence inside
+# cargo-credential ("conflicting implementations of trait `From<...HourBase>`") -- while hosts with
+# cached builder layers kept working on the frozen old toolchain. --locked builds cargo-c with the
+# dep set it shipped with; the pins make the layer deterministic. Bump the PAIR together, deliberately.
+# (Verified on arm64: rustc 1.96.0 + cargo-c 0.10.23 --locked build clean; gst-plugin-webrtc 0.13.7's
+# MSRV is 1.71, so the toolchain pin has wide headroom. gst-plugins-rs itself ships a Cargo.lock, so
+# its dep set was already reproducible -- the install steps here were the only float.)
+ARG RUST_TOOLCHAIN=1.96.0
+ARG CARGO_C_VER=0.10.23
+
 # ---- l4t: JetPack 6's multimedia + GStreamer plugin layer, EXTRACTED from NVIDIA's apt repo ----
 # On a JP6 host the nvidia runtime injects drivers + device nodes only (drivers.csv / devices.csv);
 # the multimedia libraries (NvBufSurface, libnvv4l2 + the v4l2 codec plugin, libnvtvmr ...) and the
@@ -40,18 +52,6 @@ RUN mkdir -p /l4t/usr/lib/aarch64-linux-gnu \
          && ls | grep -vE '^libgst(nvvidconv|nvvideo4linux2|nvjpeg|nvunixfd|nvtee|nvcompositor)\.so$' | xargs -r rm -f \
          && rm -rf /l4t/usr/share /l4t/etc /l4t/usr/bin /l4t/opt /l4t/usr/src /l4t/usr/include /l4t/var; \
        fi
-
-# Pinned Rust toolchain + cargo-c (+ --locked): unpinned, this build broke in the field with NO repo
-# change (2026-06-10, fresh JP6 host): rustup grabbed the just-released stable and an UNLOCKED
-# `cargo install cargo-c` resolved a fresh dep set whose `time` crate fails trait coherence inside
-# cargo-credential ("conflicting implementations of trait `From<...HourBase>`") -- while hosts with
-# cached builder layers kept working on the frozen old toolchain. --locked builds cargo-c with the
-# dep set it shipped with; the pins make the layer deterministic. Bump the PAIR together, deliberately.
-# (Verified on arm64: rustc 1.96.0 + cargo-c 0.10.23 --locked build clean; gst-plugin-webrtc 0.13.7's
-# MSRV is 1.71, so the toolchain pin has wide headroom. gst-plugins-rs itself ships a Cargo.lock, so
-# its dep set was already reproducible -- the install steps here were the only float.)
-ARG RUST_TOOLCHAIN=1.96.0
-ARG CARGO_C_VER=0.10.23
 
 # ---- builder: compile gst-plugin-webrtc + the signalling server (Rust) ----
 FROM ${BASE_IMAGE} AS builder
