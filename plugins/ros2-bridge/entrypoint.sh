@@ -13,7 +13,7 @@ source /ws/install/setup.bash
 if [ "${CAM_WAIT_SOCKET:-1}" = 0 ]; then exec "$@"; fi
 transport="${CAM_TRANSPORT:-}"
 if [ "$transport" != unixfd ] && [ "$transport" != header ]; then
-  [ "${CAM_PLATFORM:-}" = jp7 ] && transport=unixfd || transport=header
+  case "${CAM_PLATFORM:-}" in jp7|jp6m) transport=unixfd;; *) transport=header;; esac   # jp6m: a 1.28 core on a JP6 host
 fi
 default_sock="/tmp/cam/frames"; [ "$transport" = unixfd ] && default_sock="/tmp/cam/unixfd"
 sock="${CAM_TRANSPORT_SOCKET:-${CAM_SHM_SOCKET:-$default_sock}}"

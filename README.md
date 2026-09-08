@@ -294,6 +294,7 @@ Docker Compose **profiles**, and brings up that sensor's stack:
 
 ```bash
 ./cam-up config/sensors/cam_a.yaml          # Jetson: auto-detects JP6 (l4t/nvidia) or JP7 (runc/CDI), host net
+./cam-up --jp6m config/sensors/cam_a.yaml   # JP6 host on the 26.04 userspace (GStreamer 1.28, unixfd; docs/jp6-modern-userspace.md)
 ./cam-up --dev config/sensors/cam_a.yaml    # no Jetson (laptop/CI): cam-dev core, no NVIDIA
 ./cam-up config/sensors/cam_a.yaml down     # tear it down
 ```

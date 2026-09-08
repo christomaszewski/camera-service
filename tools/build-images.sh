@@ -84,7 +84,7 @@ case "$VARIANT" in
   jp6m) BASE_IMAGE="${BASE_IMAGE:-ubuntu:26.04}"
         WEBRTC_BASE="${WEBRTC_BASE:-ubuntu:26.04}"
         GST_RS_TAG="${GST_RS_TAG:-0.15.3}"
-        IMAGES="${IMAGES:-cam-core cam-dev ros2-bridge webrtc-bridge}" ;;
+        IMAGES="${IMAGES:-cam-core ros2-bridge webrtc-bridge}" ;;   # cam-dev:jp6m (the bench row) on request: IMAGES=cam-dev
   *)   BASE_IMAGE="${BASE_IMAGE:-ubuntu:24.04}"
        IMAGES="${IMAGES:-cam-core ros2-bridge webrtc-bridge}" ;;
 esac
@@ -132,6 +132,10 @@ case "$VARIANT" in
        echo "  export CAM_REGISTRY=$REGISTRY"
        echo "  ./cam-up --dev config/sensors/<sensor>.yaml pull"
        echo "  ./cam-up --dev config/sensors/<sensor>.yaml up -d" ;;
+  jp6m) echo "On a JP6 vehicle provisioned for the modern userspace (rig provision --platform jp6m):"
+        echo "  export CAM_REGISTRY=$REGISTRY"
+        echo "  ./cam-up --jp6m config/sensors/<sensor>.yaml pull"
+        echo "  ./cam-up --jp6m config/sensors/<sensor>.yaml up -d" ;;
   *)   echo "On a JP$([ "$VARIANT" = jp6 ] && echo 6 || echo 7) vehicle (after cloning the repo there):"
        echo "  export CAM_REGISTRY=$REGISTRY"
        echo "  ./cam-up config/sensors/<sensor>.yaml pull"

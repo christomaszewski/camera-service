@@ -292,9 +292,12 @@ env:
 This is what the bench deployment runs (`playback/viewer/vehicle.yaml`). The step-by-step is
 [hardware-test-procedure.md](hardware-test-procedure.md).
 
-## If it is green: what productizing looks like
+## Productized: `jp6m` is a platform
 
-A real `jp6m` platform in `cam-up` (`--jp6m`; auto-detect stays jp6 — a host has to ask for it),
-in `rigging.yaml` `platform` / `build.platforms`, and in the bridges' transport selection (`unixfd`
-for jp7 **or** jp6m). `tools/build-images.sh` already knows the variant. Until then everything here
-runs through the wrapper and the existing `--jp6` / `--jp7` shapes.
+`cam-up --jp6m` / `CAM_PLATFORM=jp6m` / `RIG_TARGET_PLATFORM=jp6m`: the JP6 runtime shape
+(`docker-compose.jp6.yml`), 26.04 build bases with gst-plugins-rs 0.15, `-jp6m` image tags, and the
+bridges expecting `unixfd`. `rigging.yaml` lists it in `build.platforms`, so under rig it is one host
+fact: `sudo rig provision --platform jp6m` on the vehicle (and `platform: jp6m` wherever the build
+host's deployment declares that vehicle's platform), then `rig build` builds the `-jp6m` set,
+`rig bake` pins it, `./run.sh up` runs it — no `env:` swap. Auto-detect still says jp6 on an R36 host;
+a host has to ask for jp6m. Back to the classic stack: `--platform jp6`, rebuild, rebake.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cam-up [--dev|--jp6|--jp7] <sensor-config.yaml> [docker-compose subcommand + args...]
+# cam-up [--dev|--jp6|--jp6m|--jp7] <sensor-config.yaml> [docker-compose subcommand + args...]
 #
 # Bring up ONE GigE sensor's stack from ONE config (the single source of truth). Reads the
 # config, turns its enabled `isolation: container` plugins into compose profiles, parameterizes
@@ -43,11 +43,13 @@ while :; do case "${1:-}" in
   --dev) PLATFORM=dev; shift;;   # non-Jetson bench box: cam-dev + runc + bridge net (DEV is derived below)
   --jp7) PLATFORM=jp7; shift;;   # force JetPack 7 (Orin): runc + the CDI NVENC device overlay
   --jp6) PLATFORM=jp6; shift;;   # force JetPack 6: l4t base + nvidia runtime (CSV mounts)
+  --jp6m) PLATFORM=jp6m; shift;; # JetPack 6 host, MODERN userspace: 26.04 images (GStreamer 1.28, gst-plugins-rs
+                                 #   0.15), the same nvidia runtime, unixfd transport (docs/jp6-modern-userspace.md)
   --zenohd) ZENOHD=1; shift;;    # bring up the shared host zenoh router first (standalone; rig owns it in prod)
   --roscore) ROSCORE=1; shift;;  # bring up the shared host roscore first (ROS 1 / ros1-bridge; rig owns it in prod)
   *) break;;
 esac; done
-CONFIG="${1:?usage: cam-up [--dev|--jp6|--jp7] <sensor-config.yaml> [compose args...]}"; shift || true
+CONFIG="${1:?usage: cam-up [--dev|--jp6|--jp6m|--jp7] <sensor-config.yaml> [compose args...]}"; shift || true
 # Accept the config as given (abs / cwd-relative -- e.g. a rig-supplied vehicle path), or fall back to
 # the documented short form resolved against the in-repo config dir (config/sensors/foo.yaml lives
 # under core-driver/, which isn't the repo root) so `cam-up config/sensors/foo.yaml` works anywhere.
@@ -116,18 +118,18 @@ fi
 if [ "$PLATFORM" = auto ]; then
   if [ -n "${RIG_TARGET_PLATFORM:-}" ]; then
     case "$RIG_TARGET_PLATFORM" in
-      jp6|jp7|dev) PLATFORM="$RIG_TARGET_PLATFORM";;
-      *) echo "cam-up: RIG_TARGET_PLATFORM='$RIG_TARGET_PLATFORM' is not a platform (jp6|jp7|dev); ignoring it" >&2;;
+      jp6|jp6m|jp7|dev) PLATFORM="$RIG_TARGET_PLATFORM";;
+      *) echo "cam-up: RIG_TARGET_PLATFORM='$RIG_TARGET_PLATFORM' is not a platform (jp6|jp6m|jp7|dev); ignoring it" >&2;;
     esac
   fi
   if [ "$PLATFORM" = auto ] && [ -n "${RIG_IMAGE_TAG:-}" ]; then
     case "$RIG_IMAGE_TAG" in
-      jp6|jp7|dev) PLATFORM="$RIG_IMAGE_TAG";;   # legacy: platform-valued images.tag
+      jp6|jp6m|jp7|dev) PLATFORM="$RIG_IMAGE_TAG";;   # legacy: platform-valued images.tag
       # A fleet tag that isn't a platform (e.g. v2.1) must NOT silently pick the wrong runtime
       # overlay/transport (all containers "up", no frames). Warn and fall through to detection.
       # (With RIG_TARGET_PLATFORM or CAM_PLATFORM set this branch never runs -- a version-valued
       # images.tag is then the NORMAL fleet shape, not a mistake.)
-      *) echo "cam-up: RIG_IMAGE_TAG='$RIG_IMAGE_TAG' is not a platform (jp6|jp7|dev) and no RIG_TARGET_PLATFORM/CAM_PLATFORM is set; ignoring it for platform selection" >&2;;
+      *) echo "cam-up: RIG_IMAGE_TAG='$RIG_IMAGE_TAG' is not a platform (jp6|jp6m|jp7|dev) and no RIG_TARGET_PLATFORM/CAM_PLATFORM is set; ignoring it for platform selection" >&2;;
     esac
   fi
   if [ "$PLATFORM" = auto ] && [ "$VERB" != config ]; then
@@ -165,11 +167,18 @@ FILES=(-f "$REPO/docker-compose.yml")
 if [ "$DEV" = 0 ] && [ "$PLATFORM" = jp7 ]; then
   FILES+=(-f "$REPO/docker-compose.jp7.yml")
   export CAM_CORE_BASE="${CAM_CORE_BASE:-ubuntu:24.04}"
-elif [ "$DEV" = 0 ] && [ "$PLATFORM" = jp6 ]; then
+elif [ "$DEV" = 0 ] && { [ "$PLATFORM" = jp6 ] || [ "$PLATFORM" = jp6m ]; }; then
   # JP6: the nvidia runtime (base compose) injects the driver + multimedia + nv-plugin layer and the
   # device nodes its CSVs list -- into a container that ASKS (NVIDIA_VISIBLE_DEVICES; the images set
   # it, the overlay repeats it, and grants the v4l2 codec nodes explicitly).
   FILES+=(-f "$REPO/docker-compose.jp6.yml")
+  if [ "$PLATFORM" = jp6m ]; then
+    # the modern userspace on that same runtime: 26.04 build bases + the matching gst-plugins-rs. The
+    # bridges read CAM_PLATFORM=jp6m as "the core publishes unixfd" (a 1.28 core does).
+    export CAM_CORE_BASE="${CAM_CORE_BASE:-ubuntu:26.04}"
+    export CAM_WEBRTC_BASE="${CAM_WEBRTC_BASE:-ubuntu:26.04}"
+    export CAM_GST_RS_TAG="${CAM_GST_RS_TAG:-0.15.3}"
+  fi
 fi
 # USB source: map the v4l2 device into the core container (gige/rtsp need no device). sensor_env exports
 # CAM_DEVICE (the config's usb.device) for a REAL non-fake usb source. ALWAYS render the overlay from the
@@ -206,7 +215,7 @@ if [ -n "${CAM_REGISTRY:-}" ]; then
   # tag (legacy) or an already-suffixed tag passes verbatim; so does an explicit CAM_IMAGE_TAG.
   if [ -z "${CAM_IMAGE_TAG:-}" ] && [ -n "${RIG_IMAGE_TAG:-}" ]; then
     case "$IMG_TAG" in
-      jp6|jp7|dev|*-jp6|*-jp7|*-dev) ;;
+      jp6|jp6m|jp7|dev|*-jp6|*-jp6m|*-jp7|*-dev) ;;
       *) IMG_TAG="${IMG_TAG}-${PLATFORM}";;
     esac
   fi

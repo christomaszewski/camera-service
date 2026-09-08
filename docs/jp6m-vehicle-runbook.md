@@ -143,7 +143,16 @@ docker inspect <cam>-vehicle-<id>-core-driver-1 --format 'runtime={{.HostConfig.
 Repeat step 4, and the bit-exact line with `--device nvidia.com/gpu=all` instead of `--runtime nvidia`;
 `./rig end-run`.
 
-## 7. Back to the baseline, and what to keep
+## 7. The rig way from here on (no env swap)
+
+`jp6m` is a platform now (`0195bd6`+). On the vehicle `sudo rig provision --platform jp6m` (it lands in
+`/etc/rig/vehicle.local.yaml`), the same `platform: jp6m` wherever the build host's deployment declares
+this vehicle's platform, then `rig build` (the `-jp6m` set: cam-core, ros2-bridge, webrtc-bridge),
+`rig bake`, ship, `./run.sh up`. cam-up sees `jp6m` and applies the JP6 runtime shape with the bridges on
+unixfd; the four `env:` lines from step 3 go away. Back to the classic stack: `--platform jp6`, rebuild,
+rebake.
+
+## 8. Back to the baseline, and what to keep
 
 Remove the appended `env:` block from `/etc/rig/vehicle.local.yaml` (leave the identity keys), then:
 ```bash
