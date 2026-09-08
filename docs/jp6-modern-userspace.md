@@ -213,6 +213,25 @@ Attach `jp6m-results/` and the `stack-check.sh` output for each mode, and fill i
 - **only cdi works** → productize on cdi: one `nvidia-ctk cdi generate --mode=csv` per host, then the
   JP7 overlay as-is.
 
+## Under a rig deployment (a baked artifact on the vehicle)
+
+The wrapper is for a bare checkout. Inside a rig deployment the same switch is four `env:` lines in
+the per-host `/etc/rig/vehicle.local.yaml` (merged over the baked `vehicle.yaml`'s env), the jp6m
+images `docker load`ed on the vehicle, and `./rig up <cam>` — not `./run.sh up`, whose compose-only
+scripts carry the digests pinned at bake time:
+
+```yaml
+env:
+  CAM_TRANSPORT: unixfd          # a 1.28 core publishes unixfd; the jp6 platform label would say header
+  CAM_CORE_IMAGE: cam-core:jp6m
+  CAM_WEBRTC_IMAGE: webrtc-bridge:jp6m
+  CAM_ROS2_IMAGE: ros2-bridge:jp6m
+  # CAM_PLATFORM: jp7            # cdi mode: the runc + CDI overlay (after nvidia-ctk cdi generate --mode=csv)
+```
+
+This is what the bench deployment runs (`playback/viewer/vehicle.yaml`). The step-by-step is
+[hardware-test-procedure.md](hardware-test-procedure.md).
+
 ## If it is green: what productizing looks like
 
 A real `jp6m` platform in `cam-up` (`--jp6m`; auto-detect stays jp6 — a host has to ask for it),
