@@ -55,12 +55,13 @@ TAG="${2:-${RIG_TARGET_PLATFORM:-jp7}}"
 # BASE_IMAGE / IMAGES individually as before.
 VARIANT=""
 case "${RIG_TARGET_PLATFORM:-}" in
-  jp6|jp7|dev) VARIANT="$RIG_TARGET_PLATFORM" ;;
+  jp6|jp7|dev|jp6m) VARIANT="$RIG_TARGET_PLATFORM" ;;
   "") ;;
   *) echo "build-images: RIG_TARGET_PLATFORM='${RIG_TARGET_PLATFORM}' is not jp6|jp7|dev; deriving the variant from the tag" >&2 ;;
 esac
 if [ -z "$VARIANT" ]; then
   case "$TAG" in
+    jp6m|*-jp6m) VARIANT=jp6m ;;
     jp6|*-jp6) VARIANT=jp6 ;;
     dev|*-dev) VARIANT=dev ;;
     *)         VARIANT=jp7 ;;
@@ -74,6 +75,12 @@ case "$VARIANT" in
   # stack; IMAGES=cam-dev alone is the fast path when only the core bench tests matter.
   dev) BASE_IMAGE="${BASE_IMAGE:-ubuntu:22.04}"
        IMAGES="${IMAGES:-cam-dev ros2-bridge webrtc-bridge}" ;;
+  # jp6m (EXPERIMENT, docs/jp6-modern-userspace.md): a JP6 host running a 26.04 userspace -- GStreamer
+  # 1.28 + gst-plugins-rs 0.15 -- with the L4T stack injected by the host's nvidia runtime / CDI.
+  jp6m) BASE_IMAGE="${BASE_IMAGE:-ubuntu:26.04}"
+        WEBRTC_BASE="${WEBRTC_BASE:-ubuntu:26.04}"
+        GST_RS_TAG="${GST_RS_TAG:-0.15.3}"
+        IMAGES="${IMAGES:-cam-core ros2-bridge webrtc-bridge}" ;;
   *)   BASE_IMAGE="${BASE_IMAGE:-ubuntu:24.04}"
        IMAGES="${IMAGES:-cam-core ros2-bridge webrtc-bridge}" ;;
 esac
@@ -102,7 +109,8 @@ for img in $IMAGES; do
     cam-dev)      build_one cam-dev      core-driver/Dockerfile.dev       --build-arg "BASE=$BASE_IMAGE" ;;   # NB: the dev image's arg is BASE, not BASE_IMAGE
     ros2-bridge)   build_one ros2-bridge   plugins/ros2-bridge/Dockerfile   --build-arg "ROS_DISTRO=$ROS_DISTRO" ;;
     ros1-bridge)   build_one ros1-bridge   plugins/ros1-bridge/Dockerfile ;;   # Noetic (ROS_DISTRO baked in)
-    webrtc-bridge) build_one webrtc-bridge plugins/webrtc-bridge/Dockerfile ;;
+    webrtc-bridge) build_one webrtc-bridge plugins/webrtc-bridge/Dockerfile \
+                     ${WEBRTC_BASE:+--build-arg "BASE_IMAGE=$WEBRTC_BASE"} ${GST_RS_TAG:+--build-arg "GST_RS_TAG=$GST_RS_TAG"} ;;
     *) echo "build-images: unknown image '$img' (want: cam-core|cam-dev|ros2-bridge|ros1-bridge|webrtc-bridge)" >&2; exit 1 ;;
   esac
 done

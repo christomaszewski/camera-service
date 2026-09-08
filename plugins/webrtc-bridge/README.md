@@ -220,7 +220,7 @@ Brings up a `rmw_zenohd` router + core + bridge, and a Zenoh probe
   `runtime: nvidia` + `NVIDIA_VISIBLE_DEVICES` CSV grant in [compose.yml](compose.yml) —
   **unvalidated on JP6 hardware** (r36 CSV injects gst-1.20/22.04-built plugins into this
   24.04/gst-1.24 image; plugin ABI is forward-compatible, but if it doesn't load it blacklists and
-  x264enc is used). (2) **The rank**: `GST_PLUGIN_FEATURE_RANK=nvv4l2h264enc:MAX` **+**
+  x264enc is used). The [jp6-modern-userspace](../../docs/jp6-modern-userspace.md) test plan is exactly this question, with a 26.04 / gst-plugins-rs 0.15 build of this image (`BASE_IMAGE` / `GST_RS_TAG` build args) and an on-host probe. (2) **The rank**: `GST_PLUGIN_FEATURE_RANK=nvv4l2h264enc:MAX` **+**
   `VIDEO_CAPS=video/x-h264` (both forwarded by compose; settable from the sensor YAML's
   `webrtc-bridge` params — see `config/sensors/cam_rtsp.yaml`). `webrtcsink` inserts the
   `nvvidconv` → NVMM hop itself for `nvv4l2*` encoders; `kmod` is baked in (NVENC init runs `lsmod`).

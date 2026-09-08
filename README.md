@@ -101,6 +101,7 @@ core-driver/            # the producer service
   main.py               # entry point
   config/camera.yaml    # camera + recording + preview settings
   Dockerfile
+tools/jp6-modern/       # EXPERIMENT (docs/jp6-modern-userspace.md): a 26.04 userspace on a JP6 host -- probe + wrapper
 plugins/                # consumer apps: ros2-bridge, ros1-bridge, webrtc-bridge (mqtt-telemetry, ... as examples);
                         #   ros2-source is the reverse: a ROS 2 image topic feeding a shm-input instance
 docker-compose.yml

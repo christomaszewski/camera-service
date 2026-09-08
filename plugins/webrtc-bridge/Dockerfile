@@ -5,6 +5,10 @@
 # 1.24, matched to gst-plugins-rs 0.13.x.
 #
 # Build (from repo root):  docker build -f plugins/webrtc-bridge/Dockerfile -t webrtc-bridge .
+# The GStreamer <-> gst-plugins-rs pairing follows the base: ubuntu:24.04 = GStreamer 1.24 <-> 0.13.x
+# (the default, validated on JP7); ubuntu:26.04 = GStreamer 1.28 <-> 0.15.x (the jp6m experiment,
+# docs/jp6-modern-userspace.md: `--build-arg BASE_IMAGE=ubuntu:26.04 --build-arg GST_RS_TAG=0.15.3`).
+ARG BASE_IMAGE=ubuntu:24.04
 ARG GST_RS_TAG=0.13.7
 # Pinned Rust toolchain + cargo-c (+ --locked): unpinned, this build broke in the field with NO repo
 # change (2026-06-10, fresh JP6 host): rustup grabbed the just-released stable and an UNLOCKED
@@ -19,7 +23,7 @@ ARG RUST_TOOLCHAIN=1.96.0
 ARG CARGO_C_VER=0.10.23
 
 # ---- builder: compile gst-plugin-webrtc + the signalling server (Rust) ----
-FROM ubuntu:24.04 AS builder
+FROM ${BASE_IMAGE} AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 ARG GST_RS_TAG
 ARG RUST_TOOLCHAIN
@@ -49,7 +53,7 @@ RUN cd /tmp/gst-rs \
     && install -m755 target/release/gst-webrtc-signalling-server /usr/local/bin/
 
 # ---- runtime: GStreamer + libnice ICE elements + the built plugin/binary (no Rust, no -dev) ----
-FROM ubuntu:24.04
+FROM ${BASE_IMAGE}
 ENV DEBIAN_FRONTEND=noninteractive
 # Runtime GStreamer + the libnice ICE elements; the codec/crypto runtime libs (x264/vpx/opus/srtp/ssl)
 # arrive as plugin dependencies. gstreamer1.0-nice = the ICE elements webrtcbin needs (separate from
@@ -73,9 +77,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # externally-managed env in-container -> --break-system-packages.
 RUN pip3 install --break-system-packages --no-cache-dir eclipse-zenoh==1.9.0
 COPY --from=builder /usr/local /usr/local
-RUN ldconfig
+# Same as the core: the runtime-injected L4T libs live in the tegra dirs; list them for the linker so
+# the CSV/CDI-mounted nvv4l2* plugins resolve inside a plain Ubuntu base (HW encode in webrtcsink).
+RUN printf '/usr/lib/aarch64-linux-gnu/tegra\n/usr/lib/aarch64-linux-gnu/tegra-egl\n' > /etc/ld.so.conf.d/nvidia-tegra.conf \
+    && ldconfig
 ENV GST_PLUGIN_PATH=/usr/local/lib/gstreamer-1.0 \
-    LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib/x86_64-linux-gnu:/usr/local/lib/aarch64-linux-gnu
+    LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib/x86_64-linux-gnu:/usr/local/lib/aarch64-linux-gnu:/usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra-egl
 
 WORKDIR /app
 COPY plugins/webrtc-bridge/ /app/

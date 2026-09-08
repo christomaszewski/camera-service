@@ -11,6 +11,11 @@ services:
     build:
       context: ../..
       dockerfile: plugins/webrtc-bridge/Dockerfile
+      args:
+        # 24.04 = GStreamer 1.24 <-> gst-plugins-rs 0.13 (default); the jp6m experiment builds
+        # 26.04 = 1.28 <-> 0.15 (tools/jp6-modern/cam-up-jp6m exports both).
+        BASE_IMAGE: ${CAM_WEBRTC_BASE:-ubuntu:24.04}
+        GST_RS_TAG: ${CAM_GST_RS_TAG:-0.13.7}
     init: true
     network_mode: ${CAM_NETWORK:-host}     # host = expose signalling + WebRTC media to viewers
     ipc: host                               # share /dev/shm with the core (JP6 raw endpoint; harmless for unixfd)

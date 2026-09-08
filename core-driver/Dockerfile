@@ -7,6 +7,9 @@
 #                                          SDK. r36.2.0 is the last published l4t-base tag; fine for any
 #                                          r36.x host since nvv4l2* are CSV-injected from the host.)
 #   JP7 -> ubuntu:24.04                    (NVENC reaches the container via CDI, not CUDA)
+#   jp6m -> ubuntu:26.04                   (EXPERIMENT, docs/jp6-modern-userspace.md: a modern userspace --
+#                                          GStreamer 1.28 -- on a JP6 host, the L4T multimedia stack injected
+#                                          by the host's nvidia runtime (CSV) or a csv-mode CDI spec)
 # NVIDIA nvv4l2*/nvvidconv are injected at runtime (CSV on JP6, CDI on JP7); the FFV1 software path
 # needs neither. Verify on the Jetson: `gst-inspect-1.0 aravissrc` and
 # `python3 -c "import gi; gi.require_version('Aravis','0.8')"`.
@@ -41,13 +44,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       gir1.2-glib-2.0 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
       gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
       gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
-      libxml2 libusb-1.0-0 \
+      libusb-1.0-0 \
+      # Aravis' runtime libxml2: `libxml2` up to 24.04, `libxml2-16` on 26.04 -- whichever this base has
+      $(apt-cache policy libxml2 | grep -q 'Candidate: [0-9]' && echo libxml2 || echo libxml2-16) \
     # 24.04's plugins-bad ships the GStreamer `onnx` element (-> onnxruntime), which we never use and
     # whose arm64 init misbehaves; strip the plugin + the heavy lib so the registry scan can't load it.
     && rm -f /usr/lib/*/gstreamer-1.0/libgstonnx.so /usr/lib/*/libonnxruntime.so* \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /opt/aravis/usr/local /usr/local
-RUN ldconfig
+# The L4T multimedia libraries the host injects at runtime (CSV on JP6, CDI on JP7) land in
+# /usr/lib/aarch64-linux-gnu/tegra{,-egl}. An l4t-base image already lists those dirs for the
+# linker; a plain Ubuntu base does not, and then libgstnvvideo4linux2.so cannot resolve
+# libnvbufsurface & co. after the mount (docs/jp6-modern-userspace.md). Listing them is harmless
+# where nothing is mounted. The runtime's post-mount ldconfig refreshes the cache from this file.
+RUN printf '/usr/lib/aarch64-linux-gnu/tegra\n/usr/lib/aarch64-linux-gnu/tegra-egl\n' > /etc/ld.so.conf.d/nvidia-tegra.conf \
+    && ldconfig
 
 # eclipse-zenoh: the Python Zenoh binding for the lifecycle control plane (docs/LIFECYCLE.md). A prebuilt
 # manylinux abi3 wheel installs on arm64/x86 -- no Rust build. The SAME pin as the webrtc-bridge, so one
@@ -58,7 +69,7 @@ RUN pip3 install --no-cache-dir eclipse-zenoh==1.9.0
 
 # Make the locally-installed Aravis typelib + libs + gst plugin discoverable (Jetson = aarch64).
 ENV GI_TYPELIB_PATH=/usr/local/lib/aarch64-linux-gnu/girepository-1.0:/usr/lib/aarch64-linux-gnu/girepository-1.0 \
-    LD_LIBRARY_PATH=/usr/local/lib/aarch64-linux-gnu:/usr/local/lib \
+    LD_LIBRARY_PATH=/usr/local/lib/aarch64-linux-gnu:/usr/local/lib:/usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra-egl \
     GST_PLUGIN_PATH=/usr/local/lib/aarch64-linux-gnu/gstreamer-1.0
 
 WORKDIR /app

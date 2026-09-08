@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# cam-up for the jp6m EXPERIMENT (docs/jp6-modern-userspace.md): the modern-userspace images
+# (Ubuntu 26.04 -- GStreamer 1.28, gst-plugins-rs 0.15 webrtcsink) on a JetPack 6 host, with the
+# host's L4T multimedia stack (nvvidconv / nvv4l2*) injected one of two ways:
+#
+#   JP6M_MODE=csv  (default)  the host's nvidia runtime CSV-mounts the stack: `cam-up --jp6`, the
+#                             JP6 shape. A 1.28 core publishes the unixfd transport (it probes for
+#                             unixfdsink), which the jp6 platform label would tell the bridges NOT to
+#                             expect -- so CAM_TRANSPORT=unixfd is exported for them here.
+#   JP6M_MODE=cdi             the JP7 shape on a JP6 host: runc + a CDI device from a csv-mode spec.
+#                             Prereq once:  sudo nvidia-ctk cdi generate --mode=csv --output=/etc/cdi/nvidia.yaml
+#                             `cam-up --jp7`: the jp7 overlay grants nvidia.com/gpu=all to the core
+#                             AND the webrtc-bridge, and platform jp7 = unixfd everywhere.
+#
+# Images: the :jp6m tags (tools/build-images.sh with RIG_TARGET_PLATFORM=jp6m, or the tarballs from
+# a bench build, `docker load`). Without a registry the per-image vars point at the local tags;
+# with CAM_REGISTRY the tag is jp6m. A local `build` through cam-up gets the 26.04 base and the
+# 0.15 gst-plugins-rs args.
+#
+#   tools/jp6-modern/cam-up-jp6m config/sensors/<cam>.yaml up -d
+#   JP6M_MODE=cdi tools/jp6-modern/cam-up-jp6m config/sensors/<cam>.yaml up -d
+set -eu
+HERE="$(cd "$(dirname "$0")/../.." && pwd)"
+MODE="${JP6M_MODE:-csv}"
+TAG="${JP6M_TAG:-jp6m}"
+export CAM_CORE_BASE="${CAM_CORE_BASE:-ubuntu:26.04}"
+export CAM_WEBRTC_BASE="${CAM_WEBRTC_BASE:-ubuntu:26.04}"
+export CAM_GST_RS_TAG="${CAM_GST_RS_TAG:-0.15.3}"
+if [ -n "${CAM_REGISTRY:-${RIG_IMAGE_REGISTRY:-}}" ]; then
+  export CAM_IMAGE_TAG="${CAM_IMAGE_TAG:-$TAG}"
+else
+  export CAM_CORE_IMAGE="${CAM_CORE_IMAGE:-cam-core:$TAG}"
+  export CAM_WEBRTC_IMAGE="${CAM_WEBRTC_IMAGE:-webrtc-bridge:$TAG}"
+  export CAM_ROS2_IMAGE="${CAM_ROS2_IMAGE:-ros2-bridge:$TAG}"
+fi
+case "$MODE" in
+  csv)
+    export CAM_TRANSPORT="${CAM_TRANSPORT:-unixfd}"
+    echo "cam-up-jp6m: mode=csv (nvidia runtime CSV mounts), images :$TAG, bridges told CAM_TRANSPORT=$CAM_TRANSPORT" >&2
+    exec "$HERE/cam-up" --jp6 "$@" ;;
+  cdi)
+    [ -s /etc/cdi/nvidia.yaml ] || echo "cam-up-jp6m: /etc/cdi/nvidia.yaml missing -- run: sudo nvidia-ctk cdi generate --mode=csv --output=/etc/cdi/nvidia.yaml" >&2
+    echo "cam-up-jp6m: mode=cdi (runc + nvidia.com/gpu=all from a csv-mode CDI spec), images :$TAG" >&2
+    exec "$HERE/cam-up" --jp7 "$@" ;;
+  *) echo "cam-up-jp6m: JP6M_MODE must be csv or cdi, got '$MODE'" >&2; exit 2 ;;
+esac

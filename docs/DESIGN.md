@@ -291,7 +291,9 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
   moved to a **cloud-native** model: a plain **`ubuntu:24.04`** base with the multimedia stack injected via
   **CDI** (`nvidia-ctk cdi generate` + `--device nvidia.com/gpu=all`) — confirmed on a JP7.2 Orin; no CUDA
   base needed (NVENC is v4l2). See [jetpack7-bringup.md](jetpack7-bringup.md); the software (FFV1) path
-  needs neither. Either generation: GigE needs **host networking** (the `docker0` bridge
+  needs neither. Whether JP6 can ALSO run the modern userspace (a 26.04 / GStreamer 1.28 container with
+  the r36 stack injected) is the [jp6-modern-userspace](jp6-modern-userspace.md) experiment (branch
+  `jp6-modern`: the `jp6m` images, an on-host probe, a test plan). Either generation: GigE needs **host networking** (the `docker0` bridge
   breaks Aravis discovery) and **no `/dev` passthrough**; PTP daemons run on the host (shared `CLOCK_REALTIME`).
 
 ## Testing strategy
