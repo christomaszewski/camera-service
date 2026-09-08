@@ -13,10 +13,16 @@
 #   tools/jp6-modern/probe.sh                          # modes csv,cdi x images cam-core:jp6m,cam-core:jp6,webrtc-bridge:jp6m
 #   tools/jp6-modern/probe.sh --modes csv --images cam-core:jp6m
 #   tools/jp6-modern/probe.sh --frames 120             # shorter benchmarks
+#   tools/jp6-modern/probe.sh --hostlibs --images cam-core:jp6m   # the host's multimedia stack mounted in
 #
 # csv = `--runtime nvidia` (the JP6 CSV mounts);  cdi = `--device nvidia.com/gpu=all` (needs
-# /etc/cdi/nvidia.yaml from `sudo nvidia-ctk cdi generate --mode=csv`). Images that are not present
-# locally are skipped with a note. Nothing is mounted from the host; nothing is written outside --out.
+# /etc/cdi/nvidia.yaml from `sudo nvidia-ctk cdi generate --mode=csv`);  hostlibs = csv PLUS the
+# host's own multimedia userspace bind-mounted in (JetPack 6's runtime injects drivers + devices
+# only -- drivers.csv/devices.csv -- and leaves the multimedia + GStreamer plugin layer to the
+# container; this mode answers "do the host's 1.20-built nv plugins run inside GStreamer 1.28"
+# without rebuilding an image). Images that are not present locally are skipped with a note.
+# Only hostlibs mounts anything from the host (read-only, under /opt/hostnv); nothing is written
+# outside --out.
 set -u
 MODES="csv,cdi"
 IMAGES="cam-core:jp6m,cam-core:jp6,webrtc-bridge:jp6m"
@@ -25,6 +31,7 @@ FRAMES=300
 while [ $# -gt 0 ]; do
   case "$1" in
     --modes) MODES="$2"; shift 2 ;;
+    --hostlibs) MODES="hostlibs" ; shift ;;
     --images) IMAGES="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     --frames) FRAMES="$2"; shift 2 ;;
@@ -52,7 +59,31 @@ say "## host"
   echo "host gstreamer: $(gst-inspect-1.0 --version 2>/dev/null | head -1 || echo '(no gst-inspect on host)')"
   echo "host nvv4l2h264enc: $(gst-inspect-1.0 nvv4l2h264enc >/dev/null 2>&1 && echo present || echo absent)"
   echo "host nv plugins: $(ls /usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstnv*.so 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')"
+  echo "host nvidia lib dir: $(ls -d /usr/lib/aarch64-linux-gnu/nvidia 2>/dev/null || ls -d /usr/lib/aarch64-linux-gnu/tegra 2>/dev/null || echo none) ($(ls /usr/lib/aarch64-linux-gnu/nvidia /usr/lib/aarch64-linux-gnu/tegra 2>/dev/null | wc -l) files)"
+  echo "host libv4l2: $(ls /usr/lib/aarch64-linux-gnu/libv4l2.so* 2>/dev/null | tr '\n' ' ')  nv v4l plugins: $(ls /usr/lib/aarch64-linux-gnu/libv4l/plugins/nv 2>/dev/null | tr '\n' ' ')"
+  echo "csv gst/multimedia lines: $(cat /etc/nvidia-container-runtime/host-files-for-container.d/*.csv 2>/dev/null | grep -ciE 'gstreamer|nvbufsurface|nvv4l2|libv4l')"
 } | tee -a "$SUMMARY"
+
+# hostlibs: the host's multimedia userspace, read-only, at paths that cannot collide with what the
+# runtime injects (the runtime bind-mounts single files into /usr/lib/aarch64-linux-gnu/nvidia --
+# a directory mounted read-only there would make those mounts fail). The in-container probe puts
+# /opt/hostnv on LD_LIBRARY_PATH / GST_PLUGIN_PATH when JP6M_HOSTLIBS=1.
+hostlibs_args() {
+  local nvdir="" a=()
+  for d in /usr/lib/aarch64-linux-gnu/nvidia /usr/lib/aarch64-linux-gnu/tegra; do [ -d "$d" ] && { nvdir="$d"; break; }; done
+  [ -n "$nvdir" ] && a+=(-v "$nvdir:/opt/hostnv/nvidia:ro")
+  for p in nvvidconv nvvideo4linux2 nvjpeg nvunixfd nvtee nvcompositor; do
+    f="/usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgst$p.so"; [ -e "$f" ] && a+=(-v "$f:/opt/hostnv/gst/libgst$p.so:ro")
+  done
+  [ -d /usr/lib/aarch64-linux-gnu/libv4l/plugins/nv ] && a+=(-v "/usr/lib/aarch64-linux-gnu/libv4l/plugins/nv:/usr/lib/aarch64-linux-gnu/libv4l/plugins/nv:ro")
+  # NVIDIA's patched libv4l2 / libv4lconvert (JP5/JP6 ship *.999999): mounted under their sonames so
+  # LD_LIBRARY_PATH prefers them over the container's
+  for l in libv4l2 libv4lconvert; do
+    f=$(ls /usr/lib/aarch64-linux-gnu/$l.so.0.0.999999 2>/dev/null | head -1); [ -n "$f" ] && a+=(-v "$f:/opt/hostnv/libv4l/$l.so.0:ro")
+  done
+  a+=(-e JP6M_HOSTLIBS=1)
+  printf '%s\n' "${a[@]}"
+}
 say ""
 
 # The in-container probe. Bash, no python: the core image's python is fine but the webrtc image may differ.
@@ -60,15 +91,20 @@ read -r -d '' PROBE <<'INNER' || true
 set -u
 FRAMES="$1"; KIND="$2"
 line() { printf '%s\n' "$*"; }
+if [ "${JP6M_HOSTLIBS:-}" = 1 ]; then
+  export LD_LIBRARY_PATH="/opt/hostnv/libv4l:/opt/hostnv/nvidia:${LD_LIBRARY_PATH:-}"
+  export GST_PLUGIN_PATH="/opt/hostnv/gst:${GST_PLUGIN_PATH:-}"
+  line "hostlibs: nvidia libs $(ls /opt/hostnv/nvidia 2>/dev/null | wc -l), gst plugins $(ls /opt/hostnv/gst 2>/dev/null | tr '\n' ' '), libv4l $(ls /opt/hostnv/libv4l 2>/dev/null | tr '\n' ' ')"
+fi
 line "os: $(. /etc/os-release; echo "$PRETTY_NAME") glibc $(ldd --version | head -1 | awk '{print $NF}')"
 line "gstreamer: $(gst-inspect-1.0 --version | head -1)"
-line "tegra dir: $(ls /usr/lib/aarch64-linux-gnu/tegra 2>/dev/null | wc -l) libs; ld.so.conf lists tegra: $(grep -rs tegra /etc/ld.so.conf.d/ >/dev/null && echo yes || echo NO)"
+line "nvidia dir (r36): $(ls /usr/lib/aarch64-linux-gnu/nvidia 2>/dev/null | wc -l) libs; tegra dir (r35): $(ls /usr/lib/aarch64-linux-gnu/tegra 2>/dev/null | wc -l) libs; ld.so.conf lists them: $(grep -rsE 'nvidia|tegra' /etc/ld.so.conf.d/ >/dev/null && echo yes || echo NO)"
 line "ldcache has nvbufsurface: $(ldconfig -p 2>/dev/null | grep -c nvbufsurface)"
 line "devices: $(ls /dev/nvhost-msenc /dev/nvhost-nvdec /dev/nvhost-vic /dev/v4l2-nvenc /dev/v4l2-nvdec /dev/nvmap 2>/dev/null | tr '\n' ' ')"
-line "nv plugins in container: $(ls /usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstnv*.so 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')"
+line "nv plugins in container: $(ls /usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstnv*.so /opt/hostnv/gst/libgstnv*.so 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')"
 line ""
 line "## unresolved libraries (ldd) per nv plugin"
-for p in /usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstnv*.so; do
+for p in /usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstnv*.so /opt/hostnv/gst/libgstnv*.so; do
   [ -e "$p" ] || { line "(no nv plugins mounted)"; break; }
   miss="$(ldd "$p" 2>&1 | grep -E 'not found' | awk '{print $1}' | tr '\n' ' ')"
   line "$(basename "$p"): ${miss:-ok}"
@@ -117,8 +153,9 @@ for mode in ${MODES//,/ }; do
   case "$mode" in
     csv) RT=(--runtime nvidia) ;;
     cdi) RT=(--device nvidia.com/gpu=all) ;;
+    hostlibs) RT=(--runtime nvidia); while IFS= read -r x; do RT+=("$x"); done < <(hostlibs_args) ;;
     none) RT=() ;;
-    *) say "!! unknown mode $mode (csv|cdi|none)"; continue ;;
+    *) say "!! unknown mode $mode (csv|cdi|hostlibs|none)"; continue ;;
   esac
   for img in ${IMAGES//,/ }; do
     if ! docker image inspect "$img" >/dev/null 2>&1; then say "## $mode x $img: image not present locally -- skipped"; say ""; continue; fi
@@ -129,7 +166,7 @@ for mode in ${MODES//,/ }; do
     rc=$?
     [ $rc -ne 0 ] && say "  (container exited $rc)"
     # the verdict lines
-    grep -E '^gstreamer:|^  nvv4l2h264enc: |^  nvv4l2h265enc: |^  nvvidconv: |^  unixfdsink: |^  webrtcsink: | fps$|FAILED|LOSSLESS|Version' "$log" | sed 's/^/  /' | tee -a "$SUMMARY"
+    grep -E '^gstreamer:|^hostlibs:|^nv plugins in container|^  nvv4l2h264enc: |^  nvv4l2h265enc: |^  nvvidconv: |^  unixfdsink: |^  webrtcsink: | fps$|FAILED|LOSSLESS|Version' "$log" | sed 's/^/  /' | tee -a "$SUMMARY"
     say ""
   done
 done

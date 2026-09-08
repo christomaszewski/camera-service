@@ -79,10 +79,10 @@ RUN pip3 install --break-system-packages --no-cache-dir eclipse-zenoh==1.9.0
 COPY --from=builder /usr/local /usr/local
 # Same as the core: the runtime-injected L4T libs live in the tegra dirs; list them for the linker so
 # the CSV/CDI-mounted nvv4l2* plugins resolve inside a plain Ubuntu base (HW encode in webrtcsink).
-RUN printf '/usr/lib/aarch64-linux-gnu/tegra\n/usr/lib/aarch64-linux-gnu/tegra-egl\n' > /etc/ld.so.conf.d/nvidia-tegra.conf \
+RUN printf '/usr/lib/aarch64-linux-gnu/nvidia\n/usr/lib/aarch64-linux-gnu/tegra\n/usr/lib/aarch64-linux-gnu/tegra-egl\n' > /etc/ld.so.conf.d/nvidia-tegra.conf \
     && ldconfig
 ENV GST_PLUGIN_PATH=/usr/local/lib/gstreamer-1.0 \
-    LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib/x86_64-linux-gnu:/usr/local/lib/aarch64-linux-gnu:/usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra-egl
+    LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib/x86_64-linux-gnu:/usr/local/lib/aarch64-linux-gnu:/usr/lib/aarch64-linux-gnu/nvidia:/usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra-egl
 
 WORKDIR /app
 COPY plugins/webrtc-bridge/ /app/

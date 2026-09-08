@@ -52,12 +52,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -f /usr/lib/*/gstreamer-1.0/libgstonnx.so /usr/lib/*/libonnxruntime.so* \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /opt/aravis/usr/local /usr/local
-# The L4T multimedia libraries the host injects at runtime (CSV on JP6, CDI on JP7) land in
-# /usr/lib/aarch64-linux-gnu/tegra{,-egl}. An l4t-base image already lists those dirs for the
+# The L4T libraries the host injects at runtime (CSV on JP6, CDI on JP7) land in
+# /usr/lib/aarch64-linux-gnu/nvidia (r36) or tegra{,-egl} (r35). An l4t-base image already lists those dirs for the
 # linker; a plain Ubuntu base does not, and then libgstnvvideo4linux2.so cannot resolve
 # libnvbufsurface & co. after the mount (docs/jp6-modern-userspace.md). Listing them is harmless
 # where nothing is mounted. The runtime's post-mount ldconfig refreshes the cache from this file.
-RUN printf '/usr/lib/aarch64-linux-gnu/tegra\n/usr/lib/aarch64-linux-gnu/tegra-egl\n' > /etc/ld.so.conf.d/nvidia-tegra.conf \
+RUN printf '/usr/lib/aarch64-linux-gnu/nvidia\n/usr/lib/aarch64-linux-gnu/tegra\n/usr/lib/aarch64-linux-gnu/tegra-egl\n' > /etc/ld.so.conf.d/nvidia-tegra.conf \
     && ldconfig
 
 # eclipse-zenoh: the Python Zenoh binding for the lifecycle control plane (docs/LIFECYCLE.md). A prebuilt
@@ -69,7 +69,7 @@ RUN pip3 install --no-cache-dir eclipse-zenoh==1.9.0
 
 # Make the locally-installed Aravis typelib + libs + gst plugin discoverable (Jetson = aarch64).
 ENV GI_TYPELIB_PATH=/usr/local/lib/aarch64-linux-gnu/girepository-1.0:/usr/lib/aarch64-linux-gnu/girepository-1.0 \
-    LD_LIBRARY_PATH=/usr/local/lib/aarch64-linux-gnu:/usr/local/lib:/usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra-egl \
+    LD_LIBRARY_PATH=/usr/local/lib/aarch64-linux-gnu:/usr/local/lib:/usr/lib/aarch64-linux-gnu/nvidia:/usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra-egl \
     GST_PLUGIN_PATH=/usr/local/lib/aarch64-linux-gnu/gstreamer-1.0
 
 WORKDIR /app
