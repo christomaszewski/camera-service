@@ -216,7 +216,17 @@ Attach `jp6m-results/` and the `stack-check.sh` output for each mode, and fill i
 - **only cdi works** → productize on cdi: one `nvidia-ctk cdi generate --mode=csv` per host, then the
   JP7 overlay as-is.
 
-## Finding on JP6 (R36.4.4, nvidia-container-toolkit 1.16.2) — the first probe
+## Finding on JP6 (R36.4.4, nvidia-container-toolkit 1.16.2) — GREEN, and one root cause
+
+**Result (fourth probe, 2026-09-08):** the 26.04 / GStreamer 1.28 containers run the host's 1.20-built
+NVIDIA plugins: 1080p H.264 on `nvv4l2h264enc` at 114 fps (x264 ultrafast: 80), a decode round trip on
+`nvv4l2decoder` at 106 fps, the recorder's lossless HEVC path at 2048×1536 running, `NVENC LOSSLESS
+PASS` bit-exact, and `webrtcsink` 0.15.3 next to a working `nvv4l2h264enc`. **The one thing that was
+ever wrong was `NVIDIA_VISIBLE_DEVICES`:** the CSV-mode runtime injects only into a container that
+sets it, `l4t-base` does, a plain Ubuntu base does not. With it set, `drivers.csv` injects the host's
+whole multimedia layer AND its GStreamer plugins (33 lines) — so the baked `l4t` stage below is NOT
+needed on this host and is now opt-in (`L4T_MULTIMEDIA=r36.4`), kept for a host whose CSV lacks the
+layer. The history of getting there, kept because each step is a real failure mode:
 
 The first on-vehicle probe (2026-09-08) returned `nvvidconv: no` in every csv cell, with no load
 error at all: **JetPack 6's runtime injects the driver userspace and the device nodes only**
@@ -236,9 +246,8 @@ container on this host either. Two consequences:
    (`L4T_MULTIMEDIA=r36.4`, `L4T_VERSION` pinned to the host's package version, `36.4.4-20250616085344`
    here) into `/usr/lib/aarch64-linux-gnu`: 111 `nvidia/*.so`, the six plugins the stack uses, the
    v4l2 codec plugin, and `libv4l2.so.0.0.999999 -> nvidia/libnvv4l2.so` so NVIDIA's libv4l2 wins
-   through ldconfig. What the runtime injects (`drivers.csv`: libcuda, libnvrm…) shadows the same
-   paths, so the host's driver build always wins where it is mounted. `build-images.sh` sets it for
-   the `jp6` AND `jp6m` variants — the baseline gets NVENC in containers by the same change.
+   through ldconfig. What the runtime injects shadows the same paths. Opt-in since the fourth probe
+   showed the runtime injects the layer itself once asked (`L4T_MULTIMEDIA=r36.4 …build-images.sh`).
 
 ### Second probe (`--hostlibs`): the plugins load in 1.28; the device nodes were the last gap
 

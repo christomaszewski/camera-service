@@ -166,12 +166,10 @@ if [ "$DEV" = 0 ] && [ "$PLATFORM" = jp7 ]; then
   FILES+=(-f "$REPO/docker-compose.jp7.yml")
   export CAM_CORE_BASE="${CAM_CORE_BASE:-ubuntu:24.04}"
 elif [ "$DEV" = 0 ] && [ "$PLATFORM" = jp6 ]; then
-  # JP6: the nvidia runtime (base compose) injects drivers + its device list; the v4l2 codec nodes the
-  # r36 plugins open are missing from that list on toolkit 1.16 -- the overlay grants them. The
-  # multimedia + plugin layer is baked into the jp6 images (Dockerfile l4t stage; CAM_L4T_MULTIMEDIA
-  # for a local build).
+  # JP6: the nvidia runtime (base compose) injects the driver + multimedia + nv-plugin layer and the
+  # device nodes its CSVs list -- into a container that ASKS (NVIDIA_VISIBLE_DEVICES; the images set
+  # it, the overlay repeats it, and grants the v4l2 codec nodes explicitly).
   FILES+=(-f "$REPO/docker-compose.jp6.yml")
-  export CAM_L4T_MULTIMEDIA="${CAM_L4T_MULTIMEDIA:-r36.4}"
 fi
 # USB source: map the v4l2 device into the core container (gige/rtsp need no device). sensor_env exports
 # CAM_DEVICE (the config's usb.device) for a REAL non-fake usb source. ALWAYS render the overlay from the

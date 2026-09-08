@@ -29,12 +29,10 @@ cd $ART && ./rig status                             # the deployment as shipped:
 
 ## 2. The probe (15 min) — read this before touching the row
 
-> First result on this host (R36.4.4): every csv cell `nvvidconv: no` with no load error — JetPack 6's
-> runtime injects drivers + devices only, the multimedia / nv-plugin layer is the container's (see the
-> plan's "Finding on JP6"). Two things follow. `--hostlibs` mounts the host's own layer in, to answer
-> whether 1.20-built plugins run in 1.28 without a rebuild; and images built from the branch after
-> `6c0c8c2` CARRY the layer (`RIG_TARGET_PLATFORM=jp6m tools/build-images.sh $R jp6m` again, pull),
-> after which the plain csv probe should light up.
+> First result on this host (R36.4.4): every csv cell `nvvidconv: no`. Root cause (plan, "Finding on
+> JP6"): a plain-Ubuntu image never set NVIDIA_VISIBLE_DEVICES, so `--runtime nvidia` injected nothing.
+> Images from `1d7faa8`+ set it; the probe passes it in every runtime mode; `--hostlibs` is the
+> no-rebuild variant that proved the 1.28 userspace green on 2026-09-08.
 
 ```bash
 ~/jp6-modern/probe.sh --hostlibs --images $R/cam-core:jp6m,$R/webrtc-bridge:jp6m   # the host's layer, mounted in
@@ -54,11 +52,10 @@ Decision: csv green → step 3 as written; only cdi green → step 3 with the `C
 from step 6 included from the start; neither green → stop, keep `jp6m-results/`, and read the Triage
 section of [jp6-modern-userspace.md](jp6-modern-userspace.md).
 
-> Second finding: with the host's layer mounted in, the plugins DO load in 1.28 — the last gap was
-> `/dev/v4l2-nvenc` / `-nvdec`, which toolkit 1.16's devices.csv omits. Images from `476782b`+ bake the
-> layer, `docker-compose.jp6.yml` (in an artifact baked from the branch) grants the nodes. For the cdi
-> variant (step 6) add the nodes to the host's devices.csv BEFORE generating the spec (step 1):
-> `printf 'dev, /dev/v4l2-nvenc\ndev, /dev/v4l2-nvdec\n' | sudo tee -a /etc/nvidia-container-runtime/host-files-for-container.d/devices.csv`
+> Resolved (fourth probe, green): the CSV-mode runtime injects the host's whole multimedia + plugin
+> layer and the codec device nodes -- into a container that sets NVIDIA_VISIBLE_DEVICES. Images from
+> `1d7faa8`+ set it; `docker-compose.jp6.yml` (in an artifact baked from the branch) repeats it. The
+> cdi variant needs nothing extra on this host (its devices.csv lists the codec nodes).
 
 ## 3. Switch the row to the modern images (csv mode)
 

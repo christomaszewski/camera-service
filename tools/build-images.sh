@@ -68,10 +68,10 @@ if [ -z "$VARIANT" ]; then
   esac
 fi
 case "$VARIANT" in
-  # JP6 hosts inject drivers + devices only: the images carry the multimedia + nv plugin layer from
-  # NVIDIA's r36.4 apt repo (L4T_VERSION pins it to the host's L4T, e.g. 36.4.4-20250616085344).
+  # JP6: the host's nvidia runtime injects the multimedia + nv plugin layer (drivers.csv) into a
+  # container that asks (NVIDIA_VISIBLE_DEVICES -- the images set it). L4T_MULTIMEDIA=r36.4 bakes the
+  # layer from NVIDIA's apt repo instead, for a host whose CSV lacks it (opt-in; version-mixing risk).
   jp6) BASE_IMAGE="${BASE_IMAGE:-nvcr.io/nvidia/l4t-base:r36.2.0}"
-       L4T_MULTIMEDIA="${L4T_MULTIMEDIA:-r36.4}"
        IMAGES="${IMAGES:-cam-core ros2-bridge ros1-bridge webrtc-bridge}" ;;
   # dev: cam-dev REPLACES cam-core (no l4t base, no NVENC -- ffv1 record, x264enc preview). The two
   # bridges are not l4t-based and build unchanged off-Jetson, so the bench box can run the whole
@@ -84,7 +84,6 @@ case "$VARIANT" in
   jp6m) BASE_IMAGE="${BASE_IMAGE:-ubuntu:26.04}"
         WEBRTC_BASE="${WEBRTC_BASE:-ubuntu:26.04}"
         GST_RS_TAG="${GST_RS_TAG:-0.15.3}"
-        L4T_MULTIMEDIA="${L4T_MULTIMEDIA:-r36.4}"
         IMAGES="${IMAGES:-cam-core cam-dev ros2-bridge webrtc-bridge}" ;;
   *)   BASE_IMAGE="${BASE_IMAGE:-ubuntu:24.04}"
        IMAGES="${IMAGES:-cam-core ros2-bridge webrtc-bridge}" ;;

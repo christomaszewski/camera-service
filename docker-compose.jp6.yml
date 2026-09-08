@@ -1,17 +1,15 @@
 # JetPack 6 override (applied by `cam-up` for platform jp6 -- auto-detected on an R36 host, or --jp6).
 #
-# The r36 nvidia runtime injects the driver libraries plus the device nodes its devices.csv lists.
-# On nvidia-container-toolkit 1.16 that list has the nvhost-* nodes but NOT the v4l2 codec nodes the
-# r36 multimedia plugins actually open, so nvv4l2h26{4,5}enc / nvv4l2decoder fail inside every
-# container with "Cannot identify device '/dev/v4l2-nvenc'" (measured on an R36.4.4 Orin,
-# docs/jp6-modern-userspace.md "Finding on JP6"). Grant them explicitly to the two containers that
-# encode. The multimedia + nv-plugin layer itself is BAKED into the jp6 images (the Dockerfiles'
-# l4t stage) -- JetPack 6 leaves that layer to the container.
+# The r36 nvidia runtime injects the driver + multimedia + nv-plugin layer and the device nodes its
+# CSVs list (drivers.csv, devices.csv) -- but ONLY into a container that asks: NVIDIA_VISIBLE_DEVICES
+# must be set. NVIDIA's l4t-base sets it; a plain Ubuntu base does not, and `runtime: nvidia` is then
+# plain runc (measured on an R36.4.4 Orin: no libraries, no /dev/v4l2-nvenc --
+# docs/jp6-modern-userspace.md "Finding on JP6"). The images set it since 1d7faa8; this overlay
+# repeats it for the two containers that encode, and grants the v4l2 codec nodes explicitly for a
+# toolkit whose devices.csv lacks them.
 #
 # Not for the dev platform (a bench box has no such nodes: compose would refuse to create the
-# container) and not for JP7, whose CDI spec carries the nodes.
-# And the runtime only injects into a container that asks: NVIDIA_VISIBLE_DEVICES must be set (the
-# images set it since 6ace926+; a plain-Ubuntu image without it gets plain runc under `runtime: nvidia`).
+# container) and not for JP7, whose CDI spec carries everything.
 services:
   core-driver:
     environment:
