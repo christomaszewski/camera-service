@@ -77,10 +77,11 @@ case "$VARIANT" in
        IMAGES="${IMAGES:-cam-dev ros2-bridge webrtc-bridge}" ;;
   # jp6m (EXPERIMENT, docs/jp6-modern-userspace.md): a JP6 host running a 26.04 userspace -- GStreamer
   # 1.28 + gst-plugins-rs 0.15 -- with the L4T stack injected by the host's nvidia runtime / CDI.
+  # cam-dev rides along (apt-packaged Aravis 0.8.34 on 26.04): the bench row of the experiment.
   jp6m) BASE_IMAGE="${BASE_IMAGE:-ubuntu:26.04}"
         WEBRTC_BASE="${WEBRTC_BASE:-ubuntu:26.04}"
         GST_RS_TAG="${GST_RS_TAG:-0.15.3}"
-        IMAGES="${IMAGES:-cam-core ros2-bridge webrtc-bridge}" ;;
+        IMAGES="${IMAGES:-cam-core cam-dev ros2-bridge webrtc-bridge}" ;;
   *)   BASE_IMAGE="${BASE_IMAGE:-ubuntu:24.04}"
        IMAGES="${IMAGES:-cam-core ros2-bridge webrtc-bridge}" ;;
 esac

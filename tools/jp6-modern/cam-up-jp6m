@@ -11,6 +11,10 @@
 #                             Prereq once:  sudo nvidia-ctk cdi generate --mode=csv --output=/etc/cdi/nvidia.yaml
 #                             `cam-up --jp7`: the jp7 overlay grants nvidia.com/gpu=all to the core
 #                             AND the webrtc-bridge, and platform jp7 = unixfd everywhere.
+#   JP6M_MODE=dev             the bench row: the same modern userspace on a non-Jetson box (`cam-up
+#                             --dev`, runc, cam-dev:jp6m as the core, no NVENC). Everything but the
+#                             hardware encode -- unixfd core->bridges, webrtcsink 0.15, ros2 -- is
+#                             testable here, and the bridges are told the core speaks unixfd.
 #
 # Images: the :jp6m tags (tools/build-images.sh with RIG_TARGET_PLATFORM=jp6m, or the tarballs from
 # a bench build, `docker load`). Without a registry the per-image vars point at the local tags;
@@ -30,6 +34,7 @@ if [ -n "${CAM_REGISTRY:-${RIG_IMAGE_REGISTRY:-}}" ]; then
   export CAM_IMAGE_TAG="${CAM_IMAGE_TAG:-$TAG}"
 else
   export CAM_CORE_IMAGE="${CAM_CORE_IMAGE:-cam-core:$TAG}"
+  export CAM_DEV_IMAGE="${CAM_DEV_IMAGE:-cam-dev:$TAG}"
   export CAM_WEBRTC_IMAGE="${CAM_WEBRTC_IMAGE:-webrtc-bridge:$TAG}"
   export CAM_ROS2_IMAGE="${CAM_ROS2_IMAGE:-ros2-bridge:$TAG}"
 fi
@@ -38,9 +43,14 @@ case "$MODE" in
     export CAM_TRANSPORT="${CAM_TRANSPORT:-unixfd}"
     echo "cam-up-jp6m: mode=csv (nvidia runtime CSV mounts), images :$TAG, bridges told CAM_TRANSPORT=$CAM_TRANSPORT" >&2
     exec "$HERE/cam-up" --jp6 "$@" ;;
+  dev)
+    export CAM_TRANSPORT="${CAM_TRANSPORT:-unixfd}"
+    export CAM_DEV_BASE="${CAM_DEV_BASE:-ubuntu:26.04}"
+    echo "cam-up-jp6m: mode=dev (runc, no NVIDIA stack), images :$TAG, bridges told CAM_TRANSPORT=$CAM_TRANSPORT" >&2
+    exec "$HERE/cam-up" --dev "$@" ;;
   cdi)
     [ -s /etc/cdi/nvidia.yaml ] || echo "cam-up-jp6m: /etc/cdi/nvidia.yaml missing -- run: sudo nvidia-ctk cdi generate --mode=csv --output=/etc/cdi/nvidia.yaml" >&2
     echo "cam-up-jp6m: mode=cdi (runc + nvidia.com/gpu=all from a csv-mode CDI spec), images :$TAG" >&2
     exec "$HERE/cam-up" --jp7 "$@" ;;
-  *) echo "cam-up-jp6m: JP6M_MODE must be csv or cdi, got '$MODE'" >&2; exit 2 ;;
+  *) echo "cam-up-jp6m: JP6M_MODE must be csv, cdi or dev, got '$MODE'" >&2; exit 2 ;;
 esac

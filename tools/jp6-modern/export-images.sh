@@ -7,7 +7,7 @@ DIR="${1:-./jp6m-images}"
 TAG="${JP6M_TAG:-jp6m}"
 mkdir -p "$DIR"
 IMAGES=()
-for img in cam-core webrtc-bridge ros2-bridge; do
+for img in cam-core cam-dev webrtc-bridge ros2-bridge; do
   if docker image inspect "$img:$TAG" >/dev/null 2>&1; then IMAGES+=("$img:$TAG"); else echo "export: $img:$TAG not built -- skipping" >&2; fi
 done
 [ ${#IMAGES[@]} -gt 0 ] || { echo "export: nothing to save (build with RIG_TARGET_PLATFORM=jp6m tools/build-images.sh, PUSH=0)" >&2; exit 1; }

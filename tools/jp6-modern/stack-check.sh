@@ -31,7 +31,9 @@ if [ -n "$CORE" ]; then
   ts="$(docker logs "$CORE" 2>&1 | grep -iE 'active timestamp source|timestamp source' | tail -1 | sed 's/^.*: //')"
   [ -n "$ts" ] && echo "  timestamp source: $ts"
   docker logs "$CORE" 2>&1 | grep -E 'health: frames=' | tail -1 | sed 's/^/  /'
-  n="$(docker logs "$CORE" 2>&1 | grep -ciE 'error|traceback')"; [ "$n" = 0 ] && ok "no errors in the core log" || bad "$n error lines in the core log (docker logs $CORE | grep -iE 'error|traceback')"
+  # ERROR-level lines and tracebacks only: a WARNING that mentions "error" (the shm reader waiting for
+  # its writer at startup) is not a failure of the experiment
+  n="$(docker logs "$CORE" 2>&1 | grep -cE ' ERROR |Traceback')"; [ "$n" = 0 ] && ok "no ERROR lines in the core log" || bad "$n ERROR lines in the core log (docker logs $CORE | grep -E ' ERROR |Traceback')"
 fi
 echo "## webrtc-bridge"
 if [ -n "$WEB" ]; then

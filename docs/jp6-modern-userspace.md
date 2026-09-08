@@ -27,7 +27,8 @@ linker — the `jp6m` images do).
 | `plugins/webrtc-bridge/compose.yml` | the two build args are wired (`CAM_WEBRTC_BASE`, `CAM_GST_RS_TAG`) |
 | `tools/build-images.sh` | a `jp6m` variant (`RIG_TARGET_PLATFORM=jp6m`, or a `jp6m` / `*-jp6m` tag): 26.04 base, gst-plugins-rs 0.15.3, images cam-core + ros2-bridge + webrtc-bridge |
 | `tools/jp6-modern/probe.sh` | the on-host probe: injection mode × image → plugin load, elements, encode throughput, decode round trip, bit-exact NVENC |
-| `tools/jp6-modern/cam-up-jp6m` | `cam-up` with the jp6m images in `csv` or `cdi` mode |
+| `tools/jp6-modern/cam-up-jp6m` | `cam-up` with the jp6m images in `csv`, `cdi` or `dev` mode |
+| `core-driver/Dockerfile.dev` | unchanged — it already builds on `BASE=ubuntu:26.04` (26.04 packages Aravis 0.8.34), giving `cam-dev:jp6m` for the bench row |
 | `tools/jp6-modern/stack-check.sh` | reads a running stack's logs for the verdicts (encoder, transport, webrtcsink's encoder, ros2 consumer) |
 
 ros2-bridge is untouched: it is already the Lyrical (26.04, GStreamer 1.28) image, and the new
@@ -46,6 +47,14 @@ ros2-bridge is untouched: it is already the Lyrical (26.04, GStreamer 1.28) imag
   rows read `no` as they must without a Jetson.
 - The 26.04 package set differs from 24.04 in one runtime name (`libxml2` → `libxml2-16`); the core
   Dockerfile picks whichever the base has.
+
+**The `dev` row ran here, on the bench deployment (a Docker Desktop VM, three instances: a pcap
+playback, a shm-tap fed by a 1.20 `shmsink`, and a ROS 2 topic fed instance), all on the jp6m
+images:** every core healthy on 1.28 and publishing `unixfd`; `webrtc-bridge` 0.15.3 consuming it
+with native caps and the dashboard playing all three feeds; `ros2-bridge`'s `CamUnixfdBridge`
+publishing; `ros2-source` → `unixfdsink` → the core's `unixfdsrc` end to end (the framing that needs
+1.24+ on both sides); the recorder on FFV1. So the userspace, the transport and the whole plugin
+chain are proven on 26.04 — what the Jetson adds is the injected NVIDIA stack.
 
 What is NOT known until the Jetson: everything in the matrix — the injected plugins loading into
 1.28, HW encode, the recorder's bit-exact path, `webrtcsink` picking `nvv4l2h264enc`.
@@ -78,7 +87,9 @@ the A/B rows.
 
 ## Test matrix
 
-Two injection modes × three images. Every cell is one probe run; the interesting cells are bold.
+Two injection modes × three images on the Jetson (plus the `dev` row, already green on the bench —
+`JP6M_MODE=dev tools/jp6-modern/cam-up-jp6m …`). Every cell is one probe run; the interesting cells
+are bold.
 
 | | `cam-core:jp6` (22.04 / 1.20, baseline) | **`cam-core:jp6m`** (26.04 / 1.28) | **`webrtc-bridge:jp6m`** (26.04 / 0.15 webrtcsink) |
 |---|---|---|---|
