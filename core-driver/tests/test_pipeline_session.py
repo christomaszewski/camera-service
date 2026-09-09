@@ -481,11 +481,45 @@ def test_a_held_playback_republishes_its_last_frame_to_the_transport_only():
         p.source.playback = SimpleNamespace(state="paused")
         p._still_pushed_mono = 0.0
         assert p._still_tick() is True and len(p.transport_src.pushed) == 3      # held: the frame again
-        assert p.transport_src.pushed[2] == p.transport_src.pushed[0]            # the SAME frame
+        pushed = p.transport_src.pushed                                          # ("buf", payload, pts, fid)
+        assert pushed[2][1] == pushed[0][1] and pushed[2][3] == pushed[0][3]      # the SAME frame ...
+        assert pushed[0][2] < pushed[1][2] < pushed[2][2]                        # ... never the same timestamp
         assert p._still_tick() is True and len(p.transport_src.pushed) == 3      # rate-limited
         assert p.appsrc.pushed and len(p.appsrc.pushed) == 1                     # never the main/record feed
         p._stopping = True
         assert p._still_tick() is False
+
+
+def test_a_held_frame_advances_the_transport_pts_and_the_resume_lands_after_it():
+    # The reconnect loop a paused/finished `rig replay` showed on unixfd: the held frame went out
+    # with its ORIGINAL PTS -- a repeated RTP timestamp the browser drops, so the dashboard's
+    # stall watchdog cycled the session every ~20 s. The transport timeline must keep moving
+    # through a hold, by the wall time held, and the first real frame after it must land after
+    # the last held one -- not a hold's worth behind it. The main/record feed keeps the source PTS.
+    with tempfile.TemporaryDirectory() as tmp:
+        p, created, events = _pipe(tmp)
+        p.transport_src = _Appsrc(events, "transport_src")
+        p._width, p._height, p._gst_format = 8, 8, "GRAY8"
+        p.source.playback = SimpleNamespace(state="paused")
+        p._on_frame(_stamp(0, 10 ** 9), bytes(64))
+        wire = p.transport_src.pushed                            # ("buf", payload, pts, fid) tuples
+        first = wire[0][2]
+        for i in range(1, 4):                                    # three ticks of the hold
+            p._still_pushed_mono = 0.0
+            p._tpts_last_mono -= 1.0                             # a second of wall time passed
+            assert p._still_tick() is True and len(wire) == i + 1
+        pts = [b[2] for b in wire]
+        assert all(b > a for a, b in zip(pts, pts[1:])), pts     # strictly advancing on the wire
+        assert pts[-1] - first >= int(2.9e9)                     # by the time held (~1 s per tick)
+        assert [b[3] for b in wire] == [0] * 4                   # still frame 0
+        assert len(p.appsrc.pushed) == 1                         # the hold never fed camsrc/record
+
+        p.source.playback = SimpleNamespace(state="playing")     # resume: the SOURCE timeline
+        p._on_frame(_stamp(1, 10 ** 9 + INTERVAL), bytes(64))    # continues where it left off ...
+        assert p.appsrc.pushed[1][2] == p.appsrc.pushed[0][2] + INTERVAL   # (source PTS, as before)
+        assert wire[4][2] == pts[-1] + INTERVAL                  # ... the wire: after the last held
+        p._on_frame(_stamp(2, 10 ** 9 + 2 * INTERVAL), bytes(64))
+        assert wire[5][2] == pts[-1] + 2 * INTERVAL              # and the shift stays put
 
 
 def test_a_known_discontinuity_counts_no_lost_frames():

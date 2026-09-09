@@ -77,7 +77,11 @@ UTF-8 JSON, `application/json`. Only `schema_version`, `service`, `instance`, `s
 - `state` — `playing` (data flowing, paced by `speed`), `paused` (held; consumers keep the last
   frame — camera-service re-publishes the last frame to the plugin transport at ~1 Hz whenever
   nothing else reached it for a second, held or playing through silence, so a bridge or viewer
-  attaching late still gets a picture; the recorder, if active, simply receives nothing; a
+  attaching late still gets a picture. Each re-publish carries a FRESH transport PTS (the wire
+  never repeats a timestamp: on unixfd a repeated PTS is a repeated RTP timestamp, which a browser
+  drops as a duplicate — a viewer's stall watchdog then cycles the session), and the shift that
+  opens is carried into the resume, so the first real frame lands after the last held one; the
+  recording feed keeps the source PTS throughout. The recorder, if active, simply receives nothing; a
   playback that BOOTS paused lets its first frame out, then holds), `finished` (a non-looping source
   reached its end; any open recording session is finalized). What happens next is the producer's
   `on_finish` policy: **hold** — the process stays up, the keys stay declared, consumers keep the

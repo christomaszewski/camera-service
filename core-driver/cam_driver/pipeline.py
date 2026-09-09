@@ -159,6 +159,12 @@ class CapturePipeline:
         self._held = False
         self._still = None                 # the last frame handed to the transport (see _publish_transport)
         self._still_pushed_mono = 0.0
+        # The transport's OWN timeline (see _transport_pts): the source PTS plus a shift that grows
+        # while a held frame is re-published, so the wire never repeats a timestamp nor steps back.
+        self._tpts_shift_ns = 0
+        self._tpts_last = None
+        self._tpts_last_mono = 0.0
+        self._tpts_lock = threading.Lock()
         self._base_lock = threading.Lock()  # base-ts init is shared by the raw + encoded callbacks
         # Recording SESSIONS (session.py / lifecycle.py): the recorder is a per-session pipeline fed by
         # its own appsrc, opened by activate() and finalized by deactivate(). _session is read ONCE per
@@ -570,13 +576,46 @@ class CapturePipeline:
         if not self._stream_copy:
             self._account(stamp)   # raw / re-encode: THIS path is the recording feed
 
-    def _publish_transport(self, stamp: FrameStamp, frame_bytes: bytes, pts: int) -> None:
+    def _transport_pts(self, pts: int, *, held: bool) -> int:
+        """The PTS a frame carries on the plugin transport: the source PTS (`pts`, what the
+        recording rides) shifted so the transport timeline never stands still and never steps back.
+
+        A HELD frame -- the same frame re-published while the source stands still: paused,
+        finished, the release gate, a silent gap (_still_tick) -- advances by the wall time since
+        the previous publish. Sent with its original PTS it is a REPEATED timestamp on the wire:
+        on unixfd the buffer PTS goes straight through to the bridge's encoder, webrtcsink emits
+        the same RTP timestamp again, the browser drops it as a duplicate and decodes nothing new,
+        and the dashboard's stall watchdog cycled the WebRTC session every ~20 s for as long as
+        the hold lasted (a paused or finished `rig replay`). The headered-shm path never showed it
+        because the bridge's PtsTracker re-times that transport itself.
+
+        The shift a hold opens is carried forward: a hold does not move the SOURCE timeline (the
+        frames resume where the recording left off), so without it the first real frame after a
+        hold would land a hold's worth BEHIND the last held one. The recording feed and camsrc
+        keep the plain source PTS (_pts_for) -- the recording is unaffected by any of this."""
+        now = time.monotonic()
+        with self._tpts_lock:
+            if held and self._tpts_last is not None:
+                tpts = self._tpts_last + max(int((now - self._tpts_last_mono) * 1e9), 1)
+            else:
+                tpts = pts + self._tpts_shift_ns
+                if self._tpts_last is not None and tpts <= self._tpts_last:
+                    tpts = self._tpts_last + self._frame_interval_ns   # a source step back: keep advancing
+            self._tpts_shift_ns = tpts - pts
+            self._tpts_last = tpts
+            self._tpts_last_mono = now
+            return tpts
+
+    def _publish_transport(self, stamp: FrameStamp, frame_bytes: bytes, pts: int, *,
+                           held: bool = False) -> None:
         """One frame to the plugin transport endpoint (unixfd or shm+header). Remembers it as the
-        HELD frame: a paused/finished playback re-publishes it (_still_tick) so a consumer that
-        attaches late -- a bridge restarted behind the core, a viewer opening the page -- still
-        gets a picture and its caps, instead of nothing until release."""
+        HELD frame: a paused/finished playback re-publishes it (_still_tick, held=True) so a
+        consumer that attaches late -- a bridge restarted behind the core, a viewer opening the
+        page -- still gets a picture and its caps, instead of nothing until release. `pts` is the
+        SOURCE PTS; what goes on the wire is _transport_pts, fresh on every publish."""
         self._still = (stamp, frame_bytes, pts)
         self._still_pushed_mono = time.monotonic()
+        tpts = self._transport_pts(pts, held=held)
         if True:
             try:
                 if self.unixfd_src is not None:
@@ -594,7 +633,7 @@ class CapturePipeline:
                             raise          # silently leak one fd per published frame until EMFILE
                         ubuf = Gst.Buffer.new()
                         ubuf.insert_memory(-1, mem)
-                        ubuf.pts = pts
+                        ubuf.pts = tpts
                         ubuf.offset = stamp.frame_id
                         ubuf.offset_end = stamp.timestamp_ns
                         self._push_checked(self.unixfd_src, ubuf, "unixfd transport", publish=True)
@@ -605,7 +644,7 @@ class CapturePipeline:
                         pixfmt=self._gst_format, ts_source=stamp.source.value).pack()
                     payload = hdr + frame_bytes
                     if not self._queue_full(self.transport_src, len(payload), "shm transport", publish=True):
-                        self._push_checked(self.transport_src, _new_buffer(payload, pts, stamp.frame_id),
+                        self._push_checked(self.transport_src, _new_buffer(payload, tpts, stamp.frame_id),
                                            "shm transport", publish=True)
             except Exception as e:
                 # The plugin endpoint is best-effort: a per-frame publish failure (e.g. a
@@ -623,7 +662,9 @@ class CapturePipeline:
         transport for ~1 s -- held (paused / finished) OR playing through silence (a lead-in
         before the first recorded frame, a gap between sessions) -- re-publish the last frame.
         A bridge that attaches during the silence still negotiates and advertises. Never the
-        recorder (it is not a new frame); a feeder publishing at any real rate keeps this idle."""
+        recorder (it is not a new frame); a feeder publishing at any real rate keeps this idle.
+        Each re-publish carries a FRESH transport PTS (_transport_pts): the same pixels, but never
+        the same timestamp twice on the wire."""
         if self._stopping:
             return False
         pb = getattr(self.source, "playback", None)
@@ -632,7 +673,7 @@ class CapturePipeline:
         if time.monotonic() - self._still_pushed_mono < 0.9:
             return True
         stamp, frame_bytes, pts = self._still
-        self._publish_transport(stamp, frame_bytes, pts)
+        self._publish_transport(stamp, frame_bytes, pts, held=True)   # fresh transport PTS each time
         return True
 
     def _on_encoded(self, stamp: FrameStamp, enc_bytes: bytes, caps_str: str = None) -> None:
