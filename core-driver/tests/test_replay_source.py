@@ -38,17 +38,19 @@ def _px(sid: int, i: int) -> bytes:
 
 
 def _write_session(run_dir: Path, prefix: str, sid: int, first_ts_ns: int, n: int, *,
-                   width: int = W, height: int = H, frame_id0: int = 0) -> Path:
+                   width: int = W, height: int = H, frame_id0: int = 0,
+                   pixel_format: str = "GRAY8", pixels=None) -> Path:
     """A recorded session: FFV1 part(s) via splitmuxsink (the recorder's writer) + <prefix>.json/.csv."""
     base = run_dir / prefix
     pipeline = Gst.parse_launch(
-        f'appsrc name=src is-live=false format=time caps="video/x-raw,format=GRAY8,width={width},'
+        f'appsrc name=src is-live=false format=time caps="video/x-raw,format={pixel_format},width={width},'
         f'height={height},framerate=25/1" ! videoconvert ! avenc_ffv1 ! splitmuxsink muxer=matroskamux '
         f'max-size-time=0 location="{base}-%05d.mkv"')
     src = pipeline.get_by_name("src")
     pipeline.set_state(Gst.State.PLAYING)
     for i in range(n):
-        buf = Gst.Buffer.new_wrapped(bytes([(sid * 50 + i * 7) % 256]) * (width * height))
+        data = pixels(i) if pixels is not None else bytes([(sid * 50 + i * 7) % 256]) * (width * height)
+        buf = Gst.Buffer.new_wrapped(data)
         buf.pts, buf.duration = i * IV, IV
         assert src.emit("push-buffer", buf) == Gst.FlowReturn.OK
     src.emit("end-of-stream")
@@ -56,7 +58,7 @@ def _write_session(run_dir: Path, prefix: str, sid: int, first_ts_ns: int, n: in
     assert msg is not None and msg.type == Gst.MessageType.EOS, msg
     pipeline.set_state(Gst.State.NULL)
     header = {"created_unix_s": 0.0, "base_timestamp_ns": first_ts_ns, "timestamp_source": "system",
-              "ptp_synced": False, "pixel_format": "GRAY8", "bayer_pattern": None, "bits_per_pixel": 8,
+              "ptp_synced": False, "pixel_format": pixel_format, "bayer_pattern": None, "bits_per_pixel": 8,
               "width": width, "height": height, "tick_frequency_hz": 0, "cfa_tile_mode": "off",
               "session_index": sid, "session_prefix": prefix, "first_pts_ns": 0,
               "first_frame_id": frame_id0, "first_timestamp_ns": first_ts_ns}

@@ -39,6 +39,7 @@ gi.require_version("Gst", "1.0")
 from gi.repository import GLib, Gst
 
 from .dropstats import DropStats
+from .gst_frame import FramePayload, GstFrame
 from .keyframe import is_sync_point, parse_caps_kind
 from .sidecar import SidecarWriter
 
@@ -56,7 +57,9 @@ class PushResult(Enum):
     SKIPPED = "skipped"    # not a loss: the session is closing, or waiting for a sync point
 
 
-def _wrap_buffer(payload: bytes, pts: int, frame_id: int):
+def _wrap_buffer(payload: FramePayload, pts: int, frame_id: int):
+    if isinstance(payload, GstFrame):
+        return payload.to_buffer(pts, frame_id)
     buf = Gst.Buffer.new_wrapped(payload)
     buf.pts = pts
     buf.dts = Gst.CLOCK_TIME_NONE
@@ -136,7 +139,7 @@ class RecordingSession:
         self.started_unix_s = time.time()
         log.info("recording session %d open -> %s-*.mkv", self.index, self.path_base)
 
-    def push(self, payload: bytes, pts: int, stamp, caps_str: Optional[str] = None) -> PushResult:
+    def push(self, payload: FramePayload, pts: int, stamp, caps_str: Optional[str] = None) -> PushResult:
         """Feed one frame (source thread). The whole check-and-push runs under the session lock so a
         frame can never land after begin_close() emitted end-of-stream."""
         with self.lock:

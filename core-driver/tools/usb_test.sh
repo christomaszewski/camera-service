@@ -6,15 +6,16 @@
 # Prereq:  docker build -f core-driver/Dockerfile.dev -t cam-dev .
 # Run from the repo root:  ./core-driver/tools/usb_test.sh
 set -euo pipefail
+IMG="${CAM_DEV_IMAGE:-cam-dev}"
 
-docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
+docker run --rm -v "$PWD/core-driver:/app" "$IMG" bash -c '
   set -e
   mkdir -p /data/recordings /tmp/cam
   echo "=== fake USB (videotestsrc) producer + shm probe ==="
   python3 main.py -c config/usb-fake.yaml >/tmp/core.log 2>&1 &
   CORE=$!
   sleep 5
-  python3 tools/shm_probe.py --socket /tmp/cam/frames --count 5 --timeout 5
+  python3 tools/shm_probe.py --count 5 --timeout 5
   kill -INT "$CORE"; wait "$CORE"; echo "core exit: $?"
 
   echo "=== outputs ==="
@@ -29,7 +30,7 @@ docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
 
 echo
 echo "########## ENCODED (dual-output): fake USB MJPEG -> stream-copy record + decode for consumers ##########"
-docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
+docker run --rm -v "$PWD/core-driver:/app" "$IMG" bash -c '
   set -e
   mkdir -p /data/recordings /tmp/cam
   echo "=== fake USB MJPEG producer (auto -> stream-copy; decodes I420 for the header endpoint) ==="
@@ -37,7 +38,7 @@ docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
   CORE=$!
   sleep 5
   echo "-- consumers get DECODED I420 via the header endpoint --"
-  python3 tools/shm_probe.py --socket /tmp/cam/frames --count 3 --timeout 5 \
+  python3 tools/shm_probe.py --count 3 --timeout 5 \
     || { echo "FAIL: header endpoint not delivering decoded frames"; exit 1; }
   kill -INT "$CORE"; wait "$CORE" 2>/dev/null || true; echo "core done"
   grep -iE "recorder: stream-copy|drop summary" /tmp/m.log | head -2
@@ -53,7 +54,7 @@ docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
 
 echo
 echo "########## COLOR: fake USB I420 -> ffv1 (lossless, no chroma resample) ##########"
-docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
+docker run --rm -v "$PWD/core-driver:/app" "$IMG" bash -c '
   set -e
   mkdir -p /data/recordings /tmp/cam
   echo "=== fake USB COLOR (videotestsrc I420) producer (auto encoder should pick ffv1) ==="
@@ -72,7 +73,7 @@ docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
 
 echo
 echo "########## H.264 stream-copy SESSION opened mid-stream (keyframe gate) ##########"
-docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
+docker run --rm -v "$PWD/core-driver:/app" "$IMG" bash -c '
   set -e
   mkdir -p /data/recordings /tmp/cam
   echo "=== fake USB H264 producer booting INACTIVE; activate at ~3s, deactivate, stop ==="

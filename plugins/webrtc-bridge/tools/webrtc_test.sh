@@ -24,16 +24,26 @@ REPO="$(pwd)"
 
 CORE_IMG="${CORE_IMG:-cam-dev}"
 WEBRTC_IMG="${WEBRTC_IMG:-webrtc-bridge}"
-VOL=cam_webrtc_sock
-CORE=cam_webrtc_core
-BRIDGE=cam_webrtc_bridge
+TEST_DIR="$(mktemp -d /tmp/cam_webrtc_test.XXXXXX)"
+TEST_NAME="$(basename "$TEST_DIR")"
+VOL="${TEST_NAME}_sock"
+CORE="${TEST_NAME}_core"
+BRIDGE="${TEST_NAME}_bridge"
+# Cleanup below is confined to this run's namespace. Refuse an existing resource rather than
+# deleting it; the same names are then reused only between scenarios owned by this run.
+if docker container inspect "$CORE" >/dev/null 2>&1 \
+    || docker container inspect "$BRIDGE" >/dev/null 2>&1 \
+    || docker volume inspect "$VOL" >/dev/null 2>&1; then
+  rmdir "$TEST_DIR"
+  echo "test resource already exists: $TEST_NAME" >&2
+  exit 1
+fi
 
 cleanup() {
   docker rm -f "$CORE" "$BRIDGE" >/dev/null 2>&1 || true
   docker volume rm "$VOL" >/dev/null 2>&1 || true
 }
-trap cleanup EXIT
-cleanup
+trap 'cleanup; rmdir "$TEST_DIR"' EXIT
 
 echo "== build images (if needed) =="
 docker image inspect "$CORE_IMG"   >/dev/null 2>&1 || docker build -f core-driver/Dockerfile.dev -t "$CORE_IMG" .

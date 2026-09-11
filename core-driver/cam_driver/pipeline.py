@@ -10,12 +10,15 @@ to on_frame(), which is source-agnostic and:
   - feeds the open recording session, if any (CFA-tiled when configured),
   - and -- rate-limited -- pushes a copy into the transport appsrc for plugins.
 
+Replay alone can deliver a GstFrame instead of bytes: downstream buffers share its pixel memory,
+and transport decimation precedes materialization. Live-source callbacks retain the byte path.
+
 The plugin transport endpoint has two implementations, picked at build() by capability:
   - JP7 (GStreamer >= 1.24, `unixfdsink` present): a `unixfdsink` carrying NATIVE caps
     (video/x-raw GRAY8/16 for mono, video/x-bayer,<pattern> for Bayer) + buffer fields
-    over SCM_RIGHTS. No header -- the stream is self-describing. unixfdsink needs FD-backed
-    memory, so the feeder copies each frame into a memfd (GstAllocators.FdAllocator); ~shm
-    cost, the win is cleanliness. frame_id rides in buffer.offset, the absolute capture ns
+    over SCM_RIGHTS. Live frames and older runtimes use a memfd copy. On 1.28+, replay shares
+    FD-backed pixels or lets unixfdsink copy into its native pool. No header -- the stream
+    is self-describing. frame_id rides in buffer.offset, the absolute capture ns
     in buffer.offset_end (an absolute-ns PTS stalls downstream flow); PTS stays relative.
   - JP6 (GStreamer 1.20, no unixfd): a `shmsink` carrying a custom 36-byte
     `application/x-cam-frame` header (shm drops caps/PTS/meta, so we prepend our own).
@@ -52,6 +55,7 @@ from . import transport
 from .config import unique_run_prefix
 from .dropstats import DropStats
 from .formats import bytes_per_frame, parse_pixel_format
+from .gst_frame import FramePayload, GstFrame
 from .lifecycle import ACTIVATING, ACTIVE, DEACTIVATING, INACTIVE
 from .session import SESSION_DRAIN_S, PushResult, RecordingSession
 from .sidecar import SidecarHeader
@@ -103,7 +107,9 @@ _HEALTH_INTERVAL_S = 30
 PROGRESS_INTERVAL_S = 5   # descriptor republish cadence while a recording session is open
 
 
-def _new_buffer(payload: bytes, pts: int, frame_id: int):
+def _new_buffer(payload: FramePayload, pts: int, frame_id: int):
+    if isinstance(payload, GstFrame):
+        return payload.to_buffer(pts, frame_id)
     buf = Gst.Buffer.new_wrapped(payload)
     buf.pts = pts
     buf.dts = Gst.CLOCK_TIME_NONE
@@ -150,10 +156,12 @@ class CapturePipeline:
         self._have_unixfd = False          # JP7 (GStreamer 1.24): unixfd transport available
         self._unixfd_path = None
         self._fd_alloc = None              # GstAllocators.FdAllocator -> memfd buffers for unixfd
+        self._unixfd_pool = False          # GStreamer 1.28 can pool/copy ordinary replay buffers
         self._GstAllocators = None
         self._tile_mode = "off"            # off | plain | green_diff | rct (recording.bayer_tile)
         self._tiler = None                 # closure: frame_bytes -> tiled bytes (lazy; needs numpy)
         self._stream_copy = False          # encoded source -> recorder muxes the delivered bitstream verbatim
+        self._discard_replay_main = False  # replay with neither local preview nor raw endpoint
         # A finite (playback) source at its end: exit 0 (the bare tool) or HOLD -- finalize the open
         # session, keep serving consumers + the control plane, accept `restart` (docs/PLAYBACK.md).
         # main sets it from config.hold_on_finish; the hook tells the lifecycle a session closed.
@@ -316,18 +324,22 @@ class CapturePipeline:
                 f"wait-for-connection=false sync=false")
             log.info("raw video endpoint -> %s (%d-byte shm)", raw.socket_path, shm)
 
+        self._discard_replay_main = (callable(getattr(self.source, "start_buffers", None))
+                                     and not raw.enabled and not self.cfg.preview.enabled)
         if self.cfg.preview.enabled:
             branches.append(f"t. ! queue leaky=downstream max-size-buffers=4 ! videoconvert ! {self.cfg.preview.sink}")
         else:
-            branches.append("t. ! queue leaky=downstream max-size-buffers=4 ! fakesink sync=false")
+            # A replay with no main consumers leaves camsrc idle. Do not wait for its first
+            # buffer to preroll: the separate plugin transport must still reach PLAYING.
+            async_prop = " async=false" if self._discard_replay_main else ""
+            branches.append("t. ! queue leaky=downstream max-size-buffers=4 ! fakesink sync=false" + async_prop)
 
         chains = [" ! ".join(main) + " " + " ".join(branches)]
 
         # Plugin transport endpoint: prefer unixfd (native caps + GstBuffer metadata) where the element
-        # exists (JP7 / GStreamer 1.24), else the shm+header endpoint. unixfd REPLACES the header endpoint
-        # (the raw headless shm above is separate + config-optional). unixfdsink needs FD-backed buffers,
-        # so this is a SEPARATE appsrc fed memfd buffers by the feeder -- NOT a tee tap (the tee can't
-        # negotiate the memfd allocation across branches). The plane rides as video/x-bayer,<pattern>
+        # exists (GStreamer 1.24+), else the shm+header endpoint. A separate appsrc carries the
+        # transport caps and metadata. On 1.28+ replay can share pixels or use native pooled copying;
+        # live bytes and older runtimes keep the explicit memfd allocation. The plane rides as video/x-bayer,<pattern>
         # (8-bit Bayer) or video/x-raw GRAY8/16 (mono); offset=frame_id, offset_end=abs-ts (PTS stays relative).
         pe = self.cfg.transport.plugin_endpoint
         self._have_unixfd = bool(pe.enabled) and Gst.ElementFactory.find("unixfdsink") is not None
@@ -353,7 +365,7 @@ class CapturePipeline:
             chains.append(
                 f'appsrc name=unixfd_src is-live=true do-timestamp=false format=time '
                 f'max-bytes={_PUB_QUEUE_FRAMES * frame_bytes} caps="{ucaps}" '
-                f'! queue max-size-buffers=8 ! unixfdsink socket-path={self._unixfd_path} sync=false')
+                f'! queue max-size-buffers=8 ! unixfdsink name=unixfd_sink socket-path={self._unixfd_path} sync=false')
             log.info("plugin transport endpoint (unixfd) -> %s  caps=%s  max_rate=%s%s", self._unixfd_path,
                      ucaps.split(",", 1)[0] + (f",{self._bayer}" if (self._bayer and self._bits <= 8) else ""),
                      pe.max_rate_hz or "unlimited", self._publish_rate_note())
@@ -376,6 +388,9 @@ class CapturePipeline:
         self.appsrc = self.pipeline.get_by_name("camsrc")
         self.transport_src = self.pipeline.get_by_name("transport_src")
         self.unixfd_src = self.pipeline.get_by_name("unixfd_src")
+        unixfd_sink = self.pipeline.get_by_name("unixfd_sink")
+        self._unixfd_pool = (unixfd_sink is not None
+                             and unixfd_sink.find_property("min-memory-size") is not None)
         if self.appsrc is None:
             raise RuntimeError("appsrc 'camsrc' not found after parse_launch")
         if self._session_desc_probe:
@@ -575,10 +590,10 @@ class CapturePipeline:
                      stamp.system_ns, d_cc, d_sc)
         self._n_pushed += 1
 
-    def _on_frame(self, stamp: FrameStamp, frame_bytes: bytes) -> None:
+    def _on_frame(self, stamp: FrameStamp, frame_bytes: FramePayload) -> None:
         """Source callback (runs on the source's feeder thread): a resolved timestamp + clean image
-        bytes. Set PTS/offset, push to the main appsrc (tee -> raw / preview), feed the open recording
-        session, and -- rate-limited -- the plugin transport endpoint. Source-agnostic.
+        bytes or a replay GstFrame. Set PTS/offset, push to the main appsrc (tee -> raw / preview),
+        feed the open recording session, and -- rate-limited -- the plugin transport endpoint.
 
         For a stream-copy (encoded) source this is the BEST-EFFORT decode branch: it feeds live
         consumers only (the recording rides the encoded branch -> _on_encoded). So the recording feed
@@ -593,7 +608,8 @@ class CapturePipeline:
 
         # camsrc feeds the consumer tee (raw endpoint / preview) -- best-effort now that the recorder
         # rides its own session pipeline, so a stall here is a publish drop, not a recording loss.
-        if not self._queue_full(self.appsrc, len(frame_bytes), "camsrc", publish=True):
+        if not self._discard_replay_main and not self._queue_full(
+                self.appsrc, len(frame_bytes), "camsrc", publish=True):
             self._push_checked(self.appsrc, _new_buffer(frame_bytes, pts, stamp.frame_id), "camsrc",
                                publish=True)
 
@@ -602,9 +618,8 @@ class CapturePipeline:
         if sess is not None and not self._stream_copy:
             self._feed_recording(sess, stamp, pts, frame_bytes)
 
-        # plugin transport endpoint, rate-limited. JP7 (unixfd): native caps + buffer fields, but
-        # unixfdsink needs FD-backed memory -> copy the frame into a fresh memfd (~shm cost; the win
-        # is a header-free, self-describing stream). Carry frame_id in .offset and the absolute PTP
+        # Plugin transport endpoint, rate-limited before allocation/copying. Carry frame_id in
+        # .offset and the absolute PTP
         # capture time in .offset_end (an absolute-ns PTS would stall downstream flow). PTS stays
         # relative. JP6 (no unixfd): the legacy shm+header endpoint.
         if self._should_publish(stamp.timestamp_ns):
@@ -649,7 +664,7 @@ class CapturePipeline:
             self._tpts_last_mono = now
             return tpts
 
-    def _publish_transport(self, stamp: FrameStamp, frame_bytes: bytes, pts: int, *,
+    def _publish_transport(self, stamp: FrameStamp, frame_bytes: FramePayload, pts: int, *,
                            held: bool = False) -> None:
         """One frame to the plugin transport endpoint (unixfd or shm+header). Remembers it as the
         HELD frame: a paused/finished playback re-publishes it (_still_tick, held=True) so a
@@ -664,20 +679,29 @@ class CapturePipeline:
                 if self.unixfd_src is not None:
                     # bound check BEFORE the memfd: no point paying the copy for a frame we then drop
                     if not self._queue_full(self.unixfd_src, len(frame_bytes), "unixfd transport", publish=True):
-                        fd = os.memfd_create("cam", 0)
-                        try:
-                            os.ftruncate(fd, len(frame_bytes))
-                            os.pwrite(fd, frame_bytes, 0)
-                            mem = self._GstAllocators.FdAllocator.alloc(
-                                self._fd_alloc, fd, len(frame_bytes),
-                                self._GstAllocators.FdMemoryFlags.NONE)   # on success the allocator owns/closes the fd
-                        except Exception:
-                            os.close(fd)   # ownership never transferred; the handler below would otherwise
-                            raise          # silently leak one fd per published frame until EMFILE
-                        ubuf = Gst.Buffer.new()
-                        ubuf.insert_memory(-1, mem)
-                        ubuf.pts = tpts
-                        ubuf.offset = stamp.frame_id
+                        if isinstance(frame_bytes, GstFrame) and self._unixfd_pool:
+                            # Shared decoder/converter allocations pass straight through. If
+                            # upstream declined that allocator, 1.28 copies in C into its pool.
+                            ubuf = frame_bytes.to_buffer(tpts, stamp.frame_id)
+                        else:
+                            # Keep the live byte path and older unixfd runtimes unchanged.
+                            fd = os.memfd_create("cam", 0)
+                            try:
+                                os.ftruncate(fd, len(frame_bytes))
+                                if isinstance(frame_bytes, GstFrame):
+                                    frame_bytes.write_to_fd(fd)
+                                else:
+                                    os.pwrite(fd, frame_bytes, 0)
+                                mem = self._GstAllocators.FdAllocator.alloc(
+                                    self._fd_alloc, fd, len(frame_bytes),
+                                    self._GstAllocators.FdMemoryFlags.NONE)
+                            except Exception:
+                                os.close(fd)   # allocation did not transfer ownership
+                                raise
+                            ubuf = Gst.Buffer.new()
+                            ubuf.insert_memory(-1, mem)
+                            ubuf.pts = tpts
+                            ubuf.offset = stamp.frame_id
                         ubuf.offset_end = stamp.timestamp_ns
                         self._push_checked(self.unixfd_src, ubuf, "unixfd transport", publish=True)
                 elif self.transport_src is not None:
@@ -685,10 +709,17 @@ class CapturePipeline:
                         timestamp_ns=stamp.timestamp_ns, frame_id=stamp.frame_id,
                         width=self._width, height=self._height,
                         pixfmt=self._gst_format, ts_source=stamp.source.value).pack()
-                    payload = hdr + frame_bytes
-                    if not self._queue_full(self.transport_src, len(payload), "shm transport", publish=True):
-                        self._push_checked(self.transport_src, _new_buffer(payload, tpts, stamp.frame_id),
-                                           "shm transport", publish=True)
+                    if isinstance(frame_bytes, GstFrame):
+                        if self._queue_full(self.transport_src, len(hdr) + len(frame_bytes),
+                                            "shm transport", publish=True):
+                            return
+                        buf = frame_bytes.to_buffer(tpts, stamp.frame_id, prefix=hdr)
+                        self._push_checked(self.transport_src, buf, "shm transport", publish=True)
+                    else:
+                        payload = hdr + frame_bytes
+                        if not self._queue_full(self.transport_src, len(payload), "shm transport", publish=True):
+                            self._push_checked(self.transport_src, _new_buffer(payload, tpts, stamp.frame_id),
+                                               "shm transport", publish=True)
             except Exception as e:
                 # The plugin endpoint is best-effort: a per-frame publish failure (e.g. a
                 # TransportError for a pixel format the header can't carry, or a memfd
@@ -736,13 +767,13 @@ class CapturePipeline:
         # decode branch (_on_frame), so the RTCP->NTP provenance stays complete under decode-branch load.
         self._account(stamp)
 
-    def _feed_recording(self, sess, stamp: FrameStamp, pts: int, payload: bytes,
+    def _feed_recording(self, sess, stamp: FrameStamp, pts: int, payload: FramePayload,
                         caps_str: str = None) -> bool:
         """Push one frame into the open session (CFA-tiled when configured). DROPPED = the recording
         feed could not take it: counted as an enqueue failure, the recording's own loss counter.
         SKIPPED (closing / waiting for a sync point) is not a loss and is not counted here."""
         if self._tiler is not None:
-            payload = self._tiler(payload)
+            payload = self._tiler(bytes(payload) if isinstance(payload, GstFrame) else payload)
         r = sess.push(payload, pts, stamp, caps_str)
         if r is PushResult.DROPPED:
             n = self._note_push_drop(publish=False)
@@ -980,7 +1011,7 @@ class CapturePipeline:
             log.error("startup hook failed; shutting down without capturing")
             self.shutdown()
             return
-        self.source.start(self._on_frame, self._on_encoded)
+        self._start_source()
         if self.source.reconnect_enabled or self.source.finite:
             GLib.timeout_add_seconds(1, self._watchdog)
         if getattr(self.source, "playback", None) is not None:
@@ -991,6 +1022,15 @@ class CapturePipeline:
             self.loop.run()
         finally:
             self.shutdown()
+
+    def _start_source(self) -> None:
+        # Only ReplaySource opts in. Live GigE/USB/RTSP, pcap, and external byte consumers
+        # keep their existing callback contracts and reconnect behavior.
+        start = getattr(self.source, "start_buffers", None)
+        if start is not None:
+            start(self._on_frame, self._on_encoded, shared_memory=self._unixfd_pool)
+        else:
+            self.source.start(self._on_frame, self._on_encoded)
 
     def _log_health(self) -> bool:
         """~every _HEALTH_INTERVAL_S: surface drop accounting as a first-class live signal (not just
@@ -1124,7 +1164,7 @@ class CapturePipeline:
                 # starts. Left outside, that exception escaped the thread with `_reconnecting` stuck
                 # True and the watchdog gated shut, so capture stopped PERMANENTLY and silently. In
                 # here it is just a failed attempt: log it, back off, try again.
-                self.source.start(self._on_frame, self._on_encoded)
+                self._start_source()
             except SourceConfigChanged as e:
                 # The stream came back DIFFERENT (codec/geometry). The appsrc caps are fixed at
                 # build(), so no in-process reopen can carry on: finalize the recording cleanly and

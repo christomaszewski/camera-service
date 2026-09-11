@@ -146,6 +146,27 @@ in the descriptor say where it is). `restart` goes back to the first session ins
 
 ## Interaction with the recorder (camera-service)
 
+MKV replay opts into a buffer-based frame path: untiled decoded images retain GStreamer memory
+through raw output, recording, and the headered-shm transport instead of extracting the full image
+into Python bytes and wrapping it again. Each outgoing buffer has independent PTS/frame metadata.
+On GStreamer 1.28+, replay offers the raw decoder/converter a reusable shared-memory pool. The
+resulting FD-backed buffers pass through unixfd without another pixel copy. If upstream declines
+the allocator, unixfdsink copies into its native pool. Older unixfd versions retain the explicit
+memfd copy, after the publication rate/queue checks. Feature detection selects these paths.
+CFA un-tiling uses the byte path; recording-side CFA tiling materializes bytes only for that transform.
+Live GigE/USB/RTSP and pcap sources retain their existing byte callback interface.
+
+When neither local preview nor the raw endpoint is enabled, replay leaves the main appsrc idle;
+the plugin transport and recorder continue independently. This does not skip decoding or change
+recording rate, source timestamps, pause/restart behavior, or the shared-memory wire format.
+
+`core-driver/tests/test_replay_buffers.py` checks memory lifetime, exact recording roundtrips,
+rate-limited streaming, raw output, and held frames on both shm and unixfd. For CPU comparisons,
+run `python3 tools/replay_buffer_benchmark.py <session-prefix> --seconds 10` inside the dev image
+with the input mounted read-only, using the same image and input for each checkout. It reports
+process CPU time (including its lightweight transport consumer), wall time, and drops; it does
+not include ROS or WebRTC encoding. No recording files are written.
+
 Recording and playback are independent controls on one process: pausing playback while a session
 is `active` simply delivers no frames (the session stays open, its clock stands still — no gap is
 recorded, because nothing was played); changing speed changes how fast frames arrive at the
@@ -155,6 +176,41 @@ reprocess). `restart` mid-session records the data again from its start into the
 (the sidecar's monotonic PTS keeps the join exact). `finished` finalizes an open session; a
 re-recorded replay's sidecar header carries `replay_of` (the session prefixes it was played from)
 and `replay_epoch_unix_ns`, so the new run links back to its origin.
+
+### Pinned GStreamer 1.28.7 on a development machine
+
+Ubuntu 26.04 currently packages 1.28.2. The opt-in image overlay builds the matching 1.28.7 core,
+base/good/bad/ugly plugins, libav plugin and RTSP server from checksummed upstream tarballs into
+`/opt/gstreamer`. The camera media elements and Python typelibs are verified during the build.
+System Aravis, libnice and the existing gst-plugins-rs 0.15 remain available. This is a software
+development stack; Jetson production image defaults and ROS packages are unchanged.
+
+With the Ubuntu 26.04 `cam-dev:jp6m` and `webrtc-bridge:jp6m` images built, run from the repo root:
+
+```sh
+docker build -f tools/gstreamer/Dockerfile --build-arg BASE_IMAGE=cam-dev:jp6m -t cam-dev:gst1.28.7 .
+docker build -f tools/gstreamer/Dockerfile --build-arg BASE_IMAGE=webrtc-bridge:jp6m -t webrtc-bridge:gst1.28.7 .
+export CAM_DEV_IMAGE=cam-dev:gst1.28.7 CAM_WEBRTC_IMAGE=webrtc-bridge:gst1.28.7
+export CAM_TRANSPORT=unixfd
+```
+
+Set those same three variables in the deployment's `env` block when using rig. Both bridges must
+use `unixfd`; the `dev` platform's legacy default is headered shm. The existing ROS 2 bridge image
+can consume this transport without a ROS upgrade. Roll back by restoring the previous image tags.
+For the 1.20 compatibility stack, also restore `CAM_TRANSPORT=shm`.
+
+Validation on ARM64 Docker (2026-09-11): all 26 standalone core test scripts passed on
+GStreamer 1.20.3, 1.28.2 and 1.28.7. The 1.28.7 image also passed synthetic GigE/USB/RTSP ingest,
+recording and transport, exact replay roundtrips, headless WebRTC (raw shm and unixfd/Bayer,
+H.264 and downscaling), and delivery to the existing ROS 2 bridge. Physical sensor/Jetson hardware
+was not part of this development validation.
+
+A repeated 640x480 NV12/FFV1 replay benchmark at 1x, with recording off and a lightweight unixfd
+consumer, used 2.514 CPU seconds before and 2.354 after per 373 frames on average (about 6.4% less).
+Two 15-second windows per path, ordered before/after/after/before, delivered all 1,492 frames with
+zero drops. Both paths used the same 1.28.7 image; this isolates shared allocation/pooling from
+other version changes. Use `--legacy-transport-copy` with the benchmark tool for that baseline.
+This is core-process work including the test consumer, not a whole-dashboard CPU measurement.
 
 ## Zenoh session (producer side)
 

@@ -7,9 +7,10 @@
 # Prereq:  docker build -f core-driver/Dockerfile.dev -t cam-dev .
 # Run from the repo root:  ./core-driver/tools/replay_test.sh
 set -euo pipefail
+IMG="${CAM_DEV_IMAGE:-cam-dev}"
 
 echo "########## RAW GRAY8: usb-fake/ffv1 run -> replay -> re-record, exact roundtrip ##########"
-docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
+docker run --rm -v "$PWD/core-driver:/app" "$IMG" bash -c '
   set -e
   mkdir -p /data/recordings /tmp/cam
   echo "=== 1. record a short GRAY8/FFV1 run ==="
@@ -47,8 +48,10 @@ docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
   # on the stamp too -- so cycle N+1 must never replay cycle N pts into the muxer. speed: 0 (as
   # fast as the pipeline drains) rides the blocking recording appsrcs: no frame may be dropped.
   rm -f /data/recordings/rerec-*
-  timeout 60 python3 main.py -c config/replay-loop-test.yaml >/tmp/loop.log 2>&1 &
-  LOOP=$!; sleep 6; kill -INT "$LOOP"
+  # Signal the service, not timeout: newer coreutils reports 130 when its monitor receives
+  # SIGINT even if the child handled it and finalized successfully. Keep the hang deadline.
+  timeout 60 bash -c "echo \$\$ > /tmp/replay-loop.pid; exec python3 main.py -c config/replay-loop-test.yaml" >/tmp/loop.log 2>&1 &
+  LOOP=$!; sleep 6; kill -INT "$(cat /tmp/replay-loop.pid)"
   wait "$LOOP" || { echo "FAIL: looped replay exited non-zero"; tail -20 /tmp/loop.log; exit 1; }
   grep -q "replay: loop -> cycle" /tmp/loop.log || { echo "FAIL: replay never looped"; exit 1; }
   LOOP_CSV=$(ls /data/recordings/rerec-*.csv) || { echo "FAIL: no looped CSV"; exit 1; }
@@ -69,7 +72,7 @@ EOF
 
 echo
 echo "########## TWO SESSIONS: activate/deactivate twice -> ONE replay plays both in order -> re-record ##########"
-docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
+docker run --rm -v "$PWD/core-driver:/app" "$IMG" bash -c '
   set -e
   mkdir -p /data/recordings /tmp/cam
   echo "=== 1. record TWO lifecycle sessions (boot active -> USR2 -> USR1 -> USR2) ==="
@@ -118,7 +121,7 @@ PYCHECK
 
 echo
 echo "########## RAW GRAY16 (thermal shape): 16-bit ffv1 run -> replay roundtrip ##########"
-docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
+docker run --rm -v "$PWD/core-driver:/app" "$IMG" bash -c '
   set -e
   mkdir -p /data/recordings /tmp/cam
   sed "s/GRAY8/GRAY16_LE/; s/name_prefix: usbfake/name_prefix: usb16/" \
@@ -142,7 +145,7 @@ docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
 
 echo
 echo "########## STREAM-COPY MJPEG: usb-fake-mjpeg run -> replay -> stream-copy again ##########"
-docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
+docker run --rm -v "$PWD/core-driver:/app" "$IMG" bash -c '
   set -e
   mkdir -p /data/recordings /tmp/cam
   echo "=== 1. record a short MJPEG (stream-copy) run ==="

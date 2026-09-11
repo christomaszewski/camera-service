@@ -53,6 +53,7 @@ from gi.repository import GLib, Gst
 from .. import playback
 from ..bayer_tile import normalize_mode, untile_cfa
 from ..formats import encoded_info, select_decoder
+from ..gst_frame import GstFrame
 from ..timestamps import FrameStamp, TimestampSource
 from .gstbase import GstPipelineSource
 
@@ -137,6 +138,8 @@ class ReplaySource(GstPipelineSource):
         self._idx = 0
         self._cycle = 0
         self._offset = 0            # retime + loop shift applied to every delivered stamp
+        self._buffer_frames = False  # opt-in from CapturePipeline; start() retains its bytes API
+        self._shared_memory = False
         # Runtime playback control (docs/PLAYBACK.md). Restart is the loop wrap's own mechanism
         # (a flush-seek to 0 or a rebuild of the first reader), so the hook IS _restart, on the
         # main loop. Restart works from `finished` too: the reader is simply rebuilt.
@@ -298,13 +301,67 @@ class ReplaySource(GstPipelineSource):
         bus.connect("message::eos", self._on_eos, self._gen)
         bus.connect("message::error", self._on_error, self._gen)
 
-    def start(self, on_frame, on_encoded=None) -> None:
+    def start(self, on_frame, on_encoded=None, *, buffer_frames=False) -> None:
+        self._buffer_frames = buffer_frames
         self._user_on_frame = on_frame
         self._user_on_encoded = on_encoded
         self._start_ns = time.time_ns()
         self._last_data_ns = 0
         self._started = True
         self._play()
+
+    def start_buffers(self, on_frame, on_encoded=None, *, shared_memory=False) -> None:
+        """CapturePipeline's optional seam: raw callbacks accept GstFrame as well as bytes.
+        Encoded callbacks and CFA un-tiling retain the existing byte path."""
+        self._shared_memory = shared_memory
+        self.start(on_frame, on_encoded, buffer_frames=True)
+
+    def _propose_allocation(self, sink, query) -> bool:
+        """Offer reusable memfd pixels; upstream may decline and use its normal allocator.
+
+        No video-meta/alignment option: our consumers use the standard caps layout, not
+        decoder-specific padded strides. Never impose a finite pool limit: recording and
+        late/paused consumers can retain buffers while the decoder needs another frame.
+        """
+        try:
+            gi.require_version("GstAllocators", "1.0")
+            gi.require_version("GstVideo", "1.0")
+            from gi.repository import GstAllocators, GstVideo
+            GstAllocators.ShmAllocator.init_once()
+            caps, _ = query.parse_allocation()
+            if caps is None or not caps.is_fixed():
+                return False
+            info = GstVideo.VideoInfo.new_from_caps(caps)
+            allocator = GstAllocators.ShmAllocator.get()
+            if allocator is None or info.size <= 0:
+                return False
+            pool = GstVideo.VideoBufferPool.new()
+            config = pool.get_config()
+            Gst.BufferPool.config_set_params(config, caps, info.size, 2, 0)
+            Gst.BufferPool.config_set_allocator(config, allocator, None)
+            if not pool.set_config(config):
+                return False
+            query.add_allocation_pool(pool, info.size, 2, 0)
+            query.add_allocation_param(allocator, None)
+            return True
+        except (AttributeError, ImportError, TypeError, ValueError, RuntimeError) as exc:
+            log.warning("replay: shared allocation unavailable, using transport copy: %s", exc)
+            return False
+
+    def _on_raw(self, sink) -> Gst.FlowReturn:
+        if not self._buffer_frames or self._untile is not None:
+            return super()._on_raw(sink)
+        sample = sink.emit("pull-sample")
+        if sample is None:
+            return Gst.FlowReturn.OK
+        buf = sample.get_buffer()
+        # Use the same stamp/pacing point as GstPipelineSource._on_raw. The wrapped callback
+        # still enforces the playback window; skipped frames never become Python image bytes.
+        stamp = self._stamp_for(buf) if self.encoded_caps is not None else self._new_stamp(buf)
+        self._raw_delivered += 1
+        if self._on_frame is not None:
+            self._on_frame(stamp, GstFrame(buf))
+        return Gst.FlowReturn.OK
 
     def _wrapped_callbacks(self):
         """The consumer callbacks with the window filter (frames outside `from`/`to` are decoded
@@ -326,6 +383,13 @@ class ReplaySource(GstPipelineSource):
         self._on_frame, self._on_encoded = self._wrapped_callbacks()
         self._stamps.clear()   # the base's PTS-keyed correlation memo is per reader pipeline
         self._rawsink.connect("new-sample", self._on_raw)
+        # Arm each newly built reader, including session changes/restarts. Restrict this to
+        # raw recordings; encoded/HW decode and CFA transforms retain their existing allocators.
+        if (self._buffer_frames and self._shared_memory and not self._enc
+                and self._untile is None):
+            from gi.repository import GObject
+            if GObject.signal_lookup("propose-allocation", self._rawsink.__gtype__):
+                self._rawsink.connect("propose-allocation", self._propose_allocation)
         if self._encsink is not None:
             self._encsink.connect("new-sample", self._on_enc)
         self._pipeline.set_state(Gst.State.PLAYING)
