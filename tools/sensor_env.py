@@ -79,7 +79,7 @@ def source_pixel_format(cfg, stype):
     comes off the decoded stream). A PLAYBACK source is that camera's data played back: `pcap`
     pins the format in its own block, but `replay` reads it from the recording's sidecar, so the
     replay: block has no pixel_format at all -- while the bridges still need the launch-time hint
-    (on the JP6/dev frame header a Bayer mosaic rides as plain GRAY8; only CAM_BAYER /
+    (on the JP6 frame header a Bayer mosaic rides as plain GRAY8; only CAM_BAYER /
     CAM_ROS_ENCODING relabel it -- docs/unixfd-migration.md). `rig replay` renders the instance's
     OWN yaml with `camera.type: replay` patched on top, so the camera's live block -- and its
     pixel_format -- is still in the file: a playback block that names no format INHERITS it from

@@ -179,25 +179,33 @@ and `replay_epoch_unix_ns`, so the new run links back to its origin.
 
 ### Pinned GStreamer 1.28.7 on a development machine
 
-Ubuntu 26.04 currently packages 1.28.2. The opt-in image overlay builds the matching 1.28.7 core,
-base/good/bad/ugly plugins, libav plugin and RTSP server from checksummed upstream tarballs into
-`/opt/gstreamer`. The camera media elements and Python typelibs are verified during the build.
-System Aravis, libnice and the existing gst-plugins-rs 0.15 remain available. This is a software
-development stack; Jetson production image defaults and ROS packages are unchanged.
+The `dev` platform defaults to Ubuntu 26.04 with GStreamer 1.28.7 in both the core and WebRTC
+images. Matching core, base/good/bad/ugly plugins, libav and RTSP server are built from checksummed
+upstream tarballs into `/opt/gstreamer`; media elements and Python typelibs are verified during
+build. Aravis, libnice and gst-plugins-rs 0.15.3 remain available. Both bridges default to unixfd.
+ROS packages and Jetson platform defaults are unchanged.
 
-With the Ubuntu 26.04 `cam-dev:jp6m` and `webrtc-bridge:jp6m` images built, run from the repo root:
+Build locally from the repo root (this builds every dev image, including ROS topic input):
 
 ```sh
-docker build -f tools/gstreamer/Dockerfile --build-arg BASE_IMAGE=cam-dev:jp6m -t cam-dev:gst1.28.7 .
-docker build -f tools/gstreamer/Dockerfile --build-arg BASE_IMAGE=webrtc-bridge:jp6m -t webrtc-bridge:gst1.28.7 .
-export CAM_DEV_IMAGE=cam-dev:gst1.28.7 CAM_WEBRTC_IMAGE=webrtc-bridge:gst1.28.7
-export CAM_TRANSPORT=unixfd
+docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+  --profile webrtc-bridge --profile ros2-bridge --profile ros2-source build
+./cam-up --dev config/sensors/cam_b.yaml up -d
 ```
 
-Set those same three variables in the deployment's `env` block when using rig. Both bridges must
-use `unixfd`; the `dev` platform's legacy default is headered shm. The existing ROS 2 bridge image
-can consume this transport without a ROS upgrade. Roll back by restoring the previous image tags.
-For the 1.20 compatibility stack, also restore `CAM_TRANSPORT=shm`.
+For a registry deployment, `tools/build-images.sh registry.lan:5000 dev` builds and publishes
+the same defaults. Versioned tags such as `v1.4.0-dev` work through the usual rig build matrix.
+`--dev`, `CAM_PLATFORM=dev` and rig's `platform: dev` all select this stack; remove old
+`CAM_DEV_IMAGE`, `CAM_WEBRTC_IMAGE`, `CAM_ROS2_IMAGE` and `CAM_TRANSPORT` overrides to use it.
+On Docker Desktop, keep `CAM_NETWORK=host` if required for WebRTC media and the host ROS router.
+Rebuild/pull and recreate the containers to apply the new images to an existing deployment.
+
+Compatibility builds remain available: core `--target distro --build-arg BASE=ubuntu:22.04`
+(or 24.04); WebRTC `--target runtime` with its default Ubuntu 24.04 base. Compose and the build
+script accept `CAM_DEV_TARGET`, `CAM_DEV_BASE`, `CAM_WEBRTC_TARGET`, `CAM_WEBRTC_BASE` and
+`CAM_GST_RS_TAG` overrides. Pin `CAM_DEV_IMAGE` / `CAM_WEBRTC_IMAGE` / `CAM_ROS2_IMAGE` to select
+existing images. For a 1.20 core, also set `CAM_TRANSPORT=shm` so both bridges use headered shm.
+The standalone `tools/gstreamer/Dockerfile` overlay remains available for Ubuntu 26.04 images.
 
 Validation on ARM64 Docker (2026-09-11): all 26 standalone core test scripts passed on
 GStreamer 1.20.3, 1.28.2 and 1.28.7. The 1.28.7 image also passed synthetic GigE/USB/RTSP ingest,

@@ -25,10 +25,9 @@
 # per host (env), never per sensor.
 #
 # `dev` is a THIRD platform, not a side channel: a non-Jetson arm64/x86 bench box (a laptop, CI, a
-# bench Orin running plain Ubuntu). It selects cam-dev (distro GStreamer, no NVIDIA stack) + runc +
-# bridge networking, and mirrors JP6 userspace (gst 1.20 -> the shm+header transport), so the bench
-# exercises the same transport a JP6 vehicle does. --dev is sugar for it; rig selects it the same
-# way it selects a vehicle -- RIG_TARGET_PLATFORM=dev or a -dev image tag -- which is what lets a
+# bench Orin running plain Ubuntu). It selects cam-dev (GStreamer 1.28.7, no NVIDIA stack) + runc +
+# bridge networking and unixfd transport. --dev is sugar for it; rig selects it the same
+# way it selects a vehicle -- RIG_TARGET_PLATFORM=dev or RIG_IMAGE_TAG=dev -- which is what lets a
 # bench box PULL tools/build-images.sh's `dev` image set instead of rebuilding it locally.
 #
 # CAM_NETWORK={host,bridge} overrides the networking half of that. Bridge is only the dev DEFAULT:
@@ -141,9 +140,7 @@ if [ "$PLATFORM" = auto ]; then
     if [ "${REL:-0}" -ge 38 ] 2>/dev/null; then PLATFORM=jp7; else PLATFORM=jp6; fi
   fi
 fi
-# Dev / unresolved -> the conservative shm+header transport. Export the resolved platform so the
-# ros2-bridge picks the matching consumer (CamUnixfdBridge on jp7, CamHeaderBridge otherwise) -- the
-# core selects its transport the same way (unixfd exactly when GStreamer >= 1.24 / jp7).
+# An unresolved platform retains the conservative JP6 default.
 [ "$PLATFORM" = auto ] && PLATFORM=jp6
 # ONE fact, two consequences: whichever way `dev` arrived (--dev, CAM_PLATFORM, RIG_TARGET_PLATFORM,
 # a -dev tag), it drives the dev overlay AND bridge networking. Deriving DEV here instead of setting
@@ -155,8 +152,8 @@ fi
 # that has to reach WebRTC media on ephemeral ICE/UDP ports nothing publishes. There,
 # CAM_NETWORK=host is the working shape (Docker Desktop forwards the VM's ports to the Mac).
 [ "$DEV" = 1 ] && [ -z "$CAM_NETWORK_EXPLICIT" ] && export CAM_NETWORK=bridge
-# CAM_PLATFORM is also the bridges' transport selector; every consumer picks unixfd iff jp7 and the
-# header transport otherwise, so `dev` lands on shm+header -- the JP6 shape, as intended.
+# Export explicitly for older bridge images too; an explicit compatibility override still wins.
+[ "$DEV" = 1 ] && export CAM_TRANSPORT="${CAM_TRANSPORT:-unixfd}"
 export CAM_PLATFORM="$PLATFORM"
 
 FILES=(-f "$REPO/docker-compose.yml")
@@ -202,10 +199,12 @@ fi
 # Registry deploy (no per-vehicle build): CAM_REGISTRY points every image at <registry>/<name>:<tag>,
 # tag following the detected platform (matches tools/build-images.sh) so one var pulls the whole stack.
 # Per-image vars still override individually. Then `cam-up <cfg> pull` + `up -d` runs the pulled images.
+# Local dev uses the same tag selection without a registry prefix (default :dev).
 # rig injects RIG_IMAGE_REGISTRY fleet-wide; honor it here so cam's PLATFORM-TAGGED refs (cam-core:jp7)
 # come out right -- the raw ${RIG_IMAGE_REGISTRY}/cam-core prefix in the composes would resolve :latest.
 CAM_REGISTRY="${CAM_REGISTRY:-${RIG_IMAGE_REGISTRY:-}}"
-if [ -n "${CAM_REGISTRY:-}" ]; then
+if [ -n "${CAM_REGISTRY:-}" ] || [ "$DEV" = 1 ]; then
+  IMAGE_PREFIX="${CAM_REGISTRY:+$CAM_REGISTRY/}"
   # The PULL TAG and the runtime PLATFORM are separate concerns. Platform is the standalone fallback
   # when no fleet tag is set; CAM_IMAGE_TAG pins an EXACT tag over everything (never suffixed).
   IMG_TAG="${CAM_IMAGE_TAG:-${RIG_IMAGE_TAG:-$PLATFORM}}"
@@ -225,13 +224,16 @@ if [ -n "${CAM_REGISTRY:-}" ]; then
   # entirely while docker-compose.dev.yml still honored RIG_IMAGE_REGISTRY/RIG_IMAGE_TAG on its own
   # -- so a bench box got a registry ref from one path and not the other; now both agree.
   if [ "$DEV" = 1 ]; then
-    export CAM_DEV_IMAGE="${CAM_DEV_IMAGE:-$CAM_REGISTRY/cam-dev:$IMG_TAG}"
+    export CAM_DEV_IMAGE="${CAM_DEV_IMAGE:-${IMAGE_PREFIX}cam-dev:$IMG_TAG}"
   else
-    export CAM_CORE_IMAGE="${CAM_CORE_IMAGE:-$CAM_REGISTRY/cam-core:$IMG_TAG}"
+    export CAM_CORE_IMAGE="${CAM_CORE_IMAGE:-${IMAGE_PREFIX}cam-core:$IMG_TAG}"
   fi
-  export CAM_ROS2_IMAGE="${CAM_ROS2_IMAGE:-$CAM_REGISTRY/ros2-bridge:$IMG_TAG}"
-  export CAM_ROS1_IMAGE="${CAM_ROS1_IMAGE:-$CAM_REGISTRY/ros1-bridge:$IMG_TAG}"   # Noetic; ros1-bridge is jp6-class
-  export CAM_WEBRTC_IMAGE="${CAM_WEBRTC_IMAGE:-$CAM_REGISTRY/webrtc-bridge:$IMG_TAG}"
+  export CAM_ROS2_IMAGE="${CAM_ROS2_IMAGE:-${IMAGE_PREFIX}ros2-bridge:$IMG_TAG}"
+  # No dev ROS 1 image is built; retain its existing local fallback.
+  if [ -n "${CAM_REGISTRY:-}" ]; then
+    export CAM_ROS1_IMAGE="${CAM_ROS1_IMAGE:-${IMAGE_PREFIX}ros1-bridge:$IMG_TAG}"
+  fi
+  export CAM_WEBRTC_IMAGE="${CAM_WEBRTC_IMAGE:-${IMAGE_PREFIX}webrtc-bridge:$IMG_TAG}"
 fi
 # --zenohd: ensure the single shared host zenoh router is up before the stack (standalone convenience;
 # rig runs it per host in production). Idempotent + one-per-host; reuses the resolved ros2-bridge image.

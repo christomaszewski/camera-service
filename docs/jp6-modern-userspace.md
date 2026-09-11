@@ -34,7 +34,7 @@ linker — the `jp6m` images do).
 | `tools/build-images.sh` | a `jp6m` variant (`RIG_TARGET_PLATFORM=jp6m`, or a `jp6m` / `*-jp6m` tag): 26.04 base, gst-plugins-rs 0.15.3, images cam-core + ros2-bridge + webrtc-bridge |
 | `tools/jp6-modern/probe.sh` | the on-host probe: injection mode × image → plugin load, elements, encode throughput, decode round trip, bit-exact NVENC |
 | `tools/jp6-modern/cam-up-jp6m` | `cam-up` with the jp6m images in `csv`, `cdi` or `dev` mode |
-| `core-driver/Dockerfile.dev` | unchanged — it already builds on `BASE=ubuntu:26.04` (26.04 packages Aravis 0.8.34), giving `cam-dev:jp6m` for the bench row |
+| `core-driver/Dockerfile.dev` | the `distro` target builds on `BASE=ubuntu:26.04` (26.04 packages Aravis 0.8.34), giving `cam-dev:jp6m` for the bench row |
 | `tools/jp6-modern/stack-check.sh` | reads a running stack's logs for the verdicts (encoder, transport, webrtcsink's encoder, ros2 consumer) |
 
 ros2-bridge is untouched: it is already the Lyrical (26.04, GStreamer 1.28) image, and the new

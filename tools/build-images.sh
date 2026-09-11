@@ -4,10 +4,10 @@
 # perfect) for a native build, or cross-build from x86 with PLATFORM_FLAG (slow; needs qemu binfmt).
 #
 # The `dev` variant is the same mechanism pointed at a NON-Jetson arm64 box (a bench machine, an
-# arm64 Mac, CI): it builds cam-dev (core-driver/Dockerfile.dev -- distro GStreamer, no NVIDIA
+# arm64 Mac, CI): it builds cam-dev (core-driver/Dockerfile.dev -- GStreamer 1.28.7, no NVIDIA
 # stack) instead of cam-core, so a bench box PULLS the same image the vehicles' tag matrix was cut
-# from instead of rebuilding it locally. It mirrors JP6 userspace (ubuntu:22.04 = gst 1.20), which
-# is what makes the shm+header transport the one under test there, same as a JP6 vehicle.
+# from instead of rebuilding it locally. Dev uses Ubuntu 26.04, unixfd transport and the same
+# pinned GStreamer build in the core and WebRTC bridge.
 #
 #   tools/build-images.sh [registry[:port]] [tag]
 #     registry   your local registry, e.g. registry.lan:5000. Falls back to $RIG_IMAGE_REGISTRY (the
@@ -20,8 +20,10 @@
 #
 #   env knobs:
 #     IMAGES="cam-core ros2-bridge webrtc-bridge"   subset to build (default: all three)
-#     BASE_IMAGE=...                 core base; defaults from the tag (jp6 -> l4t-base, dev -> ubuntu:22.04,
+#     BASE_IMAGE=...                 core base; defaults from the tag (jp6 -> l4t-base, dev -> ubuntu:26.04,
 #                                    else ubuntu:24.04). Feeds cam-core's BASE_IMAGE arg, or cam-dev's BASE.
+#     CAM_DEV_TARGET=distro          build the distro-only core for compatibility (dev: modern default)
+#     CAM_WEBRTC_TARGET=runtime      build the distro-only bridge (dev: modern default)
 #     ROS_DISTRO=lyrical             ros2-bridge ROS 2 distro
 #     PUSH=1                         set 0 to build+tag locally without pushing
 #     PLATFORM_FLAG=                 e.g. --platform=linux/arm64 to cross-build from x86
@@ -49,7 +51,7 @@ REGISTRY="${1:-${RIG_IMAGE_REGISTRY:-}}"
 TAG="${2:-${RIG_TARGET_PLATFORM:-jp7}}"
 # Build VARIANT (jp6 | jp7 | dev) selects the core base + the default image set: jp6 -> slim l4t-base +
 # the Noetic ros1-bridge (ROS 1 is jp6-class); jp7 -> ubuntu:24.04, no ros1-bridge; dev -> cam-dev on
-# ubuntu:22.04 (JP6-mirroring userspace) for a non-Jetson arm64 bench box. RIG_TARGET_PLATFORM
+# ubuntu:26.04 + GStreamer 1.28.7 for a non-Jetson arm64 bench box. RIG_TARGET_PLATFORM
 # (rig's standard per-target platform var) wins; else derive from the tag -- a bare platform (legacy)
 # or a composed <version>-<platform> suffix. The TAG is pushed verbatim either way. Override
 # BASE_IMAGE / IMAGES individually as before.
@@ -67,16 +69,20 @@ if [ -z "$VARIANT" ]; then
     *)         VARIANT=jp7 ;;
   esac
 fi
+DEV_TARGET="${CAM_DEV_TARGET:-distro}"
+WEBRTC_TARGET="${CAM_WEBRTC_TARGET:-runtime}"
 case "$VARIANT" in
   # JP6: the host's nvidia runtime injects the multimedia + nv plugin layer (drivers.csv) into a
   # container that asks (NVIDIA_VISIBLE_DEVICES -- the images set it). L4T_MULTIMEDIA=r36.4 bakes the
   # layer from NVIDIA's apt repo instead, for a host whose CSV lacks it (opt-in; version-mixing risk).
   jp6) BASE_IMAGE="${BASE_IMAGE:-nvcr.io/nvidia/l4t-base:r36.2.0}"
        IMAGES="${IMAGES:-cam-core ros2-bridge ros1-bridge webrtc-bridge}" ;;
-  # dev: cam-dev REPLACES cam-core (no l4t base, no NVENC -- ffv1 record, x264enc preview). The two
-  # bridges are not l4t-based and build unchanged off-Jetson, so the bench box can run the whole
-  # stack; IMAGES=cam-dev alone is the fast path when only the core bench tests matter.
-  dev) BASE_IMAGE="${BASE_IMAGE:-ubuntu:22.04}"
+  # Dev core and WebRTC use the same pinned GStreamer; ROS keeps its distro packages.
+  dev) BASE_IMAGE="${BASE_IMAGE:-${CAM_DEV_BASE:-ubuntu:26.04}}"
+       WEBRTC_BASE="${WEBRTC_BASE:-${CAM_WEBRTC_BASE:-ubuntu:26.04}}"
+       GST_RS_TAG="${GST_RS_TAG:-${CAM_GST_RS_TAG:-0.15.3}}"
+       DEV_TARGET="${CAM_DEV_TARGET:-modern}"
+       WEBRTC_TARGET="${CAM_WEBRTC_TARGET:-modern}"
        IMAGES="${IMAGES:-cam-dev ros2-bridge webrtc-bridge}" ;;
   # jp6m (EXPERIMENT, docs/jp6-modern-userspace.md): a JP6 host running a 26.04 userspace -- GStreamer
   # 1.28 + gst-plugins-rs 0.15 -- with the L4T stack injected by the host's nvidia runtime / CDI.
@@ -113,10 +119,10 @@ for img in $IMAGES; do
   case "$img" in
     cam-core)     build_one cam-core     core-driver/Dockerfile           --build-arg "BASE_IMAGE=$BASE_IMAGE" \
                      --build-arg "L4T_MULTIMEDIA=$L4T_MULTIMEDIA" --build-arg "L4T_VERSION=$L4T_VERSION" ;;
-    cam-dev)      build_one cam-dev      core-driver/Dockerfile.dev       --build-arg "BASE=$BASE_IMAGE" ;;   # NB: the dev image's arg is BASE, not BASE_IMAGE
+    cam-dev)      build_one cam-dev      core-driver/Dockerfile.dev       --target "$DEV_TARGET" --build-arg "BASE=$BASE_IMAGE" ;;   # NB: the dev image's arg is BASE, not BASE_IMAGE
     ros2-bridge)   build_one ros2-bridge   plugins/ros2-bridge/Dockerfile   --build-arg "ROS_DISTRO=$ROS_DISTRO" ;;
     ros1-bridge)   build_one ros1-bridge   plugins/ros1-bridge/Dockerfile ;;   # Noetic (ROS_DISTRO baked in)
-    webrtc-bridge) build_one webrtc-bridge plugins/webrtc-bridge/Dockerfile \
+    webrtc-bridge) build_one webrtc-bridge plugins/webrtc-bridge/Dockerfile --target "$WEBRTC_TARGET" \
                      ${WEBRTC_BASE:+--build-arg "BASE_IMAGE=$WEBRTC_BASE"} ${GST_RS_TAG:+--build-arg "GST_RS_TAG=$GST_RS_TAG"} \
                      --build-arg "L4T_MULTIMEDIA=$L4T_MULTIMEDIA" --build-arg "L4T_VERSION=$L4T_VERSION" ;;
     *) echo "build-images: unknown image '$img' (want: cam-core|cam-dev|ros2-bridge|ros1-bridge|webrtc-bridge)" >&2; exit 1 ;;

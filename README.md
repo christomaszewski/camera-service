@@ -235,19 +235,26 @@ clock-source change; the sidecar keeps the true stamps).
 
 ### Dev container (run the producer without a Jetson)
 
-[core-driver/Dockerfile.dev](core-driver/Dockerfile.dev) is an Ubuntu 22.04 image with GStreamer 1.20 +
-Aravis 0.8 (mirroring JetPack 6's userspace) but **no NVIDIA stack** — so it runs the entire producer
-on any machine: fake camera → timestamps → CSV/JSON → software **FFV1** recording → shm transport.
-(It can't exercise the NVENC recorder or real PTP/chunk timestamps — those need the Orin.)
+[core-driver/Dockerfile.dev](core-driver/Dockerfile.dev) defaults to Ubuntu 26.04 with pinned
+GStreamer 1.28.7 and Aravis, with no NVIDIA stack. The dev platform uses `cam-dev:dev`,
+`webrtc-bridge:dev` and `ros2-bridge:dev`, with unixfd transport selected for both bridges.
+It runs fake/live software capture, timestamps, CSV/JSON and FFV1 recording on ARM64 or x86.
+NVENC and physical PTP/chunk timestamps still need Jetson/sensor hardware.
 
 ```bash
-docker build -f core-driver/Dockerfile.dev -t cam-dev .
-./core-driver/tools/dev_test.sh     # unit tests + fake producer + shm_probe header round-trip + mkv decode
+# Build the core and the plugins enabled in this sensor config:
+./cam-up --dev config/sensors/cam_b.yaml build
+CAM_DEV_IMAGE=cam-dev:dev ./core-driver/tools/dev_test.sh
 ```
 
+`CAM_PLATFORM=dev`, `RIG_TARGET_PLATFORM=dev` and `RIG_IMAGE_TAG=dev` select the same defaults.
+No per-image or transport overrides are required. On Docker Desktop, retain `CAM_NETWORK=host`
+when WebRTC or a host ROS router needs it. See [PLAYBACK.md](docs/PLAYBACK.md#pinned-gstreamer-1287-on-a-development-machine)
+for builds and compatibility options.
+
 For iteration, mount the code live so edits need no rebuild:
-`docker run --rm -v "$PWD/core-driver:/app" cam-dev <cmd>`. The [shm_probe](core-driver/tools/shm_probe.py)
-tool reads the plugin endpoint and prints each frame's parsed header — the same thing the C++ bridge will do.
+`docker run --rm -v "$PWD/core-driver:/app" cam-dev:dev <cmd>`. The
+[shm_probe](core-driver/tools/shm_probe.py) tool reads either unixfd or headered shm.
 
 ## Post-processing (verify lossless + recover original frames)
 

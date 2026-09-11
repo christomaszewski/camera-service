@@ -25,6 +25,8 @@ else
   SOCKET=/tmp/cam/frames
 fi
 
+# Exercise platform defaults without forcing CAM_TRANSPORT in the bridge container.
+PLATFORM="${CAM_TEST_PLATFORM:-$PLATFORM}"
 TEST_DIR="$(mktemp -d /tmp/cam_ros_bridge_test.XXXXXX)"
 TEST_NAME="$(basename "$TEST_DIR")"
 VOL="${TEST_NAME}_sock"

@@ -13,11 +13,11 @@
 # Docker Desktop's macOS bind mounts can't host a unix socket) + --ipc=host. Proves the whole egress
 # path without a browser. PASS = each scenario decoded >= 30 frames.
 #
-# The unixfd scenario needs a GStreamer >= 1.24 core (unixfdsink landed in 1.24). The default cam-dev
-# is Ubuntu 22.04 / gst 1.20 (a JP6 userspace mirror -- no unixfd), so it is auto-skipped there; run
-# it with a gst >= 1.24 core -- on an Orin: CORE_IMG=cam-core:bench WEBRTC_IMG=webrtc-bridge:jp7.
+# The unixfd scenario needs a GStreamer >= 1.24 core (unixfdsink landed in 1.24).
+# Dev example: CORE_IMG=cam-dev:dev WEBRTC_IMG=webrtc-bridge:dev CAM_TEST_PLATFORM=dev.
+# On an Orin: CORE_IMG=cam-core:bench WEBRTC_IMG=webrtc-bridge:jp7.
 # Inversely, the HEADERED scenarios need a core WITHOUT unixfdsink (unixfd replaces the header
-# endpoint when available), i.e. the default cam-dev -- they are auto-skipped on a 1.24 core.
+# endpoint when available), i.e. a --target distro Ubuntu 22.04 build; skipped on a modern core.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."          # repo root
 REPO="$(pwd)"
@@ -149,7 +149,7 @@ else
   echo
   echo "########## SCENARIOS: JP6 headered shm -- SKIPPED ##########"
   echo "   core image '$CORE_IMG' HAS unixfdsink (gst >= 1.24), so its plugin endpoint serves unixfd,"
-  echo "   not shm+header. Re-run with the default cam-dev (22.04/gst 1.20) core to cover these."
+  echo "   not shm+header. Re-run with a distro-target 22.04/gst 1.20 core to cover these."
 fi
 
 run_scenario "shm-raw (legacy) + mono (GRAY8, env geometry)" \
@@ -202,9 +202,9 @@ fi
 if [ "$CORE_HAS_UNIXFD" = 1 ]; then
   # + the encode-side downscale BEHIND the runtime format seam (tap -> bayer2rgb -> fmt_scale):
   # the plan must come from the stream's caps (no geometry env on this path).
-  if run_scenario "JP7 unixfd + color (Bayer -> bayer2rgb) + CAM_WEBRTC_MAX_SIZE=256" \
+  if run_scenario "${CAM_TEST_PLATFORM:-jp7} unixfd + color (Bayer -> bayer2rgb) + CAM_WEBRTC_MAX_SIZE=256" \
       config/webrtc-fake-bayer.yaml \
-      -e CAM_PLATFORM=jp7 -e CAM_BAYER=rggb -e CAM_WEBRTC_MAX_SIZE=256; then
+      -e CAM_PLATFORM="${CAM_TEST_PLATFORM:-jp7}" -e CAM_BAYER=rggb -e CAM_WEBRTC_MAX_SIZE=256; then
     if bridge_log_has "scale: 512x512 -> 256x256"; then
       echo "-- downscale planned from the stream's own caps (behind the fmt_tap seam) --"
     else

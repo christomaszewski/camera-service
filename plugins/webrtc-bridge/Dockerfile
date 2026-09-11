@@ -27,6 +27,11 @@ ARG L4T_VERSION=
 ARG RUST_TOOLCHAIN=1.96.0
 ARG CARGO_C_VER=0.10.23
 
+# Only built for the modern dev target; vehicle targets keep their distro GStreamer.
+FROM ubuntu:26.04 AS gstreamer
+COPY tools/gstreamer/build.sh tools/gstreamer/SHA256SUMS /build-gstreamer/
+RUN bash /build-gstreamer/build.sh
+
 # ---- l4t: JetPack 6's multimedia + GStreamer plugin layer, EXTRACTED from NVIDIA's apt repo ----
 # On a JP6 host the nvidia runtime injects drivers + device nodes only (drivers.csv / devices.csv);
 # the multimedia libraries (NvBufSurface, libnvv4l2 + the v4l2 codec plugin, libnvtvmr ...) and the
@@ -84,7 +89,7 @@ RUN cd /tmp/gst-rs \
     && install -m755 target/release/gst-webrtc-signalling-server /usr/local/bin/
 
 # ---- runtime: GStreamer + libnice ICE elements + the built plugin/binary (no Rust, no -dev) ----
-FROM ${BASE_IMAGE}
+FROM ${BASE_IMAGE} AS distro
 ARG L4T_MULTIMEDIA
 ENV DEBIAN_FRONTEND=noninteractive
 # Runtime GStreamer + the libnice ICE elements; the codec/crypto runtime libs (x264/vpx/opus/srtp/ssl)
@@ -125,3 +130,22 @@ ENV GST_PLUGIN_PATH=/usr/local/lib/gstreamer-1.0 \
 WORKDIR /app
 COPY plugins/webrtc-bridge/ /app/
 CMD ["bash", "run.sh"]
+
+# Dev selects this target with BASE_IMAGE=ubuntu:26.04 and GST_RS_TAG=0.15.3.
+FROM distro AS modern
+# The overlay is compiled against 26.04. Fail instead of loading it into an older userspace.
+RUN . /etc/os-release && test "$ID:$VERSION_ID" = ubuntu:26.04 \
+    && apt-get update && apt-get install -y --no-install-recommends --no-upgrade libunwind8 libdw1t64 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=gstreamer /opt/gstreamer /opt/gstreamer
+ENV PATH=/opt/gstreamer/bin:$PATH \
+    LD_LIBRARY_PATH=/opt/gstreamer/lib:/usr/local/lib:/usr/local/lib/aarch64-linux-gnu:/usr/local/lib/x86_64-linux-gnu \
+    GI_TYPELIB_PATH=/opt/gstreamer/lib/girepository-1.0 \
+    GST_PLUGIN_PATH=/opt/gstreamer/lib/gstreamer-1.0:/usr/local/lib/gstreamer-1.0 \
+    GST_PLUGIN_SYSTEM_PATH=/usr/lib/aarch64-linux-gnu/gstreamer-1.0:/usr/lib/x86_64-linux-gnu/gstreamer-1.0 \
+    PKG_CONFIG_PATH=/opt/gstreamer/lib/pkgconfig
+COPY tools/gstreamer/check.py /opt/gstreamer/check.py
+RUN python3 /opt/gstreamer/check.py
+
+# Preserve the existing default for all vehicle builds.
+FROM distro AS runtime

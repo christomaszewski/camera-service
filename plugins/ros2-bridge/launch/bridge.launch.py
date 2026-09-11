@@ -7,7 +7,7 @@ bridge component:
             image_proc::DebayerNode is loaded into the SAME container so the bayer frame is shared
             intra-process (zero-copy) and debayered to <ns>/image_color.
 
-Transport selection: CAM_TRANSPORT ({unixfd|header}) wins if set, else unixfd iff CAM_PLATFORM is jp7 or jp6m.
+Transport selection: CAM_TRANSPORT ({unixfd|header|shm}) wins if set; jp7, jp6m and dev default to unixfd.
 This must match what the core driver does (it exposes unixfd exactly when GStreamer >= 1.24 / JP7).
 """
 import os
@@ -67,8 +67,10 @@ def _zenoh_env_actions():
 def generate_launch_description():
     platform = os.environ.get("CAM_PLATFORM", "jp6").strip().lower()
     transport = os.environ.get("CAM_TRANSPORT", "").strip().lower()
+    if transport == "shm":
+        transport = "header"   # same compatibility override accepted by the WebRTC bridge
     if transport not in ("unixfd", "header"):
-        transport = "unixfd" if platform in ("jp7", "jp6m") else "header"   # jp6m: a 1.28 core on a JP6 host
+        transport = "unixfd" if platform in ("jp7", "jp6m", "dev") else "header"
     unixfd = transport == "unixfd"
 
     instance = os.environ.get("CAM_INSTANCE", "camera").strip()

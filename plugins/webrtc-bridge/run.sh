@@ -52,7 +52,7 @@ set -eu
 PLATFORM="${CAM_PLATFORM:-jp6}"
 TRANSPORT="${CAM_TRANSPORT:-}"
 if [ -z "$TRANSPORT" ]; then
-  case "$PLATFORM" in jp7|jp6m) TRANSPORT=unixfd;; *) TRANSPORT=shm;; esac   # jp6m: a 1.28 core on a JP6 host
+  case "$PLATFORM" in jp7|jp6m|dev) TRANSPORT=unixfd;; *) TRANSPORT=shm;; esac
 fi
 # The headered-shm pump lives in the python launcher; the gst-launch escape hatch can't strip the
 # 36-byte header, so it degrades to the legacy raw endpoint (which must then be enabled on the core).

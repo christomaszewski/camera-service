@@ -42,10 +42,13 @@ echo "  cam_a frames=$fa  cam_b frames=$fb"
 va=$(docker run --rm -v cam_cam_a_sock:/s alpine ls /s 2>/dev/null | tr '\n' ' ')
 vb=$(docker run --rm -v cam_cam_b_sock:/s alpine ls /s 2>/dev/null | tr '\n' ' ')
 echo "  cam_cam_a_sock=[$va] cam_cam_b_sock=[$vb]"
-[[ "$va" == *frames*raw* ]] && [[ "$vb" == *frames*raw* ]] || fail "each volume must hold its camera's shm sockets"
+for sockets in "$va" "$vb"; do
+  [[ "$sockets" == *raw* ]] && { [[ "$sockets" == *unixfd* ]] || [[ "$sockets" == *frames* ]]; } \
+    || fail "each volume must hold its camera's plugin and raw sockets"
+done
 
 echo "== cross-stack read (a container outside both projects reads cam_a) =="
-docker run --rm --ipc=host -v cam_cam_a_sock:/tmp/cam webrtc-bridge bash -c \
+docker run --rm --ipc=host -v cam_cam_a_sock:/tmp/cam "${CAM_WEBRTC_IMAGE:-webrtc-bridge:dev}" bash -c \
   'gst-launch-1.0 shmsrc socket-path=/tmp/cam/raw num-buffers=15 ! "video/x-raw,format=GRAY8,width=512,height=512,framerate=25/1" ! fakesink' >/dev/null 2>&1 \
   && echo "  other-stack read: OK" || fail "external container could not read cam_a's shm"
 
