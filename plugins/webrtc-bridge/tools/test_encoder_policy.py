@@ -26,7 +26,7 @@ def test_gop_unknown_fps_assumes_a_conservative_preview_rate():
 
 def test_x264_gets_a_cheap_preset_and_a_short_gop():
     props = dict(live_encoder_props("x264enc", 10))
-    assert props["speed-preset"] == "superfast"
+    assert props["speed-preset"] == "ultrafast"
     assert props["key-int-max"] == 20
     # both knobs honored; the preset is normalized to the enum nick form
     props = dict(live_encoder_props("x264enc", 10, keyframe_s="4", x264_preset=" UltraFast "))
@@ -34,15 +34,15 @@ def test_x264_gets_a_cheap_preset_and_a_short_gop():
 
 
 def test_nvenc_gets_only_the_gop_under_its_own_name():
-    assert live_encoder_props("nvv4l2h264enc", 10) == [("iframeinterval", 20)]
+    assert live_encoder_props("nvv4l2h264enc", 10) == [("iframeinterval", 20), ("idrinterval", 20)]
     assert live_encoder_props("openh264enc", 10) == [("gop-size", 20)]
 
 
 def test_keyframe_zero_leaves_the_encoder_default_gop():
-    assert live_encoder_props("x264enc", 10, keyframe_s=0) == [("speed-preset", "superfast")]
+    assert live_encoder_props("x264enc", 10, keyframe_s=0) == [("speed-preset", "ultrafast")]
     assert live_encoder_props("nvv4l2h264enc", 10, keyframe_s="0") == []
     # a garbage env value is not an error: back to the 2 s default
-    assert live_encoder_props("nvv4l2h264enc", 10, keyframe_s="two") == [("iframeinterval", 20)]
+    assert live_encoder_props("nvv4l2h264enc", 10, keyframe_s="two") == [("iframeinterval", 20), ("idrinterval", 20)]
 
 
 def test_unknown_encoder_is_a_no_op():

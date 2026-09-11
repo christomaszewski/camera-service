@@ -40,6 +40,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
+from fractions import Fraction
 from typing import Optional
 
 import gi
@@ -161,8 +162,8 @@ class CapturePipeline:
         self._held = False
         self._still = None                 # the last frame handed to the transport (see _publish_transport)
         self._still_pushed_mono = 0.0
-        # The transport's OWN timeline (see _transport_pts): the source PTS plus a shift that grows
-        # while a held frame is re-published, so the wire never repeats a timestamp nor steps back.
+        # The transport's OWN timeline (see _transport_pts): wall-paced for playback; live capture
+        # keeps source timing. A held preview never repeats a timestamp or steps backward.
         self._tpts_shift_ns = 0
         self._tpts_last = None
         self._tpts_last_mono = 0.0
@@ -338,11 +339,17 @@ class CapturePipeline:
             self._unixfd_path = os.path.join(os.path.dirname(pe.socket_path) or "/tmp/cam", "unixfd")
             self._ensure_socket_dir(self._unixfd_path)
             self._clear_stale_socket(self._unixfd_path, "unixfd transport")
+            # Downstream encoders derive their GOP from these caps. Advertising the unfiltered
+            # source rate stretches a 2 s GOP to 6 s when 24 fps is decimated to 8 fps.
+            transport_rate = (Fraction(str(fps)).limit_denominator(1_000_000)
+                              / (self._publish_every_n() or 1)) if fps else Fraction(0)
+            transport_framerate = f"{transport_rate.numerator}/{transport_rate.denominator}"
             if self._bayer and self._bits <= 8:
                 ucaps = (f"video/x-bayer,format={self._bayer},width={self._width},"
-                         f"height={self._height},framerate={framerate}")
+                         f"height={self._height},framerate={transport_framerate}")
             else:
-                ucaps = caps   # mono: video/x-raw GRAY8/16
+                ucaps = (f"video/x-raw,format={self._gst_format},width={self._width},"
+                         f"height={self._height},framerate={transport_framerate}")
             chains.append(
                 f'appsrc name=unixfd_src is-live=true do-timestamp=false format=time '
                 f'max-bytes={_PUB_QUEUE_FRAMES * frame_bytes} caps="{ucaps}" '
@@ -607,8 +614,8 @@ class CapturePipeline:
             self._account(stamp)   # raw / re-encode: THIS path is the recording feed
 
     def _transport_pts(self, pts: int, *, held: bool) -> int:
-        """The PTS a frame carries on the plugin transport: the source PTS (`pts`, what the
-        recording rides) shifted so the transport timeline never stands still and never steps back.
+        """Preview PTS advances with elapsed wall time for finite/playback sources, independent
+        of historical capture time, playback speed and gaps. Live sources retain source timing.
 
         A HELD frame -- the same frame re-published while the source stands still: paused,
         finished, the release gate, a silent gap (_still_tick) -- advances by the wall time since
@@ -619,13 +626,19 @@ class CapturePipeline:
         the hold lasted (a paused or finished `rig replay`). The headered-shm path never showed it
         because the bridge's PtsTracker re-times that transport itself.
 
-        The shift a hold opens is carried forward: a hold does not move the SOURCE timeline (the
-        frames resume where the recording left off), so without it the first real frame after a
-        hold would land a hold's worth BEHIND the last held one. The recording feed and camsrc
-        keep the plain source PTS (_pts_for) -- the recording is unaffected by any of this."""
+        Using wall time for BOTH held and real playback frames avoids adding a recorded gap
+        again after held frames already filled it. The recording feed and camsrc keep the plain
+        source PTS (_pts_for); capture timestamps in plugin metadata also remain unchanged."""
         now = time.monotonic()
         with self._tpts_lock:
-            if held and self._tpts_last is not None:
+            if getattr(self.source, "finite", False):
+                # A replay's capture clock is historical and can run at 0.5x/2x or jump over a
+                # gap already filled by held frames. Feeding it to RTP double-counts those gaps
+                # and makes the browser accumulate playout delay. Preview PTS follows elapsed
+                # wall time; the capture stamp and recording PTS remain untouched.
+                tpts = (self._tpts_last + max(int((now - self._tpts_last_mono) * 1e9), 1)
+                        if self._tpts_last is not None else 0)
+            elif held and self._tpts_last is not None:
                 tpts = self._tpts_last + max(int((now - self._tpts_last_mono) * 1e9), 1)
             else:
                 tpts = pts + self._tpts_shift_ns

@@ -41,7 +41,7 @@
 # webrtcsink's adaptive-bitrate range -- the element default max is 8 Mbps, raise it for 4K),
 # CAM_WEBRTC_CONGESTION ({gcc|homegrown|disabled}, default gcc).
 # CAM_WEBRTC_KEYFRAME_S (IDR every N s on every encoder, default 2.0; 0 = encoder default) and
-# CAM_WEBRTC_X264_PRESET (x264enc speed-preset nick for the software fallback, default superfast).
+# CAM_WEBRTC_X264_PRESET (x264enc speed-preset nick for the software fallback, default ultrafast).
 # H.264: CAM_WEBRTC_PROFILE (effectively FIXED at constrained-baseline -- webrtcsink forces it for raw
 # input at codec discovery; `high` warns + falls back) + CAM_WEBRTC_MAX_LEVEL (clamp on the AUTO-derived
 # level, default 5.2). The level is computed from the streamed resolution+fps so the SDP profile-level-id

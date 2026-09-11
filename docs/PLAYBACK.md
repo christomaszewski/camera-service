@@ -79,9 +79,11 @@ UTF-8 JSON, `application/json`. Only `schema_version`, `service`, `instance`, `s
   nothing else reached it for a second, held or playing through silence, so a bridge or viewer
   attaching late still gets a picture. Each re-publish carries a FRESH transport PTS (the wire
   never repeats a timestamp: on unixfd a repeated PTS is a repeated RTP timestamp, which a browser
-  drops as a duplicate — a viewer's stall watchdog then cycles the session), and the shift that
-  opens is carried into the resume, so the first real frame lands after the last held one; the
-  recording feed keeps the source PTS throughout. The recorder, if active, simply receives nothing; a
+  drops as a duplicate — a viewer's stall watchdog then cycles the session). Playback transport
+  PTS follows elapsed monotonic wall time for both real and held frames: a historical gap already
+  filled by held frames is not counted again when data resumes, and changing playback speed does
+  not change the RTP clock rate. The recording feed keeps source PTS and the plugin metadata keeps
+  original capture timestamps throughout. The recorder, if active, simply receives nothing; a
   playback that BOOTS paused lets its first frame out, then holds), `finished` (a non-looping source
   reached its end; any open recording session is finalized). What happens next is the producer's
   `on_finish` policy: **hold** — the process stays up, the keys stay declared, consumers keep the

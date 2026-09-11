@@ -308,7 +308,7 @@ class Bridge:
         # Headered-shm pump (JP6 plugin endpoint; run.sh splits the pipeline at hdr_in/hdr_out):
         # strip the 36-byte CAMF header, stamp caps from it, re-attach capture time as offset_end.
         self.hdr_out = None             # the appsrc we push de-headered frames into
-        self._hdr_pts = PtsTracker()    # absolute capture ns -> relative monotonic PTS
+        self._hdr_pts = PtsTracker(arrival_clock=time.monotonic_ns)  # preview clock, independent of capture time
         self._hdr_caps_key = None       # (w, h, pixfmt) the current hdr_out caps were built from
         self._hdr_warn_last = 0.0       # throttle for per-frame header errors (monotonic s)
         # Capture->now latency (works wherever buffers carry the absolute capture ns in offset_end:
@@ -411,7 +411,9 @@ class Bridge:
             # 42e01f -> out-of-level black tile). encoder-setup also forces B-frames off for live.
             try:
                 sink.connect("request-encoded-filter", self._on_request_encoded_filter)
-                sink.connect("encoder-setup", self._on_encoder_setup)
+                # webrtcsink's RUN_LAST default handler sets x264 key-int-max=2560 and its own
+                # preset. Apply our policy AFTER it or our short GOP is silently overwritten.
+                sink.connect_after("encoder-setup", self._on_encoder_setup)
             except Exception as e:
                 log.warning("could not connect webrtcsink encoder signals: %s", e)
             # Viewer visibility for the status heartbeat (signature varies by build -> defensive).
@@ -798,8 +800,8 @@ class Bridge:
 
     def _on_encoder_setup(self, _sink, consumer_id, codec_name, encoder):
         """webrtcsink: configure the per-consumer encoder -- force B-frames OFF + low-latency + a short
-        GOP for live. Return False so webrtcsink still layers its own bitrate / congestion-control
-        defaults on top."""
+        GOP for live, after the default handler has configured bitrate / congestion control.
+        Return False so other application handlers may still run."""
         try:
             geo = self._encode_geometry()             # the fps ACTUALLY fed to the encoder, if negotiated
             _configure_live_encoder(encoder, fps=geo[2] if geo else None)
@@ -1000,7 +1002,7 @@ class Bridge:
     def _on_hdr_sample(self, sink):
         """Per frame: parse the 36-byte header, hand the PIXEL bytes on as a zero-copy sub-buffer
         (copy_region shares the memory), and re-attach what shm dropped: a relative monotonic PTS
-        derived from the capture stamp, offset=frame_id, offset_end=absolute capture ns (the unixfd
+        derived from arrival time, offset=frame_id, offset_end=absolute capture ns (the unixfd
         convention -- everything downstream, latency probes included, is transport-agnostic).
         A corrupt frame is dropped, throttled-warned, and the stream stays up."""
         sample = sink.emit("pull-sample")
