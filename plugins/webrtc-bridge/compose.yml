@@ -123,6 +123,12 @@ services:
       - CAM_WEBRTC_MAX_BITRATE=${CAM_WEBRTC_MAX_BITRATE:-}
       - CAM_WEBRTC_START_BITRATE=${CAM_WEBRTC_START_BITRATE:-}
       - CAM_WEBRTC_CONGESTION=${CAM_WEBRTC_CONGESTION:-}
+      # Loss tolerance: keyframe (IDR) every N seconds on EVERY encoder (default 2.0; 0 = the encoder's
+      # file-oriented default, ~25 s at 10 fps -- a lost keyframe then freezes the viewer that long) and
+      # the x264enc speed preset for the software-fallback path (default superfast; medium is the
+      # element default and falls behind on a CPU-bound host).
+      - CAM_WEBRTC_KEYFRAME_S=${CAM_WEBRTC_KEYFRAME_S:-}
+      - CAM_WEBRTC_X264_PRESET=${CAM_WEBRTC_X264_PRESET:-}
       # Diagnostics: the bridge logs a startup element inventory (is NVENC actually present /
       # ranked?) and a status heartbeat -- pipeline state, frames received from the core, negotiated
       # caps, connected viewers, and (plugin-endpoint transports) per-interval capture->ingress /

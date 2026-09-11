@@ -248,7 +248,9 @@ class TransportEndpoint:
     enabled: bool = False
     socket_path: str = ""
     shm_size: int = 0             # bytes for the shm area; 0 = auto (frame_size * 8)
-    max_rate_hz: float = 0.0      # publish-rate cap (plugin endpoint); 0 = every frame
+    max_rate_hz: float = 0.0      # publish-rate cap (plugin endpoint); 0 = every frame. With a known source
+    #                               rate this is every-Nth-frame decimation, N = ceil(fps / cap) -- never
+    #                               exceeds the cap, evenly spaced; pick a cap that divides the source rate
 
 
 @dataclass

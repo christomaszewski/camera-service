@@ -281,7 +281,9 @@ see [docs/unixfd-migration.md](docs/unixfd-migration.md)):
 
 The C++ ros2-bridge ships a consumer for each (`CamUnixfdBridge` / `CamHeaderBridge`, selected by
 `CAM_PLATFORM`) and stamps its messages from the carried capture time either way. Optional
-`max_rate_hz` caps the plugin-endpoint publish rate. Both endpoints are configured under
+`max_rate_hz` caps the plugin-endpoint publish rate — as every-Nth-frame decimation
+(`N = ceil(source fps / cap)`, so the cap is never exceeded and frames are evenly spaced; a cap that
+divides the source rate lands exactly on it, `24 fps` at `10` gives every 3rd frame = 8 Hz). Both endpoints are configured under
 `transport:` in the camera config. The `plugins:` list is consumed by the per-sensor supervisor
 ([supervisor.py](core-driver/supervisor.py)) — the core container's entrypoint — which spawns each
 enabled `isolation: process` plugin; `isolation: container` plugins run as compose siblings.

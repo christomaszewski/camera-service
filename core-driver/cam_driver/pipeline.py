@@ -35,6 +35,7 @@ Packed formats (Mono10p/Mono12Packed) need a bit-unpack step not implemented yet
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
@@ -121,6 +122,7 @@ class CapturePipeline:
         self.loop: Optional[GLib.MainLoop] = None
         self._base_ts: Optional[int] = None
         self._last_pub_ts: Optional[int] = None
+        self._pub_seq = 0                           # frames seen by the every-Nth decimator (_should_publish)
         self._pub_err_last: float = 0.0             # monotonic s of the last logged publish error
         self._last_pts: Optional[int] = None        # for the monotonic-PTS guard
         self._pts_skew = 0                          # accumulated discontinuity correction (see _pts_for)
@@ -345,8 +347,9 @@ class CapturePipeline:
                 f'appsrc name=unixfd_src is-live=true do-timestamp=false format=time '
                 f'max-bytes={_PUB_QUEUE_FRAMES * frame_bytes} caps="{ucaps}" '
                 f'! queue max-size-buffers=8 ! unixfdsink socket-path={self._unixfd_path} sync=false')
-            log.info("plugin transport endpoint (unixfd) -> %s  caps=%s", self._unixfd_path,
-                     ucaps.split(",", 1)[0] + (f",{self._bayer}" if (self._bayer and self._bits <= 8) else ""))
+            log.info("plugin transport endpoint (unixfd) -> %s  caps=%s  max_rate=%s%s", self._unixfd_path,
+                     ucaps.split(",", 1)[0] + (f",{self._bayer}" if (self._bayer and self._bits <= 8) else ""),
+                     pe.max_rate_hz or "unlimited", self._publish_rate_note())
         elif pe.enabled:
             self._ensure_socket_dir(pe.socket_path)
             self._clear_stale_socket(pe.socket_path, "plugin transport")
@@ -357,8 +360,8 @@ class CapturePipeline:
                 f'caps="{transport.CAPS}" ! queue max-size-buffers=8 ! '
                 f"shmsink socket-path={pe.socket_path} shm-size={shm} "
                 f"wait-for-connection=false sync=false")
-            log.info("plugin transport endpoint (shm+header) -> %s (%d-byte shm, max_rate=%s)",
-                     pe.socket_path, shm, pe.max_rate_hz or "unlimited")
+            log.info("plugin transport endpoint (shm+header) -> %s (%d-byte shm, max_rate=%s%s)",
+                     pe.socket_path, shm, pe.max_rate_hz or "unlimited", self._publish_rate_note())
 
         desc = "   ".join(chains)   # multiple top-level chains in one pipeline
         log.info("pipeline: %s", desc)
@@ -375,11 +378,38 @@ class CapturePipeline:
             Gst.parse_launch(self._session_desc_probe).set_state(Gst.State.NULL)
         return desc
 
+    def _publish_rate_note(self) -> str:
+        """' -> every 3rd frame (8.0 Hz)' for the build log, '' when uncapped / rate unknown."""
+        n = self._publish_every_n()
+        if not n:
+            return ""
+        nth = {1: "every frame", 2: "every 2nd frame"}.get(n, f"every {n}th frame" if n != 3 else "every 3rd frame")
+        return f" -> {nth} ({self._fps / n:.1f} Hz)"
+
     # ---- the timestamp-extracting feeder ----------------------------------
+    def _publish_every_n(self) -> int:
+        """Integer decimation factor for the plugin endpoint's rate cap, or 0 when a factor can't be
+        formed (no cap, or the source rate is unknown -> the timestamp gate below).
+
+        ceil(fps / max_rate_hz), so the cap is never EXCEEDED: 24 fps capped at 10 Hz publishes every
+        3rd frame (8 Hz), at 12 Hz every 2nd (12 Hz). Every-Nth is the only decimation with EVEN
+        spacing -- the timestamp gate on a 24 fps source at 10 Hz alternated 2- and 3-frame gaps
+        (91 / 136 ms) whenever arrival jitter nudged a pair over the 100 ms threshold, which a browser
+        renders as visible judder at a nominal '10 fps'. Pick a cap that divides the source rate."""
+        rate = self.cfg.transport.plugin_endpoint.max_rate_hz
+        if rate <= 0 or not self._fps or self._fps <= 0:
+            return 0
+        return max(1, math.ceil(self._fps / rate - 1e-9))
+
     def _should_publish(self, ts_ns: int) -> bool:
         rate = self.cfg.transport.plugin_endpoint.max_rate_hz
         if rate <= 0:
             return True
+        every_n = self._publish_every_n()
+        if every_n:
+            seq = self._pub_seq
+            self._pub_seq += 1
+            return seq % every_n == 0
         min_interval = 1_000_000_000.0 / rate
         # `ts_ns < _last_pub_ts` resets the window instead of waiting it out: the source clock CAN
         # step backward (camera clock reset across a reconnect, RTSP epoch change -- the same event
@@ -1071,6 +1101,7 @@ class CapturePipeline:
                 #    (usb/rtsp are immune: gstbase's frame_id is a host counter that deliberately
                 #    survives reopen for drop accounting.)
                 self._last_pub_ts = None
+                self._pub_seq = 0
                 with self._base_lock:
                     self._pts_memo.clear()
                 # start() is INSIDE the try deliberately. For GigE it issues Aravis CONTROL writes

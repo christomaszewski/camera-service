@@ -31,6 +31,7 @@ from gi.repository import GLib, Gst
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from zenoh_advertiser import StreamAdvertiser
 from h264_level import h264_level_for, level_covers, LEVELS as H264_LEVELS
+from encoder_policy import live_encoder_props
 from format_adapt import adapt_for_input, debayer_enabled
 from scale_plan import fit_within, parse_max_size, scale_caps
 from header_transport import (HeaderError, PtsTracker, TS_SOURCE_SHORT,
@@ -239,8 +240,9 @@ def _negotiated_caps(el, which):
             return None
 
 
-def _configure_live_encoder(encoder):
-    """Force B-frames OFF (real-time) + a low-latency tune, DEFENSIVELY across encoders (x264enc /
+def _configure_live_encoder(encoder, fps=None):
+    """Force B-frames OFF (real-time) + a low-latency tune + a short GOP (and a cheap preset on the
+    software fallback -- see live_encoder_props), DEFENSIVELY across encoders (x264enc /
     nvv4l2h264enc / openh264enc): only sets properties that exist, so it's a no-op on a non-H.264
     encoder. Deliberately does NOT touch the encoder's `profile`: the bitstream profile is negotiated
     from the downstream caps (webrtcsink's parser filter pins constrained-baseline -- see
@@ -275,6 +277,9 @@ def _configure_live_encoder(encoder):
     elif name == "nvv4l2h264enc":
         setp("maxperf-enable", True)
         setp("insert-sps-pps", True)                  # mid-stream joiners get SPS/PPS at every IDR
+    for prop, val in live_encoder_props(name, fps, _env("CAM_WEBRTC_KEYFRAME_S"),
+                                        _env("CAM_WEBRTC_X264_PRESET")):
+        setp(prop, val)
     log.info("encoder-setup: %s -> %s", name, ", ".join(done) or "(no matching low-latency props)")
 
 
@@ -792,10 +797,12 @@ class Bridge:
         return cf
 
     def _on_encoder_setup(self, _sink, consumer_id, codec_name, encoder):
-        """webrtcsink: configure the per-consumer encoder -- force B-frames OFF + low-latency for live.
-        Return False so webrtcsink still layers its own bitrate / congestion-control defaults on top."""
+        """webrtcsink: configure the per-consumer encoder -- force B-frames OFF + low-latency + a short
+        GOP for live. Return False so webrtcsink still layers its own bitrate / congestion-control
+        defaults on top."""
         try:
-            _configure_live_encoder(encoder)
+            geo = self._encode_geometry()             # the fps ACTUALLY fed to the encoder, if negotiated
+            _configure_live_encoder(encoder, fps=geo[2] if geo else None)
         except Exception as e:                        # noqa: BLE001 -- never break the video path
             log.warning("encoder-setup failed: %s", e)
         return False

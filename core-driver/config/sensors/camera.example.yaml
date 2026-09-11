@@ -119,7 +119,9 @@ transport:
     enabled: true          #   Both bridges consume this.
     socket_path: /tmp/cam/frames
     # shm_size: 0          # JP6 shm bytes; 0 = auto (frame_size * 8)
-    # max_rate_hz: 0       # core-side cap on frames offered to ALL plugins; 0 = every frame
+    # max_rate_hz: 0       # core-side cap on frames offered to ALL plugins; 0 = every frame. Applied as
+    #                        every-Nth-frame decimation, N = ceil(source fps / cap): 24 fps at 10 -> every
+    #                        3rd frame = 8 Hz, at 12 -> every 2nd = 12 Hz. Pick a cap that divides the rate
     #                        (per-plugin capping: prefer the ros2-bridge publish_rate param below)
   raw_endpoint:            # optional clean video/x-raw shm for generic same-host tools (no metadata);
     enabled: false         #   nothing in the stack reads it by default (the webrtc bridge rides the

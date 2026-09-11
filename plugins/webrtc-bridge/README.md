@@ -114,6 +114,8 @@ Or via the per-sensor stack: `cam-up <sensor>.yaml up -d webrtc-bridge` (cam-up 
 | `VIDEO_CAPS` | _(unset)_ | e.g. `video/x-h264` to pin the codec; unset → webrtcsink picks |
 | `CAM_WEBRTC_PROFILE` | `constrained-baseline` | effectively fixed: webrtcsink forces constrained-baseline for raw input at codec discovery, so `high` **warns + falls back** (knob kept for future upstream support) |
 | `CAM_WEBRTC_MAX_LEVEL` | `5.2` | safety clamp on the **auto-derived** H.264 level (the level is computed from the streamed resolution+fps — never fixed) |
+| `CAM_WEBRTC_KEYFRAME_S` | `2.0` | keyframe (IDR) interval in **seconds**, applied to every encoder (`x264enc key-int-max`, `nvv4l2h264enc iframeinterval`, `openh264enc gop-size`) from the fps actually fed to it. The encoders' own defaults are file-oriented (x264: ~250 frames = 25 s at 10 fps); on a lossy link a keyframe packet that NACK/RTX misses freezes the browser until the next IDR. `0` = encoder default |
+| `CAM_WEBRTC_X264_PRESET` | `superfast` | `x264enc speed-preset` for the **software fallback** path (no NVENC). The element default `medium` falls behind at a debayered 5MP input on a CPU-bound host — the leaky queue ahead of the encoder then drops and the output stalls |
 | `SIGNALLING_PORT` | `8443` | signalling server port |
 | `RUN_SIGNALLING` | `1` | run the bundled signalling server in-container |
 | `CAM_WEBRTC_STATUS` | `10` | seconds between status heartbeat lines — pipeline state, frames received from the core, negotiated caps, connected viewers, and per-interval **latency percentiles** (see Latency below) (`0` = off). Startup also logs an encoder **element inventory** and warns when `GST_PLUGIN_FEATURE_RANK` names an element the registry doesn't have |
@@ -237,7 +239,9 @@ Brings up a `rmw_zenohd` router + core + bridge, and a Zenoh probe
   forcing one on the encoder element makes the SPS contradict that filter and discovery dies with
   "No caps found" (reproduced on-device with NVENC). `CAM_WEBRTC_PROFILE=high` therefore warns + falls
   back; the knob remains for the day upstream honors a requested profile. B-frames are forced off for
-  live either way. (Applied by the Python launcher via `webrtcsink`'s `encoder-setup` /
+  live either way, the GOP is pinned to `CAM_WEBRTC_KEYFRAME_S` (2 s) so a lost keyframe cannot freeze a viewer
+  for the encoder's file-oriented default (~25 s), and the software fallback runs `x264enc` at
+  `CAM_WEBRTC_X264_PRESET` (`superfast`). (Applied by the Python launcher via `webrtcsink`'s `encoder-setup` /
   `request-encoded-filter` signals; the `CAM_LAUNCHER=gst-launch` hatch keeps `webrtcsink`'s fixed
   defaults.)
 - **Adaptive bitrate / congestion control:** `webrtcsink` runs Google Congestion Control (`gcc`) by
