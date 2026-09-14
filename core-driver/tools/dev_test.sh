@@ -21,6 +21,8 @@ docker run --rm -v "$PWD/core-driver:/app" "$IMG" bash -c '
   python3 tests/test_dropstats.py
   python3 tests/test_formats.py
   python3 tests/test_recorder.py
+  python3 tests/test_recording_h264.py
+  python3 tests/test_recording_settings.py
   python3 tests/test_pipeline_pts.py
   python3 tests/test_pipeline_reconnect.py
   python3 tests/test_sidecar.py
@@ -33,6 +35,7 @@ docker run --rm -v "$PWD/core-driver:/app" "$IMG" bash -c '
   python3 tests/test_session.py
   python3 tests/test_pipeline_session.py
   python3 tests/test_replay_buffers.py
+  python3 tests/test_replay_recording_changes.py
   python3 tests/test_control_zenoh.py
 
   echo "=== fake-camera producer + shm probe (starting over a STALE socket) ==="

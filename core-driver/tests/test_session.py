@@ -26,9 +26,17 @@ except (ImportError, ValueError) as e:   # no gi/GStreamer on this host
     print(f"SKIP: {e}")
     sys.exit(0)
 
-session_mod._wrap_buffer = lambda payload, pts, fid: ("buf", payload, pts, fid)
-session_mod._caps_from_string = lambda s: ("caps", s)
-session_mod.GLib = SimpleNamespace(idle_add=lambda fn, *a: fn(*a))   # "next iteration" -> inline
+_real_helpers = (session_mod._wrap_buffer, session_mod._caps_from_string, session_mod.GLib)
+
+
+def setup_function():
+    session_mod._wrap_buffer = lambda payload, pts, fid: ("buf", payload, pts, fid)
+    session_mod._caps_from_string = lambda s: ("caps", s)
+    session_mod.GLib = SimpleNamespace(idle_add=lambda fn, *a: fn(*a))
+
+
+def teardown_function():
+    session_mod._wrap_buffer, session_mod._caps_from_string, session_mod.GLib = _real_helpers
 
 H264_BS = "video/x-h264, stream-format=(string)byte-stream, alignment=(string)au"
 IDR = b"\x00\x00\x00\x01\x65\x88\x84"
@@ -319,6 +327,7 @@ def test_finish_close_timeout_is_attested_as_truncated_and_still_nulls():
     with tempfile.TemporaryDirectory() as tmp:
         s, appsrc, bus, pipe, sc, order = _session(tmp, pop_msg=None)
         s.start(DROPS0)
+        s.push(b"a" * 8, 100, _stamp(1))
         s.begin_close()
         info = s.finish_close(0.01, DROPS1)
         assert info["truncated"] is True and info["error"] is None
@@ -330,6 +339,7 @@ def test_finish_close_error_during_drain_is_recorded():
     with tempfile.TemporaryDirectory() as tmp:
         s, appsrc, bus, pipe, sc, order = _session(tmp, pop_msg="error")
         s.start(DROPS0)
+        s.push(b"a" * 8, 100, _stamp(1))
         s.begin_close()
         info = s.finish_close(1.0, DROPS1)
         assert info["truncated"] is True and "boom" in info["error"]
@@ -447,7 +457,11 @@ def test_describe_is_plain_scalars():
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:
-        t()
+        setup_function()
+        try:
+            t()
+        finally:
+            teardown_function()
         print(f"  ok  {t.__name__}")
     print(f"{len(tests)} passed")
 

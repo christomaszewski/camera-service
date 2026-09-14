@@ -68,7 +68,10 @@ def discover_sessions(path: str, run: str = "") -> List[RunInfo]:
             if not names:
                 raise ValueError(
                     f"replay.path {path} contains no runs (no <prefix>.json sidecar found)")
-        infos = [_load_run(os.path.join(path, n)) for n in names]
+        infos = [_load_run(os.path.join(path, n), skip_empty=not run) for n in names]
+        infos = [info for info in infos if info is not None]
+        if not infos:
+            raise ValueError(f"replay.path {path} contains no recorded frames (only empty sessions)")
         infos.sort(key=lambda r: (int(r.header.get("first_timestamp_ns") or 0),
                                   os.path.getmtime(r.base + ".json")))
         return infos
@@ -91,14 +94,32 @@ def discover_run(path: str, run: str = "") -> RunInfo:
     return infos[-1]
 
 
-def _load_run(base: str) -> RunInfo:
+def _load_run(base: str, *, skip_empty: bool = False) -> Optional[RunInfo]:
     with open(base + ".json") as f:
         header = json.load(f)
+    # An activate/deactivate before any frame (or before an encoded source's first IDR) has
+    # a summary + CSV header, but no video/header to decode. Keep its audit on disk and omit it
+    # from whole-run replay only when both the completed summary and the CSV attest zero frames.
+    # Incomplete/error sessions must still fail visibly instead of silently dropping their data.
+    session = header.get("session")
+    csv_path = base + ".csv"
+    if (isinstance(session, dict) and type(session.get("frames_recorded")) is int
+            and session["frames_recorded"] == 0 and session.get("truncated") is False
+            and not session.get("error") and not header.get("sidecar_csv_failed")
+            and os.path.isfile(csv_path)):
+        with open(csv_path, newline="") as f:
+            rows = csv.reader(f)
+            columns = next(rows, [])
+            empty = "frame_id" in columns and "timestamp_ns" in columns and not any(row for row in rows)
+        if empty:
+            if skip_empty:
+                log.info("replay: skipping finalized empty session %s", base)
+                return None
+            raise ValueError(f"replay: {base} has no recorded frames (empty session)")
     missing = [k for k in ("pixel_format", "width", "height") if not header.get(k)]
     if missing:
         raise ValueError(f"replay: {base}.json is not a run sidecar header "
                          f"(missing {', '.join(missing)})")
-    csv_path = base + ".csv"
     if not os.path.isfile(csv_path):
         raise ValueError(f"replay: {csv_path} missing -- a run needs its sidecar CSV to re-stamp")
     # exactly this run's splitmux parts (-NNNNN.mkv): a sibling run whose prefix merely

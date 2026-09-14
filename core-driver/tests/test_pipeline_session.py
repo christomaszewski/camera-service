@@ -29,7 +29,15 @@ except (ImportError, ValueError) as e:   # no gi/GStreamer on this host
     print(f"SKIP: {e}")
     sys.exit(0)
 
-pipeline_mod._new_buffer = lambda payload, pts, fid: ("buf", payload, pts, fid)
+_real_new_buffer = pipeline_mod._new_buffer
+
+
+def setup_function():
+    pipeline_mod._new_buffer = lambda payload, pts, fid: ("buf", payload, pts, fid)
+
+
+def teardown_function():
+    pipeline_mod._new_buffer = _real_new_buffer
 
 INTERVAL = 1_000_000_000 // 30
 
@@ -272,8 +280,8 @@ def test_raw_feed_goes_to_the_session_tiled_and_is_accounted():
         p, created, events = _pipe(tmp)
         p._on_frame(_stamp(1, 1_000), b"a" * 64)          # inactive: consumers only
         assert p.drops.frames == 1 and p.appsrc.pushed == [("buf", b"a" * 64, 0, 1)]
-        p.activate()
         p._tiler = lambda b: b[::-1]
+        p.activate()
         p._on_frame(_stamp(2, 1_000 + INTERVAL), b"ab" * 32)
         s = created[0]
         assert s.pushes == [(b"ba" * 32, INTERVAL, 2, None)], "tiled bytes to the recorder, same PTS"
@@ -547,7 +555,11 @@ def test_health_treats_a_paused_or_finished_playback_as_idle_not_stalled():
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:
-        t()
+        setup_function()
+        try:
+            t()
+        finally:
+            teardown_function()
         print(f"  ok  {t.__name__}")
     print(f"{len(tests)} passed")
 

@@ -37,7 +37,9 @@ Packed formats (Mono10p/Mono12Packed) need a bit-unpack step not implemented yet
 """
 from __future__ import annotations
 
+from copy import deepcopy
 import logging
+import uuid
 import math
 import os
 import threading
@@ -52,6 +54,7 @@ from gi.repository import GLib, Gst
 
 from . import recorder as rec
 from . import transport
+from . import recording_settings as settings
 from .config import unique_run_prefix
 from .dropstats import DropStats
 from .formats import bytes_per_frame, parse_pixel_format
@@ -191,6 +194,9 @@ class CapturePipeline:
         self._raw_caps = ""
         self._enc_parser = None
         self._rec_enc = None                        # the recorder's resolved encoder (build-time probe)
+        self._settings_generation = uuid.uuid4().hex
+        self._settings_revision = 0
+        self._settings_view = None
         self._session_desc_probe = None             # the session pipeline description, dry-run at build
         # A recorder ERROR ends its SESSION, not the process -- unless nobody could ever re-activate it
         # (boot-active with no control plane), where today's "disk full must not look clean" non-zero
@@ -281,37 +287,7 @@ class CapturePipeline:
         is_encoded = self.source.encoded_caps is not None
         self._enc_parser = self.source.encoded_parser if is_encoded else None
         if self.cfg.recording.enabled:
-            # Resolve the recorder ONCE, here: the encoder through every degrade (auto/explicit
-            # selection, the stream-copy-needs-a-parser fallback, the >8-bit depth guard, the
-            # element-availability probe), so the wiring decision (stream-copy vs raw feed, CFA
-            # tiling) has ONE owner -- deriving it from select_encoder alone used to disagree with the
-            # recorder and hang a fragment off a feed nothing supplied -- and so a host with no usable
-            # encoder fails at boot, not at the first activate hours later. The fragment itself is
-            # rebuilt per SESSION with that session's location (build_recorder_description is pure).
-            loc = f"{self.cfg.recording.output_dir.rstrip('/')}/{self.cfg.recording.name_prefix}"
-            rec_desc, self._rec_enc = self._recorder_desc(
-                self.cfg.recording, self._bits, loc, fps, self._is_color, self._enc_parser)
-            self._stream_copy = (self._rec_enc == "stream-copy")
-            if self._stream_copy:
-                # Encoded source: the session stream-copies the delivered bitstream (fed by
-                # _on_encoded). The decoded frames still flow to the consumer tee branches, so live
-                # consumers are unaffected; only the LOG bypasses decode/re-encode.
-                log.info("recorder: stream-copy (%s) for encoded source", self.source.encoded_caps)
-            elif self._bayer and self._bits <= 8:
-                # Raw recorder (raw source, or an encoded source the user forced to re-encode). CFA-tile
-                # only an 8-bit Bayer mosaic, recorder feed only (the tee keeps the mosaic for the rest):
-                # the session's lossless encoder then sees smooth same-colour planes instead of the CFA
-                # checkerboard. numpy is imported lazily (only when tiling is actually enabled).
-                from . import bayer_tile
-                self._tile_mode = bayer_tile.normalize_mode(self.cfg.recording.bayer_tile)
-                if self._tile_mode == "off" and self.cfg.recording.bayer_tile not in (False, None, "", "off"):
-                    log.warning("unknown recording.bayer_tile %r; recording the mosaic untiled",
-                                self.cfg.recording.bayer_tile)
-                if self._tile_mode != "off":
-                    pat, mode = (self._bayer or "rggb"), self._tile_mode
-                    self._tiler = lambda b: bayer_tile.tile_cfa(b, self._width, self._height, mode, pat)
-                    log.info("recorder: CFA-tiling 8-bit Bayer (%s) mode=%s before encode", self._bayer, mode)
-            self._session_desc_probe = self._session_desc(rec_desc)
+            self._install_recording_plan(self.cfg.recording, self._recording_plan(self.cfg.recording))
 
         raw = self.cfg.transport.raw_endpoint
         if raw.enabled:
@@ -772,8 +748,9 @@ class CapturePipeline:
         """Push one frame into the open session (CFA-tiled when configured). DROPPED = the recording
         feed could not take it: counted as an enqueue failure, the recording's own loss counter.
         SKIPPED (closing / waiting for a sync point) is not a loss and is not counted here."""
-        if self._tiler is not None:
-            payload = self._tiler(bytes(payload) if isinstance(payload, GstFrame) else payload)
+        tiler = getattr(sess, "recording_tiler", self._tiler)
+        if tiler is not None:
+            payload = tiler(bytes(payload) if isinstance(payload, GstFrame) else payload)
         r = sess.push(payload, pts, stamp, caps_str)
         if r is PushResult.DROPPED:
             n = self._note_push_drop(publish=False)
@@ -788,18 +765,21 @@ class CapturePipeline:
         first frame is recorded alongside."""
         _x, _y, width, height = self.source.geometry()
         prov = self.source.provenance() if hasattr(self.source, "provenance") else {}
+        from .recorder import x264_settings
+        cfg = getattr(sess, "recording_config", self.cfg.recording)
+        enc = getattr(sess, "recording_encoder", self._rec_enc)
         return SidecarHeader(
             created_unix_s=time.time(),
             base_timestamp_ns=int(self._base_ts),
             timestamp_source=self.source.active_timestamp_source,
             ptp_synced=self.source.ptp_locked,
             pixel_format=self.source.pixel_format(),
-            bayer_pattern=self.cfg.recording.bayer_pattern or self._bayer,
+            bayer_pattern=cfg.bayer_pattern or self._bayer,
             bits_per_pixel=self._bits,
             width=int(width),
             height=int(height),
             tick_frequency_hz=self.source.tick_frequency_hz,
-            cfa_tile_mode=self._tile_mode,
+            cfa_tile_mode=getattr(sess, "recording_tile_mode", self._tile_mode),
             session_index=sess.index,
             session_prefix=sess.prefix,
             first_pts_ns=int(pts),
@@ -807,7 +787,99 @@ class CapturePipeline:
             first_timestamp_ns=int(stamp.timestamp_ns),
             replay_of=prov.get("replay_of"),
             replay_epoch_unix_ns=prov.get("replay_epoch_unix_ns"),
+            recording_encoder=enc or None,
+            recording_lossy=(enc == "x264") if enc not in (None, "", "stream-copy") else None,
+            recording_settings=x264_settings(cfg) if enc == "x264" else None,
+            recording_settings_file=getattr(sess, "settings_path", None),
         )
+
+    def _recording_plan(self, cfg):
+        """Resolve a candidate without changing the live source or consumer pipelines."""
+        loc = f"{cfg.output_dir.rstrip('/')}/{cfg.name_prefix}"
+        desc, enc = self._recorder_desc(cfg, self._bits, loc, self._fps, self._is_color, self._enc_parser)
+        if enc == "x264" and (self._width % 2 or self._height % 2):
+            raise ValueError("recording.encoder=x264 requires even width and height for 4:2:0; use ffv1 for this geometry")
+        mode, tiler = "off", None
+        if self._bayer and self._bits <= 8 and enc not in ("x264", "stream-copy"):
+            from . import bayer_tile
+            mode = bayer_tile.normalize_mode(cfg.bayer_tile)
+            if mode != "off":
+                if self._width % 2 or self._height % 2:
+                    raise ValueError("Bayer tiling requires even width and height")
+                pattern, width, height = self._bayer, self._width, self._height
+                tiler = lambda b: bayer_tile.tile_cfa(b, width, height, mode, pattern)
+        if self._bayer and enc == "x264":
+            log.warning("recorder: lossy H.264 records an approximate Bayer mosaic; CFA tiling is disabled")
+        return desc, enc, mode, tiler
+
+    def _install_recording_plan(self, cfg, plan):
+        desc, enc, mode, tiler = plan
+        self.cfg.recording = cfg
+        self._rec_enc, self._tile_mode, self._tiler = enc, mode, tiler
+        self._stream_copy = enc == "stream-copy"
+        self._session_desc_probe = self._session_desc(desc)
+        # Publish a complete immutable view in one assignment for Zenoh's reader thread.
+        encoders = list(settings.CHOICES["encoder"])
+        if self._enc_parser:
+            encoders = (["auto", "stream-copy"] if self._stream_copy else
+                        [e for e in encoders if e not in ("auto", "stream-copy")])
+        else:
+            encoders.remove("stream-copy")
+        requested = settings.requested(cfg)
+        # Present canonical choices for legacy YAML booleans/numeric presets. The session audit
+        # retains the actual requested config values, including these deployment aliases.
+        if requested["bayer_tile"] is True:
+            requested["bayer_tile"] = "plain"
+        elif requested["bayer_tile"] in (False, None):
+            requested["bayer_tile"] = "off"
+        level = rec._preset_level(requested["nvenc_preset"])
+        requested["nvenc_preset"] = ("disable", "ultrafast", "fast", "medium", "slow")[level] if level is not None else ""
+        self._settings_view = {
+            "generation": self._settings_generation, "revision": self._settings_revision,
+            "requested": requested,
+            "resolved": {"encoder": enc, "lossy": None if enc == "stream-copy" else enc == "x264",
+                         "bayer_tile": mode,
+                         "x264": rec.x264_settings(cfg) if enc == "x264" else None},
+            "encoders": encoders,
+            "source_mode_fixed": bool(self._enc_parser),
+        }
+
+    def recording_settings(self):
+        if self._settings_view is None:
+            return None
+        locked = (not self.cfg.recording.enabled or self._stopping
+                  or self._lifecycle != INACTIVE or self._session is not None)
+        return {**deepcopy(self._settings_view), "editable": not locked}
+
+    def check_recording_settings(self, expected):
+        view = self._settings_view
+        if (not isinstance(expected, dict) or view is None
+                or expected.get("generation") != view["generation"]
+                or type(expected.get("revision")) is not int
+                or expected["revision"] != view["revision"]):
+            raise ValueError("recording settings changed; refresh and review before retrying")
+
+    def configure_recording(self, request):
+        """Main loop only, serialized with activation and finalization. Refuse partial changes."""
+        if (not self.cfg.recording.enabled or self._stopping or self._lifecycle != INACTIVE
+                or self._session is not None):
+            raise ValueError("recording settings are locked; stop recording before changing them")
+        if not isinstance(request, dict) or set(request) != {"settings", "expected"}:
+            raise ValueError("request must contain settings and expected generation/revision")
+        self.check_recording_settings(request["expected"])
+        cfg = settings.apply_patch(self.cfg.recording, request["settings"])
+        plan = self._recording_plan(cfg)
+        if (plan[1] == "stream-copy") != self._stream_copy:
+            raise ValueError("switching between source-copy and re-encoding requires a service restart")
+        # Parse/link in NULL before committing; this neither opens a file nor touches live ingest.
+        probe = Gst.parse_launch(self._session_desc(plan[0]))
+        probe.set_state(Gst.State.NULL)
+        if (settings.requested(cfg) == settings.requested(self.cfg.recording)
+                and plan[1] == self._rec_enc and plan[2] == self._tile_mode):
+            return {"ok": True, "noop": True}
+        self._settings_revision += 1
+        self._install_recording_plan(cfg, plan)
+        return {"ok": True}
 
     # ---- recording sessions (lifecycle activate / deactivate) ---------------
     def _session_desc(self, rec_desc: str) -> str:
@@ -831,18 +903,30 @@ class CapturePipeline:
         if self._session is not None:
             return {"ok": False, "error": "already recording", "state": self._lifecycle}
         self._lifecycle = ACTIVATING
-        out_dir = self.cfg.recording.output_dir
-        # Per-SESSION prefix: a second session (or a restart) must never overwrite the previous run --
-        # splitmuxsink restarts at -00000.mkv and the sidecar truncates its files.
-        prefix = unique_run_prefix(out_dir, self.cfg.recording.name_prefix + (f"-{run_id}" if run_id else ""))
-        loc = f"{out_dir.rstrip('/')}/{prefix}"
-        rec_desc, _enc = self._recorder_desc(self.cfg.recording, self._bits, loc, self._fps,
-                                             self._is_color, self._enc_parser)
         self._session_seq += 1
-        sess = self._session_factory(self._session_seq, prefix, out_dir, self._session_desc(rec_desc),
-                                     header_factory=self._session_header, encoded=self._stream_copy,
-                                     on_error=self._on_session_error, on_fragment=self._on_session_fragment)
         try:
+            cfg = deepcopy(self.cfg.recording)
+            out_dir = cfg.output_dir
+            prefix = unique_run_prefix(out_dir, cfg.name_prefix + (f"-{run_id}" if run_id else ""))
+            loc = f"{out_dir.rstrip('/')}/{prefix}"
+            rec_desc, enc = self._recorder_desc(cfg, self._bits, loc, self._fps,
+                                               self._is_color, self._enc_parser)
+            if self._rec_enc is not None and enc != self._rec_enc:
+                raise RuntimeError("resolved encoder changed; review recording settings again")
+            sess = self._session_factory(self._session_seq, prefix, out_dir, self._session_desc(rec_desc),
+                                         header_factory=self._session_header, encoded=self._stream_copy,
+                                         on_error=self._on_session_error, on_fragment=self._on_session_fragment)
+            sess.recording_config, sess.recording_encoder = cfg, enc
+            sess.recording_tile_mode, sess.recording_tiler = self._tile_mode, self._tiler
+            sess.settings_path = loc + ".recording-settings.json"
+            snapshot = {"schema_version": 1, "created_unix_s": time.time(),
+                        "session_index": sess.index, "session_prefix": prefix, "run_id": run_id,
+                        "generation": self._settings_generation, "revision": self._settings_revision,
+                        "requested": settings.requested(cfg),
+                        "resolved": deepcopy((self._settings_view or {}).get("resolved", {"encoder": enc})),
+                        "source": {"pixel_format": self.source.pixel_format(),
+                                   "width": self._width, "height": self._height, "frame_rate": self._fps}}
+            settings.write_snapshot(sess.settings_path, snapshot)
             sess.start(self.drops.summary())
         except Exception as e:   # noqa: BLE001 -- a session that can't open is a refusal, not a crash
             self._lifecycle = INACTIVE
@@ -912,6 +996,7 @@ class CapturePipeline:
             "health": {**self.drops.summary(), "stalled": self._stalled,
                        "reconnecting": self._reconnecting},
             "encoder": self._rec_enc,
+            "recording_settings": self.recording_settings(),
             "last_result": self._last_result,
         }
 

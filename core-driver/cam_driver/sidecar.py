@@ -64,6 +64,13 @@ class SidecarHeader:
     # (None) for a live capture.
     replay_of: Optional[list] = None
     replay_epoch_unix_ns: Optional[int] = None
+    # Resolved recorder, after depth/availability fallbacks. None on older recordings.
+    recording_encoder: Optional[str] = None
+    # Loss introduced by THIS encode; not a claim about original sensor/source fidelity.
+    # None for stream-copy or unknown (the delivered bitstream may already be lossy).
+    recording_lossy: Optional[bool] = None
+    recording_settings: Optional[dict] = None
+    recording_settings_file: Optional[str] = None
 
 
 class SidecarWriter:

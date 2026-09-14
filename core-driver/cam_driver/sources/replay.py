@@ -10,12 +10,12 @@ A run directory holds one SESSION per lifecycle activate (each its own <prefix> 
 the replay plays them back to back in timeline order, one reader pipeline per session,
 with the recorded gaps between them honoured as silence. `replay.run` pins one session.
 
-Two shapes, resolved by probing the first .mkv part against the sidecar header (every
-session of a run must share one shape):
+Two delivery paths, resolved by probing each session's first .mkv part against its sidecar.
+The consumer format stays constant; raw recordings can change codec and tiling per session:
 
-  LOSSLESS RAW runs (ffv1 / hw-hevc-lossless / x265-lossless):
+  RAW runs (ffv1 / hw-hevc-lossless / x265-lossless, or opt-in lossy x264):
       splitmuxsrc ! decoder ! videoconvert ! <header format> ! rawsink -> on_frame
-    Decoded back to the exact recorded bytes (the codecs are lossless); a CFA-tiled
+    Decoded back to the source format (exact pixels only for lossless recordings); a CFA-tiled
     recording is un-tiled per frame (bayer_tile.untile_cfa, the exact inverse) so
     consumers see the original mosaic.
 
@@ -59,8 +59,8 @@ from .gstbase import GstPipelineSource
 
 log = logging.getLogger(__name__)
 
-# mkv track caps -> the software decode chain for the LOSSLESS RAW path (correctness
-# first: bit-exactness is the point of replay, and these all hold real-time here).
+# mkv track caps -> the software decode chain for the RAW path. Preserve every stored frame
+# and its decoded pixels (lossless recordings must remain bit-exact).
 _RAW_DECODE = {
     "video/x-ffv": "avdec_ffv1",   # FFV1: the caps NAME is x-ffv (version rides `ffvversion`)
     "video/x-h265": "h265parse ! avdec_h265",
@@ -69,8 +69,9 @@ _RAW_DECODE = {
 }
 # mkv track caps -> formats.encoded_info key for the STREAM-COPY path.
 _ENC_KEY = {"image/jpeg": "MJPEG", "video/x-h264": "H264", "video/x-h265": "H265"}
-# Header fields every session of a run must agree on: one reader shape, one consumer format.
-_SHAPE_KEYS = ("pixel_format", "width", "height", "cfa_tile_mode", "bayer_pattern")
+# Source shape stays fixed for downstream consumers. Codec and storage tiling belong to each
+# session's reader; changing recording settings does not change the sensor's delivered format.
+_SHAPE_KEYS = ("pixel_format", "width", "height", "bayer_pattern")
 
 
 def _probe_mkv(path: str, timeout_s: int = 5):
@@ -131,6 +132,7 @@ class ReplaySource(GstPipelineSource):
         self.pb_cfg = pb_cfg
         self._sessions: List[playback.RunInfo] = []
         self._session_stamps: List[List[FrameStamp]] = []   # per session, CSV row N = frame N
+        self._session_caps: List[str] = []
         self._session_idx = 0
         self._first_idx = 0         # the first session inside the window (where a cycle starts)
         self._run: Optional[playback.RunInfo] = None   # the session being read right now
@@ -163,6 +165,7 @@ class ReplaySource(GstPipelineSource):
         self._enc = None            # (caps, parser, decoder) for a stream-copy run
         self._untile = None         # frame-bytes transform for CFA-tiled runs
         self._gen = 0               # reader generation: a stale halt/EOS must not touch a new reader
+        self._reader_bus = None
         self._epoch_cfg = None      # the CONFIGURED epoch (None = the run's own first frame)
         self._cap_ns = 0            # inter-session silence cap (0 = verbatim; always 0 under an epoch)
         self._discontinuity = False # set at a session boundary, taken by the pipeline's accounting
@@ -251,31 +254,33 @@ class ReplaySource(GstPipelineSource):
             if c is None:
                 raise ValueError(f"replay: {run.mkv_paths[0]} has no readable video track")
             caps.append(c)
-        if len(set(caps)) > 1:
-            raise ValueError(f"replay: sessions differ in codec ({', '.join(sorted(set(caps)))}) -- "
-                             f"one run must play as one camera; pin one with replay.run")
-        self._mkv_caps = caps[0]
+        self._session_caps = caps
         # Stream-copy runs recorded the DELIVERED bitstream; their sidecar header carries the
-        # decoded consumer format (I420). Everything else is a lossless re-encode of raw frames.
-        stream_copy = self._mkv_caps in _ENC_KEY and hdr.get("pixel_format") == "I420"
-        if stream_copy:
-            self._enc = encoded_info(_ENC_KEY[self._mkv_caps])
-        elif self._mkv_caps not in _RAW_DECODE:
-            raise ValueError(f"replay: unsupported recorded codec {self._mkv_caps!r} "
-                             f"in {self._sessions[0].mkv_paths[0]}")
+        # decoded consumer format (I420). New sidecars identify the recorder explicitly: an
+        # x264 recording of raw I420 must use the blocking raw reader, preserving every CSV row.
+        def copied(header, codec):
+            return (codec in _ENC_KEY and header.get("pixel_format") == "I420"
+                    and header.get("recording_encoder") in (None, "", "stream-copy"))
 
-        tile_mode = normalize_mode(hdr.get("cfa_tile_mode", "off"))
-        if tile_mode != "off" and not stream_copy:
-            w, h = int(hdr["width"]), int(hdr["height"])
-            pattern = hdr.get("bayer_pattern") or "rggb"
-            self._untile = lambda b: untile_cfa(b, w, h, mode=tile_mode, pattern=pattern)
-            log.info("replay: CFA-tiled recording (%s/%s) -- un-tiling to the original mosaic",
-                     tile_mode, pattern)
+        stream_copy = copied(hdr, caps[0])
+        if any(copied(run.header, codec) != stream_copy for run, codec in zip(self._sessions, caps)):
+            raise ValueError("replay: sessions mix stream-copy and raw recordings; pin one with replay.run")
+        if stream_copy:
+            # The recording feed exposes one encoded caps/parser contract for its lifetime.
+            # Quality/GOP changes in that codec are fine; changing the source codec is not.
+            if len(set(caps)) > 1:
+                raise ValueError("replay: stream-copy sessions differ in codec; pin one with replay.run")
+            self._enc = encoded_info(_ENC_KEY[caps[0]])
+        else:
+            self._enc = None
+            for run, codec in zip(self._sessions, caps):
+                if codec not in _RAW_DECODE:
+                    raise ValueError(f"replay: unsupported recorded codec {codec!r} in {run.mkv_paths[0]}")
         self._activate_session(self._first_idx)
         log.info("replay source: %s (%d session(s), %d frames, %s -> %s, ~%.1f fps, %.1fs on the "
                  "timeline%s%s%s%s)",
                  os.path.dirname(self._sessions[0].base), len(self._sessions), len(all_ts),
-                 self._mkv_caps, "stream-copy" if stream_copy else hdr.get("pixel_format"),
+                 "/".join(dict.fromkeys(caps)), "stream-copy" if stream_copy else hdr.get("pixel_format"),
                  self.delivered_frame_rate or 0.0, self._playback.duration_s,
                  f", epoch {self._epoch_ns}" if epoch is not None else "",
                  f", from {from_s:g}s" if from_s is not None else "",
@@ -287,6 +292,17 @@ class ReplaySource(GstPipelineSource):
     def _activate_session(self, idx: int) -> None:
         self._session_idx = idx
         self._run = self._sessions[idx]
+        self._mkv_caps = self._session_caps[idx]
+        # Reset even when the next session is untiled (e.g. a switch to lossy H.264).
+        self._untile = None
+        hdr = self._run.header
+        tile_mode = normalize_mode(hdr.get("cfa_tile_mode", "off"))
+        if tile_mode != "off" and self._enc is None:
+            w, h = int(hdr["width"]), int(hdr["height"])
+            pattern = hdr.get("bayer_pattern") or "rggb"
+            self._untile = lambda b: untile_cfa(b, w, h, mode=tile_mode, pattern=pattern)
+            log.info("replay: session %s CFA mode %s/%s -- un-tiling to the original mosaic",
+                     self._run.base, tile_mode, pattern)
         self._csv_stamps = self._session_stamps[idx]
         self._idx = 0
         self._synth_warned = False
@@ -298,6 +314,7 @@ class ReplaySource(GstPipelineSource):
         super().configure()
         bus = self._pipeline.get_bus()
         bus.add_signal_watch()
+        self._reader_bus = bus
         bus.connect("message::eos", self._on_eos, self._gen)
         bus.connect("message::error", self._on_error, self._gen)
 
@@ -411,12 +428,14 @@ class ReplaySource(GstPipelineSource):
             return
         self._gen += 1                    # anything the old reader still posts is stale
         self._stop_evt.set()              # wake a pacing sleep so NULL isn't blocked by it
-        try:
-            self._pipeline.get_bus().remove_signal_watch()
-        except Exception:   # noqa: BLE001
-            pass
+        self._remove_reader_watch()
         self._pipeline.set_state(Gst.State.NULL)
         self._stop_evt.clear()
+
+    def _remove_reader_watch(self) -> None:
+        bus, self._reader_bus = self._reader_bus, None
+        if bus is not None:
+            bus.remove_signal_watch()
 
     # ---- mini-pipeline -----------------------------------------------------
     def _pipeline_desc(self) -> str:
@@ -503,8 +522,10 @@ class ReplaySource(GstPipelineSource):
         return st
 
     def stop(self) -> None:
+        self._gen += 1        # invalidate pending EOS/quiesce callbacks before releasing the reader
         self._stop_evt.set()   # wake a pacing sleep so set_state(NULL) isn't blocked by it
         self._playback.cancel_start_gate()
+        self._remove_reader_watch()
         super().stop()
 
     # ---- EOF / sessions / loop ---------------------------------------------
@@ -528,7 +549,8 @@ class ReplaySource(GstPipelineSource):
         GLib.idle_add(self._quiesce, gen)
 
     def _quiesce(self, gen: int) -> bool:
-        if gen == self._gen and self._pipeline is not None and self._finished:
+        if (gen == self._gen and self._pipeline is not None and self._finished
+                and not self._stop_evt.is_set()):
             self._pipeline.set_state(Gst.State.PAUSED)   # NULL would drop the reader a restart reuses
         return False
 

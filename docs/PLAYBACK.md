@@ -144,6 +144,23 @@ A camera-service `replay` plays **every session** the run holds for the instance
 order, with the recorded gaps between them honoured as silence (`session`/`sessions`/`source_path`
 in the descriptor say where it is). `restart` goes back to the first session inside the window.
 
+Raw-frame recordings can change encoder (for example FFV1 → H.264 → FFV1), quality, preset,
+keyframe interval, segment duration, and Bayer tiling between sessions. Replay probes each session's
+MKV codec and uses that session's sidecar to restore the consumer format and undo its tiling.
+Frame IDs and timestamps still come from the matching CSV. Lossy H.264 replays the stored,
+approximate image; it cannot recover pixels discarded during compression. Source pixel format,
+dimensions and Bayer pattern must stay consistent across sessions.
+
+An activate/deactivate that finishes successfully without recording a frame leaves its settings
+snapshot and empty sidecars on disk, but whole-run replay skips it. A run containing only empty
+sessions, or explicitly selecting an empty prefix, reports that there are no recorded frames.
+Incomplete or failed sessions are not silently skipped. Recording gaps retain their original timing
+on the shared timeline; standalone replay can optionally shorten them with `replay.gap_max_s`.
+
+Source-copy recordings still require one encoded codec across the run. Mixing source-copy and
+raw-frame recordings requires selecting a compatible session with `replay.run`; runtime recording
+settings reject switching between these feed modes while the service is running.
+
 ## Interaction with the recorder (camera-service)
 
 MKV replay opts into a buffer-based frame path: untiled decoded images retain GStreamer memory

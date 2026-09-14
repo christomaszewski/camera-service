@@ -43,7 +43,7 @@ docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
   [ "$(cat /tmp/cam/lifecycle.state)" = active ] || { echo "FAIL: active not remembered"; exit 1; }
   kill -USR2 "$CORE"; sleep 2
   [ "$(cat /tmp/cam/lifecycle.state)" = inactive ] || { echo "FAIL: inactive not remembered"; exit 1; }
-  P1=$(ls "$R"/fake-*.json | head -1); P1=${P1%.json}; P1=${P1##*/}
+  P1=$(ls "$R"/fake-*.csv | head -1); P1=${P1%.csv}; P1=${P1##*/}
   echo "session 1 prefix: $P1"
   N1=$(seg_count "$P1")
   [ "$N1" -ge 2 ] && [ "$N1" -le 4 ] \
@@ -67,7 +67,7 @@ EOF
   kill -USR1 "$CORE"; sleep 3
   kill -INT "$CORE"
   if wait "$CORE"; then echo "core exit: 0"; else echo "FAIL: core exit $?"; tail -20 /tmp/core.log; exit 1; fi
-  P2=$(ls "$R"/fake-*.json | grep -v "$P1" | head -1); P2=${P2%.json}; P2=${P2##*/}
+  P2=$(ls "$R"/fake-*.csv | grep -v "$P1" | head -1); P2=${P2%.csv}; P2=${P2##*/}
   [ -n "$P2" ] && [ "$P2" != "$P1" ] || { echo "FAIL: no second prefix"; ls "$R"; exit 1; }
   echo "session 2 prefix: $P2"
   decode_ok "$R/$P2-00000.mkv"
@@ -86,7 +86,7 @@ EOF
   sleep 5
   grep -q "lifecycle: booting active (resumed)" /tmp/core3.log \
     || { echo "FAIL: restart did not resume active"; tail -20 /tmp/core3.log; exit 1; }
-  N=$(ls "$R"/fake-*.json | wc -l)
+  N=$(ls "$R"/fake-*.csv | wc -l)
   [ "$N" -ge 4 ] || { echo "FAIL: expected a 4th session prefix after the resume, have $N"; ls "$R"; exit 1; }
   kill -INT "$CORE"; wait "$CORE"
   echo "resumed session finalized; runs on disk:"; ls "$R"
@@ -113,7 +113,7 @@ docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
   grep -q "REPLY reboot ok=False" /tmp/probe.log || { echo "FAIL: a bad transition must be a refusal reply"; exit 1; }
   grep -q "REPLY deactivate ok=True state=inactive" /tmp/probe.log || { echo "FAIL: deactivate reply"; exit 1; }
   grep -q "STATE $KEY/state active" /tmp/probe.log || { echo "FAIL: no state publication observed"; exit 1; }
-  P1=$(ls "$R"/fake-*.json | head -1); P1=${P1%.json}; P1=${P1##*/}
+  P1=$(ls "$R"/fake-*.csv | head -1); P1=${P1%.csv}; P1=${P1##*/}
   [ -n "$P1" ] || { echo "FAIL: no recording from the zenoh-activated session"; ls "$R"; exit 1; }
   python3 - "$R/$P1.json" <<EOF
 import json, sys

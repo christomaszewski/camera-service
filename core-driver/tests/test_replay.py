@@ -3,6 +3,7 @@
 
 Run: python3 core-driver/tests/test_replay.py
 """
+import json
 import os
 import sys
 import tempfile
@@ -11,7 +12,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from cam_driver.playback import (  # noqa: E402
-    Pacer, discover_run, load_stamps, median_interval_ns, shift_stamp,
+    Pacer, discover_run, discover_sessions, load_stamps, median_interval_ns, shift_stamp,
 )
 from cam_driver.timestamps import FrameStamp, TimestampSource  # noqa: E402
 
@@ -106,6 +107,40 @@ def test_load_stamps_reconstructs_verbatim():
     assert stamps[1].source is TimestampSource.PTP_CHUNK
     assert stamps[2].source is TimestampSource.SYSTEM     # unknown provenance -> system
     assert (stamps[1].timestamp_ns, stamps[1].camera_ns, stamps[1].system_ns) == (1040, 1041, 1045)
+
+
+def test_completed_empty_sessions_are_skipped_but_remain_auditable():
+    with tempfile.TemporaryDirectory() as d:
+        empty = _make_run(d, "empty", parts=0, csv=_CSV.splitlines()[0] + "\n",
+                          header=json.dumps({"session": {"frames_recorded": 0,
+                                                        "truncated": False, "error": None}}))
+        with open(empty + ".recording-settings.json", "w") as f:
+            json.dump({"requested": {"encoder": "x264"}}, f)
+        for path, run in ((d, ""), (empty, ""), (d, "empty")):
+            try:
+                discover_sessions(path, run)
+                raise AssertionError("expected an empty-session error")
+            except ValueError as e:
+                assert "no recorded frames" in str(e)
+        real = _make_run(d, "recorded")
+        assert [r.base for r in discover_sessions(d)] == [real]
+        assert os.path.isfile(empty + ".json") and os.path.isfile(empty + ".csv")
+        assert os.path.isfile(empty + ".recording-settings.json")
+
+
+def test_empty_summary_never_hides_incomplete_or_inconsistent_sessions():
+    for patch, rows in (({"truncated": True}, ""), ({"error": "disk full"}, ""),
+                        ({"frames_recorded": 1}, ""), ({}, _CSV.splitlines()[1] + "\n")):
+        with tempfile.TemporaryDirectory() as d:
+            _make_run(d, "recorded")
+            session = {"frames_recorded": 0, "truncated": False, "error": None, **patch}
+            _make_run(d, "broken", parts=0, csv=_CSV.splitlines()[0] + "\n" + rows,
+                      header=json.dumps({"session": session}))
+            try:
+                discover_sessions(d)
+                raise AssertionError("invalid session must fail, not silently disappear")
+            except ValueError as e:
+                assert "broken.json" in str(e)
 
 
 def test_median_interval_robust_to_gaps():

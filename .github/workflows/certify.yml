@@ -25,13 +25,15 @@ jobs:
       # Everything from apt against the system python3, so there is no PEP-668/venv dance and gi is
       # importable. python3-gi matters: without it test_recorder.py self-SKIPS, which is how a
       # missing >8-bit depth guard on the HW encoder could sit in main unnoticed. Only the gi
-      # bindings are needed, not a working GStreamer — every recorder test monkeypatches the element
-      # registry. numpy is a hard requirement for collection (test_thermal_preview imports it).
+      # bindings and software codecs are needed: recording/replay integration tests exercise real
+      # muxers, encoders and decoders. No camera or GPU is required.
       - name: install test deps
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            python3-pytest python3-yaml python3-numpy python3-gi gir1.2-gstreamer-1.0
+            python3-pytest python3-yaml python3-numpy python3-gi gir1.2-gstreamer-1.0 \
+            gir1.2-gst-plugins-base-1.0 gstreamer1.0-tools gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav
       # plugins/webrtc-bridge/tools is in scope deliberately: its test_*.py suites (H.264 level,
       # thermal preview, format adapter, header transport, ...) ran in no script, doc or workflow.
       #

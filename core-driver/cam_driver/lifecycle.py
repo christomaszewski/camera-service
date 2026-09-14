@@ -151,6 +151,11 @@ class Lifecycle:
         if transition == "activate":
             if not self._recording_enabled:
                 return self._result(False, cur, error="recording disabled by config")
+            if "expected_recording_settings" in params:
+                try:
+                    self._pipe.check_recording_settings(params["expected_recording_settings"])
+                except (ValueError, AttributeError) as e:
+                    return self._result(False, cur, error=str(e))
             r = self._call(self._pipe.activate, run_id=sanitize_run_id(params.get("run_id")))
         else:
             r = self._call(self._pipe.deactivate)
@@ -166,6 +171,17 @@ class Lifecycle:
             out["session"] = r["session"]
         self._notify()
         return out
+
+    def configure_recording(self, request) -> dict:
+        try:
+            if self.state != INACTIVE or not self._recording_enabled:
+                raise ValueError("recording settings are locked; stop recording before changing them")
+            result = self._pipe.configure_recording(request)
+        except Exception as e:
+            return self._result(False, self.state, error=str(e))
+        self.last_error = None
+        self._notify()
+        return {**result, "state": self.state, "descriptor": self.descriptor()}
 
     @staticmethod
     def _call(fn, **kw) -> dict:
@@ -216,8 +232,12 @@ class Lifecycle:
             "last_error": self.last_error,
         }
         sess = st.get("session")
+        settings = st.get("recording_settings")
+        if settings is not None:
+            d["recording_settings"] = settings
         if sess:
-            d["recording"] = {**sess, "encoder": st.get("encoder"), "segment_seconds": self.segment_seconds}
+            segment_seconds = settings["requested"]["segment_seconds"] if settings else self.segment_seconds
+            d["recording"] = {**sess, "encoder": st.get("encoder"), "segment_seconds": segment_seconds}
         return d
 
     # ---- remembered state --------------------------------------------------

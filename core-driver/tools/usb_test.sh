@@ -84,7 +84,8 @@ docker run --rm -v "$PWD/core-driver:/app" "$IMG" bash -c '
   kill -USR2 "$CORE"; sleep 1
   kill -INT "$CORE"; wait "$CORE" 2>/dev/null || true; echo "core done"
   grep -q "recorder: stream-copy" /tmp/h.log || { echo "FAIL: auto did not pick stream-copy for H264"; tail -20 /tmp/h.log; exit 1; }
-  J=$(ls /data/recordings/usbh264-*.json) || { echo "FAIL: no sidecar JSON"; exit 1; }
+  J=$(ls /data/recordings/usbh264-*.csv) || { echo "FAIL: no sidecar CSV"; exit 1; }
+  J=${J%.csv}.json
   python3 - "$J" <<EOF
 import json, sys
 d = json.load(open(sys.argv[1]))

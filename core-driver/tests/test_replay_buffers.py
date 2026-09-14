@@ -4,6 +4,7 @@ Run as a standalone script in cam-dev (1.20/shm) and cam-dev:jp6m (1.28/unixfd).
 The legacy live-source byte seam is exercised alongside the opt-in replay seam.
 """
 import gc
+import json
 import os
 import sys
 import tempfile
@@ -201,22 +202,24 @@ def test_buffer_source_preserves_window_pause_and_byte_fallback_for_untile():
 
 
 def _exercise_pipeline(recording, raw_endpoint=False, nv12=False, preview=False,
-                       shared_allocation=True, legacy_unixfd=False):
+                       shared_allocation=True, legacy_unixfd=False, encoder="ffv1", i420=False):
     """Real reader -> core -> transport consumer, optionally recording + raw consumer in parallel."""
     with tempfile.TemporaryDirectory() as tmp:
         run = Path(tmp) / "input"
         run.mkdir()
         def pixels(i):
+            if i420:
+                return bytes([50 + i * 7]) * (W * H) + bytes([64 + i]) * (W * H // 4) + bytes([192 - i]) * (W * H // 4)
             if nv12:
                 return bytes([50 + i * 7]) * (W * H) + bytes([64 + i, 192 - i]) * (W * H // 4)
             return _px(1, i)
 
         original = _write_session(run, "a", 1, T0, 10,
-                                  pixel_format="NV12" if nv12 else "GRAY8", pixels=pixels)
+                                  pixel_format="I420" if i420 else "NV12" if nv12 else "GRAY8", pixels=pixels)
         out = Path(tmp) / "output"
         cfg = parse_config({
             "camera": {"type": "replay"}, "replay": {"path": str(run), "speed": 1.0},
-            "recording": {"enabled": True, "encoder": "ffv1", "output_dir": str(out)},
+            "recording": {"enabled": True, "encoder": encoder, "output_dir": str(out)},
             "preview": {"enabled": preview, "sink": "appsink name=preview emit-signals=true sync=false"},
             "control": {"enabled": False},
             "transport": {"plugin_endpoint": {"enabled": True, "socket_path": tmp + "/frames",
@@ -319,9 +322,21 @@ def _exercise_pipeline(recording, raw_endpoint=False, nv12=False, preview=False,
                 reread = _source(out)
                 recorded_pixels = []
                 try:
+                    assert reread.encoded_caps is None  # re-encoded I420 is a blocking raw replay too
                     reread.start(lambda st, data: recorded_pixels.append(data))
                     _pump(lambda: reread.finished)
-                    assert recorded_pixels == [pixels(i) for i in range(10)]
+                    if encoder == "x264":
+                        assert len(recorded_pixels) == 10
+                        for i, data in enumerate(recorded_pixels):
+                            expected = pixels(i)
+                            assert len(data) == len(expected)
+                            assert sum(abs(a - b) for a, b in zip(data, expected)) / len(data) < 8
+                        header = json.loads(next(out.glob("*.csv")).with_suffix(".json").read_text())
+                        assert header["recording_encoder"] == "x264"
+                        assert header["recording_lossy"] is True
+                        assert header["recording_settings"] == {"crf": 23, "preset": "ultrafast", "chroma": "4:2:0"}
+                    else:
+                        assert recorded_pixels == [pixels(i) for i in range(10)]
                 finally:
                     reread.stop()
             assert pipe.drops.enqueue_failures == 0 and pipe.drops.publish_drops == 0
@@ -354,6 +369,18 @@ def test_native_transport_pool_when_upstream_declines_shared_allocation():
 
 def test_older_unixfd_falls_back_to_python_memfd_copy():
     _exercise_pipeline(recording=True, nv12=True, legacy_unixfd=True)
+
+
+def test_x264_recording_keeps_raw_transport_and_preview_exact():
+    _exercise_pipeline(recording=True, raw_endpoint=True, preview=True, nv12=True, encoder="x264")
+
+
+def test_x264_i420_recording_replays_every_raw_frame():
+    _exercise_pipeline(recording=True, i420=True, encoder="x264")
+
+
+def test_x264_gray8_recording_preserves_range_approximately():
+    _exercise_pipeline(recording=True, encoder="x264")
 
 
 if __name__ == "__main__":

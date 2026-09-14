@@ -183,7 +183,9 @@ class RecordingSession:
             if self.closed:
                 return
             self.closed = True
-            if self._appsrc is not None:
+            # GStreamer 1.20 splitmuxsink can assert on EOS before its first GOP. There is
+            # nothing to drain when no frame was accepted (also while waiting for an IDR).
+            if self._appsrc is not None and self.frames:
                 self._appsrc.emit("end-of-stream")
 
     def finish_close(self, timeout_s: float, drops_now: dict) -> dict:
@@ -195,6 +197,8 @@ class RecordingSession:
         if self._pipeline is not None:
             if self.error is not None:
                 self.truncated = True
+            elif self.frames == 0:
+                pass   # no muxed data, no EOS sent, and no final segment to drain
             elif not self._eos_seen and timeout_s > 0:
                 msg = self._bus.timed_pop_filtered(int(timeout_s * Gst.SECOND),
                                                    Gst.MessageType.EOS | Gst.MessageType.ERROR)
@@ -226,6 +230,8 @@ class RecordingSession:
             "first_pts_ns": self.first_pts,
             "session_index": self.index,
         }
+        if getattr(self, "settings_path", None):
+            attest["settings_file"] = self.settings_path
         # stop() BEFORE write_summary: stop() joins the CSV writer, where the final flush happens, so a
         # failure there sets the writer's failed flag in time for the summary to attest it.
         self.sidecar.stop()
@@ -298,6 +304,8 @@ class RecordingSession:
             "skipped_awaiting_keyframe": self.skipped_awaiting_keyframe,
             "error": self.error,
         }
+        if getattr(self, "settings_path", None):
+            d["settings_file"] = self.settings_path
         if final:
             d.update({
                 "truncated": self.truncated,

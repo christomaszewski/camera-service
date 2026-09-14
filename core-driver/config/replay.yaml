@@ -8,6 +8,10 @@
 #   lossless runs (ffv1 / hevc-lossless) decode back to the exact recorded bytes
 #   (CFA-tiled runs are un-tiled automatically); stream-copy runs (USB-MJPEG / RTSP)
 #   re-deliver the original bitstream: recording again is byte-faithful.
+#   opt-in lossy H.264 decodes to the source format with its recorded quality loss.
+# Raw recording codecs/quality/CFA tiling may change between sessions; replay selects each
+# session's decoder and un-tiler. Source format/geometry must stay constant. Completed sessions
+# with zero frames are skipped when replaying the whole directory.
 #
 # One thing the run does NOT carry to the BRIDGES: the Bayer label. On the JP6/dev frame header a
 # CFA mosaic rides as plain GRAY8, so the ros2/webrtc bridges label (and debayer) it from a launch-

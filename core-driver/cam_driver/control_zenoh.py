@@ -107,6 +107,8 @@ def parse_change_state(payload: Optional[bytes], parameters: str = ""):
         if not isinstance(run_id, (str, int)):
             return None, "'run_id' must be a string"
         out["run_id"] = str(run_id)
+    if "expected_recording_settings" in req:
+        out["expected_recording_settings"] = req["expected_recording_settings"]
     return out, None
 
 
@@ -207,6 +209,9 @@ class ZenohControl:
             self._queryables.append(self._session.declare_queryable(self.key_base, self._on_query_state))
             self._queryables.append(
                 self._session.declare_queryable(self.key_base + "/change_state", self._on_query_change))
+            if hasattr(self.lifecycle, "configure_recording"):
+                self._queryables.append(self._session.declare_queryable(
+                    self.key_base + "/configure_recording", self._on_query_recording))
             self._publisher = self._session.declare_publisher(self.key_base + "/state")
             self._token = self._session.liveliness().declare_token(self.key_base)
             log.info("control plane: %s  (connect=%s)", self.key_base, self._connect or "scout")
@@ -317,6 +322,29 @@ class ZenohControl:
         except Exception as e:   # noqa: BLE001
             log.exception("control plane: change_state failed")
             self._reply(query, {"ok": False, "error": f"internal error: {e}"})
+        return False
+
+    def _on_query_recording(self, query) -> None:
+        try:
+            self._dispatch(self._handle_recording, query)
+        except Exception as e:
+            self._reply(query, {"ok": False, "error": f"dispatch failed: {e}"})
+
+    def _handle_recording(self, query) -> bool:
+        try:
+            payload = getattr(query, "payload", None)
+            raw = payload.to_bytes() if hasattr(payload, "to_bytes") else bytes(payload or b"")
+            if len(raw) > 16384:
+                raise ValueError("recording settings request too large")
+            request = json.loads(raw)
+            result = self.lifecycle.configure_recording(request)
+        except (ValueError, TypeError) as e:
+            result = {"ok": False, "error": str(e), "state": self.lifecycle.state,
+                      "descriptor": self.lifecycle.descriptor()}
+        except Exception as e:
+            log.exception("control plane: configure_recording failed")
+            result = {"ok": False, "error": f"internal error: {e}"}
+        self._reply(query, result)
         return False
 
     # ---- playback (docs/PLAYBACK.md) --------------------------------------------

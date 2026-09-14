@@ -27,6 +27,7 @@ Presence **and** the state descriptor live at the **same key**, one per service 
 ```
 fleet/<vehicle_id>/svc/<instance>/lifecycle                liveliness token + queryable → descriptor
 fleet/<vehicle_id>/svc/<instance>/lifecycle/change_state   queryable: request a transition → reply
+fleet/<vehicle_id>/svc/<instance>/lifecycle/configure_recording  camera-service: update recording settings
 fleet/<vehicle_id>/svc/<instance>/lifecycle/state          publisher: the descriptor on every transition
 ```
 
@@ -145,6 +146,72 @@ The reply is sent when the transition **completes** — `activate` once the sess
 `change_state`; Zenoh's default (10 s) is tight.
 
 ## Consumer recipe
+
+### Recording settings (camera-service)
+
+The lifecycle descriptor includes an optional `recording_settings` capability whenever recording
+is enabled. It exposes `requested` settings, `resolved` encoder/lossiness/Bayer mode, `encoders`
+(the choices permitted for this source), `editable`, and a `generation`/`revision` pair. `generation`
+changes at service restart; `revision` increments on each accepted settings change. Read the same
+descriptor before recording; subscribe to `/state` to see edits made by another controller.
+
+Send a JSON patch to `<lifecycle>/configure_recording`:
+
+```json
+{
+  "expected": {"generation": "<from descriptor>", "revision": 0},
+  "settings": {"encoder": "x264", "x264_crf": 28, "x264_preset": "ultrafast", "segment_seconds": 60}
+}
+```
+
+The reply is `{ "ok": true, "state": "inactive", "descriptor": {...} }`, or `ok:false` with
+`error` and the current descriptor. A settings request requires the expected generation/revision;
+stale requests are rejected. Changes run on the same main loop as lifecycle transitions, are
+validated and parsed before application, and are **only accepted while inactive**. Active,
+activating, deactivating, disabled, or stopping recorders reject edits. Output directory, prefix,
+source geometry, and `recording.enabled` remain deployment configuration.
+
+Editable fields and accepted ranges:
+
+| Field | Values |
+| --- | --- |
+| `encoder` | Advertised `encoders`; defaults/fallbacks follow the YAML recorder rules |
+| `x264_crf` | Integer 1–50; lower preserves more detail |
+| `x264_preset` | ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow, placebo |
+| `segment_seconds` | Integer 1–86400 |
+| `keyframe_interval_s` | Number 0–3600; 0 uses the encoder default |
+| `bayer_tile` | off, plain, green_diff, rct |
+| `bframes` | Integer 0–16; ignored by FFV1 and disabled for x264 |
+| `nvenc_preset` | Empty/default, disable, ultrafast, fast, medium, slow |
+| `nvenc_maxperf` | Boolean |
+| `videoconvert_threads` | Integer 0–64; 0 uses automatic threading |
+
+Settings for another codec may be staged but only affect encoders that use them. Always review
+`resolved`: unsupported high bit depths or unavailable encoder plugins still use the existing FFV1
+fallback. Encoded sources keep their boot-time source-copy versus re-encode feed mode; changing
+between those modes requires restarting with an updated config. This preserves the source's
+timeline ownership and best-effort decoder branch. Raw sensors can change encoders between sessions
+without interrupting ingest, preview, or plugin transport.
+
+An `activate` request can include `expected_recording_settings` with the same generation/revision
+pair to refuse starting with settings changed since the operator reviewed them. The dashboard uses
+this guard. Existing clients that send only `transition`/`run_id` retain their behavior.
+
+Runtime edits last until service restart; they do not rewrite the loaded YAML or its bringup snapshot.
+**Every activation** writes `<session-prefix>.recording-settings.json` beside the CSV and MKV files,
+before opening the recorder to frames. The file includes the complete requested recording config
+(including deployment fields), resolved encoder and quality/Bayer mode, generation/revision, source
+format/geometry/rate, session index/prefix, creation time, and optional run label. It remains separate
+for each session, including empty sessions; a failed write refuses activation. An activation that
+fails later can leave this audit of the attempted session. The lifecycle recording/closed-session
+descriptor and the sidecar reference it as `settings_file` / `recording_settings_file`.
+
+In the managed layout it lives under
+`<data>/runs/<run-id>/recordings/<instance>/<session-prefix>.recording-settings.json`.
+An explicitly pinned output directory receives the snapshot beside its recordings instead.
+Replay discovery requires a JSON/CSV pair, so the settings file does not become a replay session.
+
+### Discovery and transitions
 
 ```
 # fleet snapshot (+ presence)

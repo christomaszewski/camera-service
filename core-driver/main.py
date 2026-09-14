@@ -91,7 +91,7 @@ def main(argv=None) -> int:
     pipe = CapturePipeline(cfg, source)
     try:
         pipe.build()
-    except (GLib.Error, RuntimeError, OSError) as e:
+    except (GLib.Error, RuntimeError, OSError, ValueError) as e:
         # An unbuildable pipeline (a GStreamer element this host doesn't have and nothing left to
         # fall back to, an unparseable preview sink, an un-creatable socket dir): fail with ONE
         # legible line + a non-zero exit. Uncaught, it's a raw traceback that compose restart-loops

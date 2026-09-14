@@ -200,6 +200,10 @@ class PcapConfig:
 class RecordingConfig:
     enabled: bool = True
     encoder: str = "auto"
+    # Opt-in lossy H.264 (encoder: x264), 8-bit input only. Higher CRF = smaller/lower quality.
+    # Keep presets explicit: ultrafast minimizes CPU; slower presets spend CPU to shrink files.
+    x264_crf: int = 23                 # 1..50 (0/lossless is outside this 4:2:0 recording mode)
+    x264_preset: str = "ultrafast"
     # Where recordings land, by SHAPE (resolve_recording_dir; no magic values):
     #   "" (default) -> the managed layout: <data root>[/runs/<id>]/recordings/<instance>
     #   relative     -> a subdir under that managed recordings root, REPLACING <instance>

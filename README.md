@@ -66,11 +66,15 @@ Aravis stream  ──►  [feeder: read frame_id + PTP ChunkTimestamp;        �
 
 The recorder is **pluggable / capability-detecting**:
 
-| Capture format | Encoder (auto) | Lossless | Temporal | HW |
+| Capture format | Encoder | Lossless | Temporal | HW |
 |---|---|---|---|---|
 | Mono8 / Bayer*8 | `hw-hevc-lossless` (NVENC, NV24) | ✅ bit-exact | ✅ | ✅ |
 | Mono16 / Bayer*16 | `ffv1` | ✅ | ❌ intra-only | ❌ |
 | 8-bit + temporal, no NVENC | `x265-lossless` (set explicitly) | ✅ | ✅ | ❌ CPU |
+| 8-bit, lower CPU / configurable quality | `x264` (set explicitly) | ❌ lossy | ✅ | ❌ CPU |
+
+`auto` remains lossless/source-copy. See [H.264 recording settings](docs/recording-tuning.md#optional-h264-recording)
+for `x264_crf` quality and `x264_preset` speed controls.
 
 > On Orin, hardware lossless is **8-bit only** — there is no 10/12-bit HW lossless and no AV1
 > lossless. Choose 8-bit capture for the full hardware path, or FFV1 for higher bit depth.
