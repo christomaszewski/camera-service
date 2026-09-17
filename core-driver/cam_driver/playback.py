@@ -116,6 +116,10 @@ def _load_run(base: str, *, skip_empty: bool = False) -> Optional[RunInfo]:
                 log.info("replay: skipping finalized empty session %s", base)
                 return None
             raise ValueError(f"replay: {base} has no recorded frames (empty session)")
+    if (header.get("sidecar_csv_failed") or
+            (isinstance(session, dict) and (session.get("truncated") or session.get("error")))):
+        raise ValueError(f"replay: {base}.json attests an incomplete recording; "
+                         "its video/timestamp correspondence cannot be trusted")
     missing = [k for k in ("pixel_format", "width", "height") if not header.get(k)]
     if missing:
         raise ValueError(f"replay: {base}.json is not a run sidecar header "
@@ -128,6 +132,14 @@ def _load_run(base: str, *, skip_empty: bool = False) -> Optional[RunInfo]:
     mkvs = sorted(p for p in glob.glob(glob.escape(base) + "-*.mkv") if part.match(p))
     if not mkvs:
         raise ValueError(f"replay: no {base}-*.mkv parts found -- was recording enabled for this run?")
+    indices = [int(p[-9:-4]) for p in mkvs]
+    if indices != list(range(len(mkvs))):
+        raise ValueError(f"replay: {base} has missing recording segments: {indices}")
+    expected_parts = session.get("segments") if isinstance(session, dict) else None
+    # Older summaries could miss the final fragment-closed message during EOS and
+    # undercount parts. Additional contiguous parts still undergo CSV/frame validation.
+    if expected_parts is not None and expected_parts > len(mkvs):
+        raise ValueError(f"replay: {base} attests {expected_parts} segments but {len(mkvs)} exist")
     return RunInfo(base=base, header=header, csv_path=csv_path, mkv_paths=mkvs)
 
 

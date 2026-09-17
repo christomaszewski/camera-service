@@ -1,0 +1,12 @@
+[run]
+branch = True
+relative_files = True
+source =
+    core-driver/cam_driver
+    plugins/webrtc-bridge/tools
+omit =
+    */test_*.py
+
+[report]
+show_missing = True
+skip_empty = True

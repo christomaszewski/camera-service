@@ -13,8 +13,10 @@
 # Prereq:  docker build -f core-driver/Dockerfile.dev -t cam-dev .
 # Run from the repo root:  ./core-driver/tools/lifecycle_test.sh
 set -euo pipefail
+IMG="${CAM_DEV_IMAGE:-cam-dev}"
 
-docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
+# Loopback is sufficient; isolate Zenoh discovery from other tests and running services.
+docker run --rm --network none -v "$PWD/core-driver:/app" "$IMG" bash -c '
   set -e
   mkdir -p /data/recordings /tmp/cam
   R=/data/recordings
@@ -32,14 +34,14 @@ docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
   sleep 4
   grep -q "lifecycle: booting inactive (config)" /tmp/core.log \
     || { echo "FAIL: did not boot inactive"; tail -20 /tmp/core.log; exit 1; }
-  python3 tools/shm_probe.py --socket /tmp/cam/frames --count 5 --timeout 5
+  python3 tools/shm_probe.py --count 5 --timeout 5
   [ -z "$(ls "$R"/fake-*.mkv 2>/dev/null)" ] || { echo "FAIL: recorded while inactive"; ls -la "$R"; exit 1; }
   [ ! -e /tmp/cam/lifecycle.state ] || { echo "FAIL: state remembered before any transition"; exit 1; }
   echo "inactive: consumers fed, no recording, no remembered state"
 
   echo "=== 2. USR1 -> session 1 records; USR2 finalizes it ==="
   kill -USR1 "$CORE"; sleep 5
-  python3 tools/shm_probe.py --socket /tmp/cam/frames --count 3 --timeout 5   # consumers flow while ACTIVE
+  python3 tools/shm_probe.py --count 3 --timeout 5   # auto-select shm/unixfd; consumers flow while ACTIVE
   [ "$(cat /tmp/cam/lifecycle.state)" = active ] || { echo "FAIL: active not remembered"; exit 1; }
   kill -USR2 "$CORE"; sleep 2
   [ "$(cat /tmp/cam/lifecycle.state)" = inactive ] || { echo "FAIL: inactive not remembered"; exit 1; }
@@ -94,7 +96,7 @@ EOF
 
 echo
 echo "########## zenoh control plane, peer-to-peer -- NO router anywhere (docs/LIFECYCLE.md) ##########"
-docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
+docker run --rm --network none -v "$PWD/core-driver:/app" "$IMG" bash -c '
   set -e
   mkdir -p /data/recordings /tmp/cam
   export VEHICLE_ID=testveh CAM_INSTANCE=cam_fake
@@ -104,7 +106,7 @@ docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
   CORE=$!
   echo "=== the probe LISTENS on the core default endpoint (tcp/localhost:7447), standing in for a router ==="
   # The core connects to it (its connector retries until it does); no zenohd exists in this container.
-  python3 tools/lifecycle_probe.py --listen tcp/127.0.0.1:7447 --timeout 60 \
+  python3 tools/lifecycle_probe.py --pattern "$KEY" --listen tcp/127.0.0.1:7447 --timeout 60 \
       --steps wait-put get:inactive bad activate wait-state:active sleep:5 deactivate wait-state:inactive get:inactive \
       >/tmp/probe.log 2>&1 || { echo "FAIL: probe steps"; cat /tmp/probe.log; tail -30 /tmp/core.log; exit 1; }
   grep -E "EVENT|DESCRIPTOR|REPLY|STATE|STEP|SUMMARY" /tmp/probe.log
@@ -126,7 +128,7 @@ EOF
   grep -q "control plane: activate -> ok=True" /tmp/core.log || { echo "FAIL: core did not log the zenoh transition"; exit 1; }
 
   echo "=== presence DELETE on a graceful stop (a second probe reconnects, then the core stops) ==="
-  python3 tools/lifecycle_probe.py --listen tcp/127.0.0.1:7447 --timeout 60 --steps wait-put wait-delete \
+  python3 tools/lifecycle_probe.py --pattern "$KEY" --listen tcp/127.0.0.1:7447 --timeout 60 --steps wait-put wait-delete \
       >/tmp/probe2.log 2>&1 &
   PROBE=$!
   for _ in $(seq 1 30); do grep -q "EVENT PUT" /tmp/probe2.log && break; sleep 1; done

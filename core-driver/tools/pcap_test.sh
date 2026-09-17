@@ -7,8 +7,9 @@
 # Prereq:  docker build -f core-driver/Dockerfile.dev -t cam-dev .
 # Run from the repo root:  ./core-driver/tools/pcap_test.sh
 set -euo pipefail
+IMG="${CAM_DEV_IMAGE:-cam-dev}"
 
-docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
+docker run --rm -v "$PWD/core-driver:/app" "$IMG" bash -c '
   set -e
   mkdir -p /data/recordings /tmp/cam
   echo "=== 1. synthesize the capture (100 frames 64x48 Y16 @60fps + noise/ERR/truncation) ==="
@@ -51,7 +52,7 @@ PY
 
 echo
 echo "########## MJPEG pcap: dual-output -> stream-copy record, byte-exact + clean drain ##########"
-docker run --rm -v "$PWD/core-driver:/app" cam-dev bash -c '
+docker run --rm -v "$PWD/core-driver:/app" "$IMG" bash -c '
   set -e
   mkdir -p /data/recordings /tmp/cam
   python3 - <<'\''PY'\''
@@ -64,6 +65,7 @@ print(len(expected), "expected frames")
 PY
   cat > /tmp/pcap-mjpeg.yaml <<EOF
 camera: {type: pcap}
+playback: {on_finish: exit}
 pcap: {path: /tmp/mj.pcap, pixel_format: MJPEG, width: 32, height: 24, speed: 0}
 recording: {enabled: true, encoder: auto, name_prefix: pcapmj}
 transport: {plugin_endpoint: {enabled: true, socket_path: /tmp/cam/frames}}

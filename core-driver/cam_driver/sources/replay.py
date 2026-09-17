@@ -160,7 +160,6 @@ class ReplaySource(GstPipelineSource):
         self._stop_evt = threading.Event()   # cancels a pacing sleep (recorded gaps can be seconds)
         self._finished = False
         self._failed = False
-        self._synth_warned = False
         self._mkv_caps = None
         self._enc = None            # (caps, parser, decoder) for a stream-copy run
         self._untile = None         # frame-bytes transform for CFA-tiled runs
@@ -305,7 +304,6 @@ class ReplaySource(GstPipelineSource):
                      self._run.base, tile_mode, pattern)
         self._csv_stamps = self._session_stamps[idx]
         self._idx = 0
-        self._synth_warned = False
         self._playback.source_path = self._run.base
         self._playback.session = idx
 
@@ -471,6 +469,8 @@ class ReplaySource(GstPipelineSource):
 
     # ---- the window --------------------------------------------------------
     def _deliverable(self, st: FrameStamp) -> bool:
+        if self._failed or self._stop_evt.is_set():
+            return False
         raw = st.timestamp_ns - self._offset
         if self._from_ns is not None and raw < self._from_ns:
             return False
@@ -486,17 +486,14 @@ class ReplaySource(GstPipelineSource):
         if idx < len(self._csv_stamps):
             st = playback.shift_stamp(self._csv_stamps[idx], self._offset)
         else:
-            # more frames in the .mkv than CSV rows (e.g. a crash cut the sidecar short):
-            # keep delivering with synthesized stamps rather than dying mid-replay
-            if not self._synth_warned:
-                self._synth_warned = True
-                log.warning("replay: recording has more frames than %s has rows -- "
-                            "synthesizing stamps from row %d on", self._run.csv_path, idx)
-            last = playback.shift_stamp(self._csv_stamps[-1], self._offset)
-            ts = last.timestamp_ns + (idx - len(self._csv_stamps) + 1) * self._median_ns
-            st = FrameStamp(frame_id=last.frame_id + (idx - len(self._csv_stamps) + 1),
-                            timestamp_ns=ts, source=TimestampSource.SYSTEM,
-                            system_ns=ts, camera_ns=ts, chunk_ns=None)
+            # A crash can cut the CSV short. Never invent provenance for unindexed video.
+            if not self._failed:
+                log.error("replay: recording has more frames than %s has rows -- "
+                          "ending incomplete replay at row %d", self._run.csv_path, idx)
+                self._failed = True
+                self._finish(self._gen)
+            # The callback contract still requires a stamp, but _deliverable suppresses it.
+            return playback.shift_stamp(self._csv_stamps[-1], self._offset)
         raw = st.timestamp_ns - self._offset
         if self._from_ns is not None and raw < self._from_ns:
             return st                      # before the window: decoded, never paced or delivered
@@ -529,17 +526,19 @@ class ReplaySource(GstPipelineSource):
         super().stop()
 
     # ---- EOF / sessions / loop ---------------------------------------------
-    def _check_row_count(self) -> None:
+    def _check_row_count(self) -> bool:
         """Frame N of the recording is re-stamped from CSV row N (ordinal, not keyed), which holds
         only while every frame the sidecar attests is actually delivered. Fewer frames than rows
         means a frame went missing somewhere in the decode path -- and every row after it was
         attached to the wrong frame. Say so, loudly, rather than let a silently mis-stamped
         reprocess look complete. (More frames than rows is handled in _new_stamp.)"""
         rows = len(self._csv_stamps)
-        if 0 < self._idx < rows:
-            log.warning("replay: %s has %d rows but only %d frames were delivered -- rows after the "
+        if self._idx != rows:
+            log.error("replay: %s has %d rows but %d frames were decoded -- rows after the "
                         "first missing frame were attached to the wrong frames; the re-recorded "
                         "stamps are NOT trustworthy for this run", self._run.csv_path, rows, self._idx)
+            return False
+        return True
 
     def _finish(self, gen: int) -> None:
         """End of data (streaming thread or main loop): mark finished and, from the main loop,
@@ -555,9 +554,12 @@ class ReplaySource(GstPipelineSource):
         return False
 
     def _on_eos(self, _bus, _msg, gen: int) -> None:
-        if gen != self._gen:
+        if gen != self._gen or self._finished:
             return   # a reader already replaced (restart raced the EOS)
-        self._check_row_count()
+        if not self._check_row_count():
+            self._failed = True
+            self._finish(gen)
+            return
         nxt = self._session_idx + 1
         if nxt < len(self._sessions) and (self._to_ns is None or
                                           self._session_stamps[nxt][0].timestamp_ns < self._to_ns):
@@ -602,7 +604,6 @@ class ReplaySource(GstPipelineSource):
         single = len(self._sessions) == 1 or self._session_idx == self._first_idx
         if single and not was_finished and self._pipeline is not None:
             self._idx = 0
-            self._synth_warned = False
             if self._pipeline.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH, 0):
                 return
             log.error("replay: %s seek failed (parts moved/deleted?) -- rebuilding the reader", reason)

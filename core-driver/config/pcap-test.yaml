@@ -5,6 +5,9 @@
 camera:
   type: pcap
 
+playback:
+  on_finish: exit            # finite smoke test; production control defaults to holding for restart
+
 pcap:
   path: /tmp/test.pcap
   pixel_format: GRAY16_LE

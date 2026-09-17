@@ -143,7 +143,7 @@ class RecordingSession:
         """Feed one frame (source thread). The whole check-and-push runs under the session lock so a
         frame can never land after begin_close() emitted end-of-stream."""
         with self.lock:
-            if self.closed or self._appsrc is None:
+            if self.closed or self.error is not None or self._appsrc is None:
                 return PushResult.SKIPPED
             if self._await_key:
                 if self._caps_kind is None and caps_str:
@@ -170,7 +170,13 @@ class RecordingSession:
             if self.first_pts is None:
                 self.first_pts = int(pts)
                 self.first_stamp = stamp
-                self.sidecar.write_header(self._header_factory(stamp, pts, self))
+                try:
+                    self.sidecar.write_header(self._header_factory(stamp, pts, self))
+                except OSError as exc:
+                    # Metadata writes happen on the camera's feed thread. A recorder I/O
+                    # failure must not escape and kill acquisition/preview/transport.
+                    self._record_error(f"sidecar header write failed: {exc}")
+                    return PushResult.DROPPED
             if self._appsrc.emit("push-buffer", _wrap_buffer(payload, pts, stamp.frame_id)) != Gst.FlowReturn.OK:
                 return PushResult.DROPPED
             self.frames += 1
@@ -249,15 +255,18 @@ class RecordingSession:
         self._bus = None
 
     # ---- bus ---------------------------------------------------------------
+    def _record_error(self, error: str) -> None:
+        if self.error is None:
+            self.error = error
+            log.error("recording session %d ERROR: %s", self.index, error)
+            if self._on_error is not None:
+                GLib.idle_add(self._report_error)   # teardown belongs to the main loop
+
     def _on_bus(self, _bus, msg) -> None:
         t = msg.type
         if t == Gst.MessageType.ERROR:
             err, dbg = msg.parse_error()
-            if self.error is None:
-                self.error = f"{err} | {dbg}"
-                log.error("recording session %d ERROR: %s | %s", self.index, err, dbg)
-                if self._on_error is not None:
-                    GLib.idle_add(self._report_error)   # outside this dispatch: the close removes the watch
+            self._record_error(f"{err} | {dbg}")
         elif t == Gst.MessageType.EOS:
             self._eos_seen = True
         elif t == Gst.MessageType.ELEMENT:

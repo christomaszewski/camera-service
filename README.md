@@ -427,6 +427,9 @@ file; `restart` records the data again from its start into the same session.
 The data path is validated by actually running it in containers — including the **real Aravis
 chunk-parse path** via a patched chunk-emitting GV camera:
 - [core-driver/tools/dev_test.sh](core-driver/tools/dev_test.sh) — producer: capture → timestamp → encoder-fallback probe → FFV1 → shm
+- [docs/TESTING.md](docs/TESTING.md) — CI matrix, branch coverage reports, live recording failures,
+  concurrent settings changes, damaged archives, and repeated-session resource checks; run the
+  same hardware-free Python gate with `bash tools/ci_test.sh`.
 - [core-driver/tools/lifecycle_test.sh](core-driver/tools/lifecycle_test.sh) — **standby/active lifecycle**: boot `inactive` (consumers fed, nothing recorded) → SIGUSR1/SIGUSR2 recording sessions as finalized runs (threshold-split segments, CSV rows, self-attesting JSON) → KILL + restart resumes `active`; then the **zenoh control plane with no router** (presence, descriptor, `change_state` round-trips, state publications, DELETE on stop — the probe stands in for a router)
 - [core-driver/tools/usb_test.sh](core-driver/tools/usb_test.sh) — USB source: raw, **MJPEG stream-copy** (dual-output), color/FFV1, and a mid-stream **H.264 session gated to its first keyframe**
 - [core-driver/tools/rtsp_test.sh](core-driver/tools/rtsp_test.sh) — RTSP source: local fake server → stream-copy record + **RTCP→NTP provenance** (CSV-checked)

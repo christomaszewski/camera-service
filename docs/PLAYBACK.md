@@ -157,6 +157,12 @@ sessions, or explicitly selecting an empty prefix, reports that there are no rec
 Incomplete or failed sessions are not silently skipped. Recording gaps retain their original timing
 on the shared timeline; standalone replay can optionally shorten them with `replay.gap_max_s`.
 
+Replay refuses sessions marked truncated or with failed timestamp sidecars, and detects missing
+segment numbers before delivery. If decoding yields fewer or more frames than the CSV indexes,
+replay ends with an error (and a nonzero service exit), including in loop mode. It never invents
+timestamps for extra video frames. A window ending early is still a normal completion; it does not
+claim to have validated the unread remainder of the recording.
+
 Source-copy recordings still require one encoded codec across the run. Mixing source-copy and
 raw-frame recordings requires selecting a compatible session with `replay.run`; runtime recording
 settings reject switching between these feed modes while the service is running.
