@@ -36,6 +36,9 @@ A plugin consumes:
 
 - **[ros2-bridge](ros2-bridge)** — *built.* Publishes `sensor_msgs/Image` (raw + lazy compressed)
   with `header.stamp` derived from the PTP capture time. ROS 2 (Lyrical Luth).
+- **[ros2-source](ros2-source)** — *built.* The reverse direction: a ROS 2 image topic
+  (`Image` / `CompressedImage`) FEEDING a `camera.type: shm` instance through its shm input (raw /
+  header / unixfd framing, converted to the pinned format). Python, in the ros2-bridge image.
 - **[webrtc-bridge](webrtc-bridge)** — *built.* Re-encodes lossy/low-latency and serves remote
   viewers via `webrtcsink`. A best-effort consumer (its own encode, allowed to drop frames).
 - **mqtt-telemetry** — *example / idea.* Grab select low-res frames and forward to the cloud.

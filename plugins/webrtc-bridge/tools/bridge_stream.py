@@ -31,6 +31,7 @@ from gi.repository import GLib, Gst
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from zenoh_advertiser import StreamAdvertiser
 from h264_level import h264_level_for, level_covers, LEVELS as H264_LEVELS
+from encoder_policy import live_encoder_props
 from format_adapt import adapt_for_input, debayer_enabled
 from scale_plan import fit_within, parse_max_size, scale_caps
 from header_transport import (HeaderError, PtsTracker, TS_SOURCE_SHORT,
@@ -134,6 +135,9 @@ def base_descriptor():
     codec = _CODEC_FROM_CAPS.get((_env("VIDEO_CAPS", "") or "").split(",")[0].strip())
     if codec:                                               # omit unless a codec is actually pinned
         d["codec"] = codec
+    source = (_env("CAM_SOURCE_TYPE", "") or "").strip().lower()
+    if source:                                              # omit unless the launcher told us (never guess)
+        d["source"] = source                                # gige | usb | rtsp | pcap | replay
     topic = _env("CAM_ROS_TOPIC")                          # OPTIONAL config-supplied linkage
     if topic:
         d["ros_topic"] = topic if topic.startswith("/") else "/" + topic
@@ -236,8 +240,9 @@ def _negotiated_caps(el, which):
             return None
 
 
-def _configure_live_encoder(encoder):
-    """Force B-frames OFF (real-time) + a low-latency tune, DEFENSIVELY across encoders (x264enc /
+def _configure_live_encoder(encoder, fps=None):
+    """Force B-frames OFF (real-time) + a low-latency tune + a short GOP (and a cheap preset on the
+    software fallback -- see live_encoder_props), DEFENSIVELY across encoders (x264enc /
     nvv4l2h264enc / openh264enc): only sets properties that exist, so it's a no-op on a non-H.264
     encoder. Deliberately does NOT touch the encoder's `profile`: the bitstream profile is negotiated
     from the downstream caps (webrtcsink's parser filter pins constrained-baseline -- see
@@ -272,6 +277,9 @@ def _configure_live_encoder(encoder):
     elif name == "nvv4l2h264enc":
         setp("maxperf-enable", True)
         setp("insert-sps-pps", True)                  # mid-stream joiners get SPS/PPS at every IDR
+    for prop, val in live_encoder_props(name, fps, _env("CAM_WEBRTC_KEYFRAME_S"),
+                                        _env("CAM_WEBRTC_X264_PRESET")):
+        setp(prop, val)
     log.info("encoder-setup: %s -> %s", name, ", ".join(done) or "(no matching low-latency props)")
 
 
@@ -300,7 +308,7 @@ class Bridge:
         # Headered-shm pump (JP6 plugin endpoint; run.sh splits the pipeline at hdr_in/hdr_out):
         # strip the 36-byte CAMF header, stamp caps from it, re-attach capture time as offset_end.
         self.hdr_out = None             # the appsrc we push de-headered frames into
-        self._hdr_pts = PtsTracker()    # absolute capture ns -> relative monotonic PTS
+        self._hdr_pts = PtsTracker(arrival_clock=time.monotonic_ns)  # preview clock, independent of capture time
         self._hdr_caps_key = None       # (w, h, pixfmt) the current hdr_out caps were built from
         self._hdr_warn_last = 0.0       # throttle for per-frame header errors (monotonic s)
         # Capture->now latency (works wherever buffers carry the absolute capture ns in offset_end:
@@ -403,7 +411,9 @@ class Bridge:
             # 42e01f -> out-of-level black tile). encoder-setup also forces B-frames off for live.
             try:
                 sink.connect("request-encoded-filter", self._on_request_encoded_filter)
-                sink.connect("encoder-setup", self._on_encoder_setup)
+                # webrtcsink's RUN_LAST default handler sets x264 key-int-max=2560 and its own
+                # preset. Apply our policy AFTER it or our short GOP is silently overwritten.
+                sink.connect_after("encoder-setup", self._on_encoder_setup)
             except Exception as e:
                 log.warning("could not connect webrtcsink encoder signals: %s", e)
             # Viewer visibility for the status heartbeat (signature varies by build -> defensive).
@@ -789,10 +799,12 @@ class Bridge:
         return cf
 
     def _on_encoder_setup(self, _sink, consumer_id, codec_name, encoder):
-        """webrtcsink: configure the per-consumer encoder -- force B-frames OFF + low-latency for live.
-        Return False so webrtcsink still layers its own bitrate / congestion-control defaults on top."""
+        """webrtcsink: configure the per-consumer encoder -- force B-frames OFF + low-latency + a short
+        GOP for live, after the default handler has configured bitrate / congestion control.
+        Return False so other application handlers may still run."""
         try:
-            _configure_live_encoder(encoder)
+            geo = self._encode_geometry()             # the fps ACTUALLY fed to the encoder, if negotiated
+            _configure_live_encoder(encoder, fps=geo[2] if geo else None)
         except Exception as e:                        # noqa: BLE001 -- never break the video path
             log.warning("encoder-setup failed: %s", e)
         return False
@@ -990,7 +1002,7 @@ class Bridge:
     def _on_hdr_sample(self, sink):
         """Per frame: parse the 36-byte header, hand the PIXEL bytes on as a zero-copy sub-buffer
         (copy_region shares the memory), and re-attach what shm dropped: a relative monotonic PTS
-        derived from the capture stamp, offset=frame_id, offset_end=absolute capture ns (the unixfd
+        derived from arrival time, offset=frame_id, offset_end=absolute capture ns (the unixfd
         convention -- everything downstream, latency probes included, is transport-agnostic).
         A corrupt frame is dropped, throttled-warned, and the stream stays up."""
         sample = sink.emit("pull-sample")

@@ -74,7 +74,7 @@ params:
 | `socket_path` | `/tmp/cam/unixfd` (JP7) · `/tmp/cam/frames` (JP6) | the core's transport endpoint |
 | `topic` | `image_raw` | output `sensor_msgs/Image` topic |
 | `frame_id` | `camera` | `header.frame_id` (TF frame) |
-| `encoding` | `""` (`$CAM_ROS_ENCODING`) | Bayer label / hint. **Auto-set by `cam-up`** from `camera.pixel_format` (e.g. `BayerRG8` → `bayer_rggb8`); empty = mono. On JP7 the format also comes off the caps. |
+| `encoding` | `""` (`$CAM_ROS_ENCODING`) | Bayer label / hint. **Auto-set by `cam-up`** from `camera.pixel_format` (e.g. `BayerRG8` → `bayer_rggb8`); empty = mono. On JP7 the format also comes off the caps. A `replay`/`pcap` source whose block names no format inherits the camera's live block's (what `rig replay` renders), so a replayed Bayer camera keeps its label. |
 | `debayer` | `false` (`$CAM_DEBAYER`) | turn an 8-bit Bayer mosaic into color. Set via the plugin's `params.debayer`. |
 | `publish_rate` | `0` (`$CAM_ROS_PUBLISH_RATE`) | max publish rate in **Hz**; frames above it are dropped *before* conversion/copy, so the throttle also saves the bridge CPU. `0` = publish every frame. The core keeps its native `frame_rate` for recording/preview — only the ROS graph sees fewer frames. Set via `params.publish_rate`. |
 

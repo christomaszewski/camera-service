@@ -1,4 +1,7 @@
-"""Pluggable lossless recorder branch, built as a GStreamer launch fragment.
+"""Pluggable recorder branch, lossless by default, built as a GStreamer launch fragment.
+
+Explicit ``x264`` selects lossy 8-bit H.264/4:2:0 with configurable CRF and speed preset.
+Higher-depth input retains FFV1; auto selection never chooses a lossy encoder.
 
 Encoder selection (``auto``, see formats.select_encoder):
   * 8-bit mono/Bayer -> hardware HEVC lossless (NVENC, NV24/YUV444; bit-exact, temporal).
@@ -38,6 +41,19 @@ log = logging.getLogger(__name__)
 
 # nvv4l2h265enc preset-level enum (HW search depth: bigger = smaller lossless file, slower encode).
 _PRESET_LEVEL = {"disable": 0, "ultrafast": 1, "fast": 2, "medium": 3, "slow": 4}
+X264_PRESETS = ("ultrafast", "superfast", "veryfast", "faster", "fast", "medium",
+                "slow", "slower", "veryslow", "placebo")
+
+
+def x264_settings(cfg):
+    """Validate before constructing a launch string; return settings also stored in the sidecar."""
+    crf = getattr(cfg, "x264_crf", 23)
+    if isinstance(crf, bool) or not isinstance(crf, int) or not 1 <= crf <= 50:
+        raise ValueError("recording.x264_crf must be an integer from 1 to 50")
+    preset = getattr(cfg, "x264_preset", "ultrafast")
+    if preset not in X264_PRESETS:
+        raise ValueError(f"recording.x264_preset must be one of {', '.join(X264_PRESETS)}")
+    return {"crf": crf, "preset": preset, "chroma": "4:2:0"}
 
 
 def _preset_level(value):
@@ -59,6 +75,7 @@ _ENCODER_ELEMENTS = {
     "hw-hevc-lossless": ("nvvidconv", "nvv4l2h265enc"),
     "x265-lossless": ("x265enc",),
     "ffv1": ("avenc_ffv1",),
+    "x264": ("x264enc", "h264parse"),
 }
 
 
@@ -110,6 +127,8 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
     `encoder: stream-copy` on a RAW source detached the recorder from the tee and hung ffv1 off an
     appsrc nothing ever fed -- a config that recorded nothing at all, silently."""
     enc = select_encoder(cfg.encoder, bits_per_pixel, is_color, encoded=bool(encoded_parser))
+    if enc == "x264":
+        x264_settings(cfg)
     sink = _splitmux(location_base, cfg.segment_seconds)
 
     if enc == "stream-copy":
@@ -122,14 +141,14 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
             sc_sink = _splitmux(location_base, cfg.segment_seconds, keyframe_requests=False)
             return f"queue max-size-buffers=12 name=rec_q ! {encoded_parser} ! " + sc_sink, enc
 
-    if enc in ("x265-lossless", "hw-hevc-lossless") and bits_per_pixel > 8:
+    if enc in ("x265-lossless", "hw-hevc-lossless", "x264") and bits_per_pixel > 8:
         # >8-bit rides in a GRAY16 container and NEITHER lossless path can carry it: x265's input
         # formats top out at 12-bit, and the Orin's HW lossless is 8-bit only (there is no 10/12-bit
         # NVENC lossless) -- videoconvert happily negotiates GRAY16_LE -> NV24 and keeps only the
         # HIGH byte, so a pinned `hw-hevc-lossless` on a 16-bit radiometric camera would throw away
         # the sensor's low 8 bits while the sidecar still attests bits_per_pixel: 16. FFV1 keeps the
         # 16-bit container bit-exact. The guard covers both encoders because they share the
-        # constraint; it previously covered only x265.
+        # constraint; the explicit x264 mode also writes 8-bit 4:2:0 and must not truncate thermal data.
         log.warning("recorder: %s cannot preserve >8-bit (GRAY16) input; falling back to ffv1", enc)
         enc = "ffv1"
     enc = _resolve_available(enc)
@@ -144,6 +163,22 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
     log.info("recorder: encoder=%s (bits=%d) gop=%s bframes=%d preset=%s vconv-threads=%d -> %s-*.mkv",
              enc, bits_per_pixel, gop or "default", bframes,
              "default" if preset is None else preset, nt, location_base)
+
+    if enc == "x264":
+        settings = x264_settings(cfg)
+        # Bounded live recorder queues must not wait for x264 lookahead. P-only also keeps
+        # decode order equal to presentation order; splitmuxsink requests IDRs at each split.
+        # Disable VBV: x264enc otherwise caps even CRF at its default 2048 kbit/s,
+        # silently reducing quality on detailed scenes regardless of the configured CRF.
+        if bframes:
+            log.warning("recorder: x264 ignores bframes; using P-only encoding for bounded latency")
+        log.info("recorder: lossy H.264 CRF=%d preset=%s, 8-bit 4:2:0", settings["crf"], settings["preset"])
+        return (
+            f"queue max-size-buffers=12 name=rec_q ! {vconv} ! video/x-raw,format=I420 ! "
+            f'x264enc pass=qual quantizer={settings["crf"]} speed-preset={settings["preset"]} '
+            f"tune=zerolatency bframes=0 rc-lookahead=0 sync-lookahead=0 vbv-buf-capacity=0 key-int-max={gop} ! "
+            "video/x-h264,profile=high ! h264parse ! " + sink
+        ), enc
 
     if enc == "hw-hevc-lossless":
         # GRAY8 / Bayer8 mosaic -> Y plane of NV24 -> NVMM -> NVENC lossless. iframeinterval = the

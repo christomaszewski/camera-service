@@ -1,0 +1,45 @@
+# ros2-source — a ROS 2 image topic FEEDING a `camera.type: shm` instance (the reverse of ros2-bridge).
+# Same image as ros2-bridge (the Python node is built into it); its own compose profile, enabled
+# by listing it under the instance's `plugins:` with `isolation: container`. sensor_env derives the
+# CAM_SOURCE_* env from the instance's `shm:` block (socket, framing, pinned format) and the plugin's
+# params (topic, compressed, qos) -- one source of truth: the core's own config.
+#
+# With `include`, relative paths here resolve relative to THIS file's directory (../.. = repo root).
+services:
+  ros2-source:
+    profiles: ["ros2-source"]
+    image: ${CAM_ROS2_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}ros2-bridge:${RIG_IMAGE_TAG:-latest}}
+    build:
+      context: ../..
+      dockerfile: plugins/ros2-bridge/Dockerfile
+    init: true
+    stop_signal: SIGINT
+    network_mode: ${CAM_NETWORK:-host}     # host = join the host ROS 2 graph
+    ipc: host                               # shm framings move pixels through /dev/shm (harmless for unixfd)
+    volumes:
+      - cam_sock:/tmp/cam                   # the instance's socket volume: this container OWNS shm.socket_path
+    environment:
+      - CAM_WAIT_SOCKET=0                   # the writer owns the socket; nothing to wait for (entrypoint.sh)
+      - CAM_SOURCE_TOPIC=${CAM_SOURCE_TOPIC:-image_raw}
+      - CAM_SOURCE_TRANSPORT=${CAM_SOURCE_TRANSPORT:-raw}   # = the core's shm.framing
+      - CAM_SOURCE_SOCKET=${CAM_SOURCE_SOCKET:-/tmp/cam/in}
+      - CAM_SOURCE_FORMAT=${CAM_SOURCE_FORMAT:-RGB}         # the pinned shm: block -- frames are converted to it
+      - CAM_SOURCE_WIDTH=${CAM_SOURCE_WIDTH:-640}
+      - CAM_SOURCE_HEIGHT=${CAM_SOURCE_HEIGHT:-480}
+      - CAM_SOURCE_FPS=${CAM_SOURCE_FPS:-10}
+      - CAM_SOURCE_COMPRESSED=${CAM_SOURCE_COMPRESSED:-false}
+      - CAM_SOURCE_QOS=${CAM_SOURCE_QOS:-sensor}
+      - CAM_SOURCE_SHM_FRAMES=${CAM_SOURCE_SHM_FRAMES:-8}
+      # The vehicle-wide ROS 2 graph, exactly as ros2-bridge joins it (rmw_zenoh via the host router).
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}
+      - ZENOH_SESSION_CONFIG_URI=${ZENOH_SESSION_CONFIG_URI:-}
+      - ZENOH_CONFIG_OVERRIDE=${ZENOH_CONFIG_OVERRIDE:-}
+    # As a module, not `ros2 run`: the install's PYTHONPATH hook is all it needs (no ament-index dependency).
+    command: ["python3", "-m", "cam_ros2_source.node"]
+    restart: unless-stopped
+
+volumes:
+  cam_sock:
+    external: true
+    name: ${CAM_SOCK_VOLUME:-cam_sock}

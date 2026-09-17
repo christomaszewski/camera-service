@@ -8,7 +8,7 @@
 #   CAM_DEV_IMAGE=cam-dev-jp7            gst 1.24 / JP7  -> camera wall-clock    (source=rtp_ntp)
 #
 # Prereq:  docker build -f core-driver/Dockerfile.dev -t cam-dev .
-#          docker build -f core-driver/Dockerfile.dev --build-arg BASE=ubuntu:24.04 -t cam-dev-jp7 .
+#          docker build -f core-driver/Dockerfile.dev --target distro --build-arg BASE=ubuntu:24.04 -t cam-dev-jp7 .
 # Run from the repo root:  ./core-driver/tools/rtsp_test.sh        (or CAM_DEV_IMAGE=cam-dev-jp7 ...)
 set -euo pipefail
 IMG="${CAM_DEV_IMAGE:-cam-dev}"

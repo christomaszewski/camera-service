@@ -26,7 +26,7 @@ endpoint a non-GStreamer / `mmap` consumer reads (it never carried the header an
 
 - **core-driver** genuinely differs by platform (jp6 = l4t/1.20, jp7 = 24.04/1.24); the transport is
   **runtime-selected in `pipeline.build()`** by probing for `unixfdsink` — no separate code path to ship.
-- **ros2-bridge** is ONE image (`ros:lyrical` = 24.04/1.24) on both hosts, so it's *one image with a
+- **ros2-bridge** is ONE image (`ros:lyrical` = Ubuntu 26.04 / GStreamer 1.28) on both hosts, so it's *one image with a
   runtime transport switch* (header-shm component on a jp6 host, unixfd component on a jp7 host).
 - **Separate memfd appsrc, not a tee branch:** `unixfdsink` needs FD-backed buffers; the tee can't
   negotiate the memfd allocation across its branches (validated — see below). So the feeder pushes

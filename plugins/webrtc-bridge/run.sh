@@ -40,6 +40,8 @@
 # bundled signalling server, default 1), CAM_WEBRTC_{MIN,MAX,START}_BITRATE (bit/sec; bound
 # webrtcsink's adaptive-bitrate range -- the element default max is 8 Mbps, raise it for 4K),
 # CAM_WEBRTC_CONGESTION ({gcc|homegrown|disabled}, default gcc).
+# CAM_WEBRTC_KEYFRAME_S (IDR every N s on every encoder, default 2.0; 0 = encoder default) and
+# CAM_WEBRTC_X264_PRESET (x264enc speed-preset nick for the software fallback, default ultrafast).
 # H.264: CAM_WEBRTC_PROFILE (effectively FIXED at constrained-baseline -- webrtcsink forces it for raw
 # input at codec discovery; `high` warns + falls back) + CAM_WEBRTC_MAX_LEVEL (clamp on the AUTO-derived
 # level, default 5.2). The level is computed from the streamed resolution+fps so the SDP profile-level-id
@@ -50,7 +52,7 @@ set -eu
 PLATFORM="${CAM_PLATFORM:-jp6}"
 TRANSPORT="${CAM_TRANSPORT:-}"
 if [ -z "$TRANSPORT" ]; then
-  [ "$PLATFORM" = jp7 ] && TRANSPORT=unixfd || TRANSPORT=shm
+  case "$PLATFORM" in jp7|jp6m|dev) TRANSPORT=unixfd;; *) TRANSPORT=shm;; esac
 fi
 # The headered-shm pump lives in the python launcher; the gst-launch escape hatch can't strip the
 # 36-byte header, so it degrades to the legacy raw endpoint (which must then be enabled on the core).

@@ -97,17 +97,27 @@ def caps_for_frame(info, bayer=None, debayer=True, fps=None):
 
 
 class PtsTracker:
-    """Absolute capture-ns -> RELATIVE, strictly-monotonic PTS. Mirrors the core's policy
-    (cam_driver/pipeline.py _on_frame): an absolute-ns PTS stalls downstream flow, and a camera
-    clock reset across a reconnect must not push time backward through the muxer/payloader --
-    on a non-monotonic stamp, rebase so PTS keeps advancing by the last observed interval."""
+    """Relative, strictly-monotonic PTS. An optional nanosecond arrival_clock gives WebRTC a
+    wall-paced preview timeline independent of capture/replay time. Without it, preserve capture
+    intervals and rebase clock resets by the last observed interval (the core recording policy).
+    Absolute capture timestamps remain separate metadata in either mode."""
 
-    def __init__(self, fallback_interval_ns=40_000_000):
+    def __init__(self, fallback_interval_ns=40_000_000, *, arrival_clock=None):
         self._base = None
         self._last = None
         self._iv = fallback_interval_ns
+        self._arrival_clock = arrival_clock
 
     def pts_for(self, ts_ns):
+        # WebRTC needs a wall-paced media timeline even when capture time is paused, historical,
+        # or replaying at another speed. Keep ts_ns on the buffer's capture metadata separately.
+        if self._arrival_clock is not None:
+            ts_ns = self._arrival_clock()
+            if self._base is None:
+                self._base = ts_ns
+            pts = ts_ns - self._base
+            self._last = max(pts, self._last + 1) if self._last is not None else pts
+            return self._last
         if self._base is None:
             self._base = ts_ns
         pts = ts_ns - self._base

@@ -1,8 +1,99 @@
-# Lossless recording: CFA tiling + temporal-compression tuning
+# Recording codecs and tuning
 
-The recorder writes lossless video (HW HEVC on the Orin, ffv1/x265 on CPU). For an 8-bit **Bayer**
-camera there are two levers to shrink the files, both under `recording:` in the sensor config. They're
-opt-in and recorder-only — transport/preview/raw always see the raw mosaic, so ROS/WebRTC are untouched.
+`recording.encoder: auto` keeps the existing lossless/source-copy selection. An explicit `x264`
+selects lighter, **lossy H.264** recording on the CPU, including the ARM64 Mac dev container.
+Recording uses the same MKV segments, lifecycle controls and timestamp sidecars. Live raw transport
+and preview receive the original frames; the conversion and quantization apply only to the recorder.
+
+The dashboard's **Cameras → Recording control** cards expose these settings while the recorder is
+inactive. Choose an encoder, quality/speed and segment length, then **Apply settings** before
+activating. Advanced settings expose GOP, Bayer tiling and hardware tuning. The card shows the
+resolved encoder, including fallbacks; edits are locked while recording or transitioning. Runtime
+changes last until service restart. Each session saves the full requested settings in its own
+`<prefix>.recording-settings.json` beside the video files, independently of the config saved at
+service bringup. See [the Zenoh API and snapshot contract](LIFECYCLE.md#recording-settings-camera-service).
+
+Stopping recording, applying a different encoder or compression setting, and starting again creates
+a new session in the same run. Whole-run replay handles those session boundaries automatically,
+including FFV1/H.264 changes and different Bayer tiling, and preserves the recorded gaps. The
+sensor's pixel format and dimensions must remain the same. See [replay behavior and its source-copy
+restriction](PLAYBACK.md#timeline-several-producers-one-zero).
+
+## Optional H.264 recording
+
+```yaml
+recording:
+  enabled: true
+  encoder: x264
+  x264_crf: 23
+  x264_preset: ultrafast
+  keyframe_interval_s: 1
+  segment_seconds: 60
+```
+
+- `x264_crf`: integer **1–50**, default **23**. Lower values retain more detail and use more storage;
+  try 18 for higher quality, 23 as a starting point, or 28 for smaller files. This is constant
+  quality, not a fixed bitrate or file-size guarantee.
+- `x264_preset`: `ultrafast` (default), `superfast`, `veryfast`, `faster`, `fast`, `medium`, `slow`,
+  `slower`, `veryslow`, or `placebo`. Slower presets spend more CPU searching for compression;
+  `veryfast` is another useful starting point when file size matters more than encoding CPU.
+- `keyframe_interval_s` applies to H.264 too. Segment boundaries request keyframes so each MKV can
+  decode independently. This recording mode uses no B-frames or lookahead; `bframes` is ignored
+  with a warning, keeping the live recorder's bounded queue from stalling on encoder latency.
+
+The encoded representation is **8-bit 4:2:0**, with even width and height required. RGB/4:2:2/4:4:4
+sources lose chroma detail and alpha is not retained. Bayer remains an approximate raw mosaic;
+CFA tiling is disabled because its reversible residual transforms are unsuitable for quantization.
+Keep a lossless encoder for pixel measurements. Full 16-bit/thermal sources fall back to FFV1 with
+a warning; this option never silently truncates the sensor's low bits. Missing `x264enc` or
+`h264parse` also falls back to FFV1.
+
+New sidecar headers record `recording_encoder`, `recording_lossy` and `recording_settings`
+(CRF, preset and chroma for x264), after encoder fallback. `recording_lossy` describes loss
+introduced by this encode, not the fidelity of the original source; it is unknown (`null`) for
+stream-copy. A lossless re-record of lossy playback cannot recover original sensor values;
+`replay_of` retains its provenance. Existing sidecars remain readable. Replay uses these fields to
+keep raw I420 recordings on the blocking raw reader instead of mistaking them for source-copy runs.
+
+Already-compressed RTSP H.264/H.265 or USB MJPEG sources remain cheapest with `encoder: auto`
+(stream-copy). Explicit x264 on those sources decodes and re-encodes them, adding quality loss and
+encoding work. H.264 here uses **software encoding**; this change does not enable Apple VideoToolbox
+inside Docker or promise hardware replay decoding.
+
+The implementation uses GStreamer's [x264enc constant-quality mode](https://gstreamer.freedesktop.org/documentation/x264/index.html),
+with zero-latency tuning and its VBV buffer disabled for CRF recording, so the element's default
+streaming bitrate cap does not override the requested quality. The required x264 and parser plugins
+are already in the dev image.
+
+Runnable example: `core-driver/config/usb-fake-h264.yaml`. Apply the `recording:` block above to a
+sensor configuration and restart that instance to change its encoder; existing recordings are untouched.
+
+### Development measurement (2026-09-13)
+
+ARM64 Docker, GStreamer 1.28.7: the same 250 NV12 640×480 SMPTE test frames (10 seconds at 25 fps)
+encoded twice per setting, reversing order on the second pass. Inputs were generated once before
+measurement. CPU times include recorder conversion/muxing and frame submission, or software decoding
+back to NV12; they exclude input generation and quality analysis.
+
+| Setting | MKV size | Encode CPU seconds | Decode CPU seconds |
+|---|---:|---:|---:|
+| FFV1 (existing default) | 6.09 MB | 0.676 | 0.751 |
+| x264 ultrafast, CRF 18 | 4.32 MB | 0.307 | 0.119 |
+| x264 ultrafast, CRF 23 | 3.51 MB | 0.305 | 0.120 |
+| x264 ultrafast, CRF 28 | 2.89 MB | 0.305 | 0.117 |
+
+CRF 23 used about 55% less encoding CPU, 84% less decoding CPU and 42% less storage in this synthetic
+comparison. All 250 frames and timestamps survived; every segment decoded independently. This is not
+a whole-dashboard benchmark or a guarantee for real footage; noise, motion and resolution change the
+tradeoff. A separate live fake-USB test recorded 199 frames across two activate/deactivate sessions,
+kept transport flowing while inactive, and replayed/re-recorded every decoded frame and original
+capture stamp. Physical sensor/Jetson hardware was not tested for this option.
+
+## Lossless CFA tiling and temporal compression
+
+The lossless paths (HW HEVC on the Orin, FFV1/x265 on CPU) remain unchanged. For an 8-bit **Bayer**
+camera, the options below can shrink files while retaining exact pixels. They are recorder-only;
+transport, preview and raw endpoints continue to see the original mosaic.
 
 > **>8-bit / 16-bit (e.g. thermal Y16) cameras** take the **FFV1** path instead — see
 > [the FFV1 section below](#ffv1-path-for-16-bit-and-thermal-cameras). The Bayer-tiling and

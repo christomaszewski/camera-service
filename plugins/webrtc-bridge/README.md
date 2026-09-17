@@ -66,8 +66,9 @@ by the I420 conversion). *How* the bridge decides differs by transport:
   `bayer2rgb`. A **wrong** pattern only mis-tints the preview — it cannot crash negotiation the way
   the raw-shm static front-end could. 16-bit formats ignore `CAM_BAYER` (no 16-bit `bayer2rgb`).
 - **raw shm (legacy): decided from config.** Raw shm carries no caps, so the config is the only
-  truth: `CAM_BAYER` non-empty (sensor_env derives it from the camera `pixel_format`) labels the
-  stream `video/x-bayer` and statically inserts `bayer2rgb`.
+  truth: `CAM_BAYER` non-empty (sensor_env derives it from the camera `pixel_format`; a `replay`/
+  `pcap` source inherits the live block's, so a replayed Bayer camera previews in color on the
+  header and raw-shm paths too) labels the stream `video/x-bayer` and statically inserts `bayer2rgb`.
 
 ## Why a sibling container (not in-image)
 
@@ -113,6 +114,8 @@ Or via the per-sensor stack: `cam-up <sensor>.yaml up -d webrtc-bridge` (cam-up 
 | `VIDEO_CAPS` | _(unset)_ | e.g. `video/x-h264` to pin the codec; unset → webrtcsink picks |
 | `CAM_WEBRTC_PROFILE` | `constrained-baseline` | effectively fixed: webrtcsink forces constrained-baseline for raw input at codec discovery, so `high` **warns + falls back** (knob kept for future upstream support) |
 | `CAM_WEBRTC_MAX_LEVEL` | `5.2` | safety clamp on the **auto-derived** H.264 level (the level is computed from the streamed resolution+fps — never fixed) |
+| `CAM_WEBRTC_KEYFRAME_S` | `2.0` | nominal keyframe (IDR) interval in **seconds**, converted to frames using negotiated fps (`x264enc key-int-max`, NVENC `iframeinterval` + `idrinterval`, `openh264enc gop-size`). Applied after `webrtcsink` defaults, which otherwise overwrite x264's GOP with 2560 frames. On headered/raw shm, set `CAM_FPS` (`webrtc-bridge` plugin `fps`) to the effective published rate. Paused/slower/overloaded feeds take longer to emit that many frames; this is not a wall-time recovery bound. `0` = leave the sink/encoder default |
+| `CAM_WEBRTC_X264_PRESET` | `ultrafast` | `x264enc speed-preset` for the **software fallback** path (no NVENC). Preserves `webrtcsink`'s effective default to minimize CPU work. Choose `superfast` or slower for better compression only with CPU headroom; multiple high-resolution feeds can otherwise fall behind |
 | `SIGNALLING_PORT` | `8443` | signalling server port |
 | `RUN_SIGNALLING` | `1` | run the bundled signalling server in-container |
 | `CAM_WEBRTC_STATUS` | `10` | seconds between status heartbeat lines — pipeline state, frames received from the core, negotiated caps, connected viewers, and per-interval **latency percentiles** (see Latency below) (`0` = off). Startup also logs an encoder **element inventory** and warns when `GST_PLUGIN_FEATURE_RANK` names an element the registry doesn't have |
@@ -219,7 +222,7 @@ Brings up a `rmw_zenohd` router + core + bridge, and a Zenoh probe
   `runtime: nvidia` + `NVIDIA_VISIBLE_DEVICES` CSV grant in [compose.yml](compose.yml) —
   **unvalidated on JP6 hardware** (r36 CSV injects gst-1.20/22.04-built plugins into this
   24.04/gst-1.24 image; plugin ABI is forward-compatible, but if it doesn't load it blacklists and
-  x264enc is used). (2) **The rank**: `GST_PLUGIN_FEATURE_RANK=nvv4l2h264enc:MAX` **+**
+  x264enc is used). The [jp6-modern-userspace](../../docs/jp6-modern-userspace.md) test plan is exactly this question, with a 26.04 / gst-plugins-rs 0.15 build of this image (`BASE_IMAGE` / `GST_RS_TAG` build args) and an on-host probe. (2) **The rank**: `GST_PLUGIN_FEATURE_RANK=nvv4l2h264enc:MAX` **+**
   `VIDEO_CAPS=video/x-h264` (both forwarded by compose; settable from the sensor YAML's
   `webrtc-bridge` params — see `config/sensors/cam_rtsp.yaml`). `webrtcsink` inserts the
   `nvvidconv` → NVMM hop itself for `nvv4l2*` encoders; `kmod` is baked in (NVENC init runs `lsmod`).
@@ -236,7 +239,9 @@ Brings up a `rmw_zenohd` router + core + bridge, and a Zenoh probe
   forcing one on the encoder element makes the SPS contradict that filter and discovery dies with
   "No caps found" (reproduced on-device with NVENC). `CAM_WEBRTC_PROFILE=high` therefore warns + falls
   back; the knob remains for the day upstream honors a requested profile. B-frames are forced off for
-  live either way. (Applied by the Python launcher via `webrtcsink`'s `encoder-setup` /
+  live either way, the GOP uses `CAM_WEBRTC_KEYFRAME_S` (nominally 2 s) to shorten recovery after a
+  lost keyframe, and the software fallback runs `x264enc` at
+  `CAM_WEBRTC_X264_PRESET` (`ultrafast`). (Applied by the Python launcher via `webrtcsink`'s `encoder-setup` /
   `request-encoded-filter` signals; the `CAM_LAUNCHER=gst-launch` hatch keeps `webrtcsink`'s fixed
   defaults.)
 - **Adaptive bitrate / congestion control:** `webrtcsink` runs Google Congestion Control (`gcc`) by

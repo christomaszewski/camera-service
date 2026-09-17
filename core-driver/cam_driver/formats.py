@@ -27,7 +27,7 @@ _GST_COLOR = {"I420", "NV12", "NV24", "YV12", "YUY2", "UYVY",
               "RGB", "BGR", "RGBA", "BGRA", "RGBx", "BGRx"}
 _GST_RAW = _GST_MONO | _GST_COLOR
 
-VALID_ENCODERS = ("auto", "hw-hevc-lossless", "ffv1", "x265-lossless", "stream-copy")
+VALID_ENCODERS = ("auto", "hw-hevc-lossless", "ffv1", "x265-lossless", "stream-copy", "x264")
 
 VALID_DECODERS = ("auto", "software")
 

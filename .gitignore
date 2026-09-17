@@ -21,3 +21,9 @@ dist/
 
 # local benchmark input (large recordings; never commit)
 input/
+
+# CI/local coverage and test reports
+test-results/
+.coverage*
+!.coveragerc
+htmlcov/

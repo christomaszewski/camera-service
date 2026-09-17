@@ -69,6 +69,28 @@ def test_publish_drops_counted_separately():
     assert (s["publish_drops"], s["enqueue_failures"]) == (2, 1)
 
 
+def test_delta_between_snapshots_is_a_sessions_share():
+    # A recording SESSION attests its own fidelity as the difference between the process counters at
+    # its open and its close -- the process counters never reset (they are the live link-health signal).
+    d = DropStats()
+    d.observe_frame(1)
+    d.note_publish_drop()
+    start = d.summary()
+    d.observe_frame(2)
+    d.observe_frame(5)                 # 3, 4 missing
+    d.note_enqueue_failure()
+    assert DropStats.delta(d.summary(), start) == {
+        "frames": 2, "source_gaps": 1, "frames_missing": 2,
+        "enqueue_failures": 1, "publish_drops": 0, "pts_rebases": 0}
+
+
+def test_delta_with_no_start_snapshot_is_the_whole_summary():
+    d = DropStats()
+    d.observe_frame(1)
+    d.note_pts_rebase()
+    assert DropStats.delta(d.summary(), {}) == d.summary()
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

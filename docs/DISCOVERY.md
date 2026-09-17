@@ -66,6 +66,11 @@ producer actually knows; **omit** what it can't substantiate.
   "width": 2048, "height": 1536, // OPTIONAL frame geometry
   "fps": 30,                     // OPTIONAL
   "pixel_format": "GRAY8",       // OPTIONAL sensor format (GRAY8 / GRAY16_LE / bayer_rggb8 / ...)
+  "source": "gige",              // OPTIONAL what kind of source the stream fronts: a live camera
+                                 //   (gige | usb | rtsp), another process's frames (shm), or playback
+                                 //   (gige | usb | rtsp) or PLAYBACK (pcap | replay). A consumer uses it
+                                 //   as a label; the CAPABILITY to control playback is advertised
+                                 //   separately (PLAYBACK.md), never inferred from this field.
   "ros_topic": "/front/image_raw",  // OPTIONAL cross-link to the same stream on the ROS graph
   "recording": "cam-front-*.mkv"   // OPTIONAL cross-link to its on-vehicle recording
 }
@@ -101,6 +106,10 @@ session.liveliness().declare_subscriber("fleet/*/media/*", on_sample, history=Tr
 |---|---|---|
 | webrtc-bridge | **implemented** | advertises its WebRTC stream; see [plugins/webrtc-bridge/README.md](../plugins/webrtc-bridge/README.md). Reference implementation: a generic advertiser (`tools/zenoh_advertiser.py`) + a stack-specific descriptor builder (`tools/bridge_stream.py`). |
 | sensors / recordings / ros2-bridge | _future_ | each self-advertises at its own `fleet/<vehicle>/media/<id>` key, same shape. |
+
+The sibling convention for **control** — a service's standby/active lifecycle (presence, state,
+`change_state`) at `fleet/<vehicle_id>/svc/<instance>/lifecycle` — is [LIFECYCLE.md](LIFECYCLE.md);
+camera-service's core implements it with the same session discipline as the advertiser above.
 
 The reference advertiser is intentionally split into a **generic** half (session + liveliness token +
 descriptor queryable + fail-safe lifecycle) and a **producer-specific** half (builds the descriptor).

@@ -90,6 +90,15 @@ def test_pts_rebases_on_clock_reset():
     assert t.pts_for(TS - 5_000_000_000 + 40_000_000) == 120_000_000   # and the new base holds
 
 
+def test_preview_clock_tracks_elapsed_time_across_holds_gaps_and_speed_changes():
+    times = iter([10_000_000_000, 11_000_000_000, 12_000_000_000, 12_100_000_000])
+    t = PtsTracker(arrival_clock=lambda: next(times))
+    assert t.pts_for(TS) == 0
+    assert t.pts_for(TS) == 1_000_000_000                         # held for a second
+    assert t.pts_for(TS + 2_000_000_000) == 2_000_000_000        # gap counted once
+    assert t.pts_for(TS + 20_000_000_000) == 2_100_000_000       # fast replay, same media clock
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

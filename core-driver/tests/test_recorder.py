@@ -42,6 +42,12 @@ class _FakeGst:
 _JETSON = {"nvvidconv", "nvv4l2h265enc", "x265enc", "avenc_ffv1"}
 _DEV = {"x265enc", "avenc_ffv1"}          # x86 / container without the L4T stack
 _BARE = set()                             # no optional codec packages at all
+_REAL_GST = rec.Gst
+
+
+def teardown_function():
+    # Inventory fakes must not leak into real recording tests in a shared pytest process.
+    rec.Gst = _REAL_GST
 
 
 def _build(present, encoder="auto", bits=8, is_color=False, parser=None):
@@ -147,6 +153,35 @@ def test_resolved_encoder_reflects_availability_fallback():
     # this value, so a hw request degraded to ffv1 on a non-Jetson must report ffv1, not the request.
     _d, enc = _build(_DEV, encoder="hw-hevc-lossless")
     assert enc == "ffv1"
+
+
+def test_x264_is_explicit_and_falls_back_without_plugins_or_for_gray16():
+    inventory = _DEV | {"x264enc", "h264parse"}
+    desc, enc = _build(inventory, encoder="x264")
+    assert enc == "x264" and "pass=qual" in desc and "quantizer=23" in desc
+    assert _build(inventory, encoder="auto")[1] == "ffv1"
+    assert _build(inventory, encoder="x264", bits=16)[1] == "ffv1"
+    assert _build(_DEV, encoder="x264")[1] == "ffv1"
+    assert _build(_DEV | {"x264enc"}, encoder="x264")[1] == "ffv1"  # parser also required
+
+
+def test_x264_settings_reject_invalid_quality_and_launch_string_injection():
+    for crf in (0, 51, -1, 23.5, True, "23 ! fakesink"):
+        try:
+            rec.x264_settings(RecordingConfig(x264_crf=crf))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted invalid CRF {crf!r}")
+    for preset in ("fast ! fakesink", "typo", None):
+        try:
+            rec.x264_settings(RecordingConfig(x264_preset=preset))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted invalid preset {preset!r}")
+    assert rec.x264_settings(RecordingConfig(x264_crf=18, x264_preset="veryfast")) == {
+        "crf": 18, "preset": "veryfast", "chroma": "4:2:0"}
 
 
 def _main():

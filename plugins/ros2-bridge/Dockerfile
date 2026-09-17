@@ -17,11 +17,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends --no-upgrade \
       build-essential cmake pkg-config \
       libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
       ros-${ROS_DISTRO}-image-transport ros-${ROS_DISTRO}-rclcpp-components \
+      python3-colcon-common-extensions \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /ws
 COPY plugins/ros2-bridge /ws/src/cam_ros2_bridge
+# ros2-source (plugins/ros2-source): the Python writer that feeds a shm-input instance from a topic --
+# same image, its own compose profile.
+COPY plugins/ros2-source /ws/src/cam_ros2_source
+# colcon-common-extensions carries colcon-ros: without it an ament_python package builds as a plain
+# setuptools package -- importable, but with no AMENT_PREFIX_PATH hook, so `ros2 run` cannot find it.
 RUN . /opt/ros/${ROS_DISTRO}/setup.sh && \
-    colcon build --packages-select cam_ros2_bridge --cmake-args -DCMAKE_BUILD_TYPE=Release
+    colcon build --packages-select cam_ros2_bridge cam_ros2_source --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 # ---- runtime: ros-base + runtime GStreamer/ROS + the built component lib ----
 # TODO(re-parent): building FROM ${RIG_BASE_IMAGE} (rig-infra's fleet-ros = ros-base + rmw-zenoh +
@@ -36,6 +42,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 # also ships the GStreamer `onnx` element (libgstonnx -> onnxruntime), which we never use and whose arm64
 # init misbehaves ("Unknown CPU Vendor" CPUID probe + in-process heap corruption). Strip it so it can't load.
 # rclcpp-components -> component_container_mt; image-proc -> the DebayerNode composed on JP6 color.
+# python3-gi / python3-gst-1.0 / gir1.2-gst-plugins-base-1.0 -> GStreamer from Python for ros2-source
+# (the FdAllocator typelib for its unixfd framing rides in gst-plugins-base).
 # rmw-zenoh-cpp -> the default ROS 2 middleware (RMW_IMPLEMENTATION=rmw_zenoh_cpp); it ships the
 # `rmw_zenohd` router too, so this same image runs the shared host router. FastDDS stays available
 # (ros-base ships rmw_fastrtps_cpp) as a selectable fallback via RMW_IMPLEMENTATION.
@@ -52,6 +60,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends --no-upgrade \
       ros-${ROS_DISTRO}-image-transport ros-${ROS_DISTRO}-compressed-image-transport \
       ros-${ROS_DISTRO}-rclcpp-components ros-${ROS_DISTRO}-image-proc \
       ros-${ROS_DISTRO}-rmw-zenoh-cpp \
+      python3-gi python3-gst-1.0 gir1.2-gst-plugins-base-1.0 \
     && rm -f /usr/lib/*/gstreamer-1.0/libgstonnx.so /usr/lib/*/libonnxruntime.so* \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /ws/install /ws/install

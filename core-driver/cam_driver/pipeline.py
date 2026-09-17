@@ -1,18 +1,24 @@
-"""GStreamer pipeline: source-fed appsrc -> tee -> [recorder][raw endpoint][preview],
-plus a separate transport appsrc carrying frames to out-of-process plugins.
+"""GStreamer pipeline: source-fed appsrc -> tee -> [raw endpoint][preview], a separate transport
+appsrc carrying frames to out-of-process plugins, and -- while a recording SESSION is open -- a
+per-session recorder pipeline fed by its own appsrc (session.py; opened and finalized by the
+lifecycle transitions activate / deactivate, see lifecycle.py).
 
 The capture source (see cam_driver.sources) delivers (FrameStamp, image_bytes) per frame
 to on_frame(), which is source-agnostic and:
   - sets the GstBuffer PTS = (timestamp - base) and OFFSET = frame_id,
-  - pushes the raw video into the main appsrc (recorder / optional raw shm / preview),
+  - pushes the raw video into the main appsrc (optional raw shm / preview),
+  - feeds the open recording session, if any (CFA-tiled when configured),
   - and -- rate-limited -- pushes a copy into the transport appsrc for plugins.
+
+Replay alone can deliver a GstFrame instead of bytes: downstream buffers share its pixel memory,
+and transport decimation precedes materialization. Live-source callbacks retain the byte path.
 
 The plugin transport endpoint has two implementations, picked at build() by capability:
   - JP7 (GStreamer >= 1.24, `unixfdsink` present): a `unixfdsink` carrying NATIVE caps
     (video/x-raw GRAY8/16 for mono, video/x-bayer,<pattern> for Bayer) + buffer fields
-    over SCM_RIGHTS. No header -- the stream is self-describing. unixfdsink needs FD-backed
-    memory, so the feeder copies each frame into a memfd (GstAllocators.FdAllocator); ~shm
-    cost, the win is cleanliness. frame_id rides in buffer.offset, the absolute capture ns
+    over SCM_RIGHTS. Live frames and older runtimes use a memfd copy. On 1.28+, replay shares
+    FD-backed pixels or lets unixfdsink copy into its native pool. No header -- the stream
+    is self-describing. frame_id rides in buffer.offset, the absolute capture ns
     in buffer.offset_end (an absolute-ns PTS stalls downstream flow); PTS stays relative.
   - JP6 (GStreamer 1.20, no unixfd): a `shmsink` carrying a custom 36-byte
     `application/x-cam-frame` header (shm drops caps/PTS/meta, so we prepend our own).
@@ -31,11 +37,15 @@ Packed formats (Mono10p/Mono12Packed) need a bit-unpack step not implemented yet
 """
 from __future__ import annotations
 
+from copy import deepcopy
 import logging
+import uuid
+import math
 import os
 import threading
 import time
 from collections import OrderedDict
+from fractions import Fraction
 from typing import Optional
 
 import gi
@@ -44,9 +54,14 @@ from gi.repository import GLib, Gst
 
 from . import recorder as rec
 from . import transport
+from . import recording_settings as settings
+from .config import unique_run_prefix
 from .dropstats import DropStats
 from .formats import bytes_per_frame, parse_pixel_format
-from .sidecar import SidecarHeader, SidecarWriter
+from .gst_frame import FramePayload, GstFrame
+from .lifecycle import ACTIVATING, ACTIVE, DEACTIVATING, INACTIVE
+from .session import SESSION_DRAIN_S, PushResult, RecordingSession
+from .sidecar import SidecarHeader
 from .sources.base import SourceConfigChanged
 from .timestamps import FrameStamp
 
@@ -56,7 +71,7 @@ log = logging.getLogger(__name__)
 # enforce its own bound -- past max-bytes it keeps queueing and push-buffer still returns OK -- so
 # the feeder checks the fill level before each push (_queue_full) and drops WITH accounting,
 # instead of growing RAM at sensor bandwidth until the OOM killer takes the recording with it.
-_REC_QUEUE_FRAMES = 32   # recording feeds (camsrc/recsrc/encsrc): ride out brief stalls before dropping
+_REC_QUEUE_FRAMES = 32   # the recording session's appsrc (+ camsrc): ride out brief stalls before dropping
 _PUB_QUEUE_FRAMES = 8    # best-effort publish feeds (transport/unixfd): drop early, stay lean
 
 # A forward PTS step larger than this is a CLOCK-SOURCE change, not a capture gap -- e.g. an RTSP
@@ -92,13 +107,23 @@ _RECONNECT_JOIN_S = 5.0
 # Health-tick period. Also the window the stall check reasons over: no frames for this long, with no
 # reconnect in progress, is a stall rather than an idle.
 _HEALTH_INTERVAL_S = 30
+PROGRESS_INTERVAL_S = 5   # descriptor republish cadence while a recording session is open
+
+
+def _new_buffer(payload: FramePayload, pts: int, frame_id: int):
+    if isinstance(payload, GstFrame):
+        return payload.to_buffer(pts, frame_id)
+    buf = Gst.Buffer.new_wrapped(payload)
+    buf.pts = pts
+    buf.dts = Gst.CLOCK_TIME_NONE
+    buf.offset = frame_id
+    return buf
 
 
 class CapturePipeline:
-    def __init__(self, cfg, source, sidecar: SidecarWriter):
+    def __init__(self, cfg, source):
         self.cfg = cfg
         self.source = source
-        self.sidecar = sidecar
         self.drops = DropStats()
         self.pipeline: Optional[Gst.Pipeline] = None
         self.appsrc: Optional[Gst.Element] = None
@@ -107,6 +132,7 @@ class CapturePipeline:
         self.loop: Optional[GLib.MainLoop] = None
         self._base_ts: Optional[int] = None
         self._last_pub_ts: Optional[int] = None
+        self._pub_seq = 0                           # frames seen by the every-Nth decimator (_should_publish)
         self._pub_err_last: float = 0.0             # monotonic s of the last logged publish error
         self._last_pts: Optional[int] = None        # for the monotonic-PTS guard
         self._pts_skew = 0                          # accumulated discontinuity correction (see _pts_for)
@@ -133,15 +159,53 @@ class CapturePipeline:
         self._have_unixfd = False          # JP7 (GStreamer 1.24): unixfd transport available
         self._unixfd_path = None
         self._fd_alloc = None              # GstAllocators.FdAllocator -> memfd buffers for unixfd
+        self._unixfd_pool = False          # GStreamer 1.28 can pool/copy ordinary replay buffers
         self._GstAllocators = None
-        self.rec_src: Optional[Gst.Element] = None   # private recorder appsrc when CFA-tiling is on
-        self._tile_rec = False             # deinterleave the Bayer mosaic into quadrants for the recorder
         self._tile_mode = "off"            # off | plain | green_diff | rct (recording.bayer_tile)
         self._tiler = None                 # closure: frame_bytes -> tiled bytes (lazy; needs numpy)
-        self.enc_src: Optional[Gst.Element] = None   # encoded appsrc for stream-copy recording
-        self._enc_caps_applied = False     # set the encoded appsrc's real negotiated caps once (1st buffer)
         self._stream_copy = False          # encoded source -> recorder muxes the delivered bitstream verbatim
+        self._discard_replay_main = False  # replay with neither local preview nor raw endpoint
+        # A finite (playback) source at its end: exit 0 (the bare tool) or HOLD -- finalize the open
+        # session, keep serving consumers + the control plane, accept `restart` (docs/PLAYBACK.md).
+        # main sets it from config.hold_on_finish; the hook tells the lifecycle a session closed.
+        self.hold_on_finish = False
+        self.on_playback_finished = None
+        self._held = False
+        self._still = None                 # the last frame handed to the transport (see _publish_transport)
+        self._still_pushed_mono = 0.0
+        # The transport's OWN timeline (see _transport_pts): wall-paced for playback; live capture
+        # keeps source timing. A held preview never repeats a timestamp or steps backward.
+        self._tpts_shift_ns = 0
+        self._tpts_last = None
+        self._tpts_last_mono = 0.0
+        self._tpts_lock = threading.Lock()
         self._base_lock = threading.Lock()  # base-ts init is shared by the raw + encoded callbacks
+        # Recording SESSIONS (session.py / lifecycle.py): the recorder is a per-session pipeline fed by
+        # its own appsrc, opened by activate() and finalized by deactivate(). _session is read ONCE per
+        # frame on the source threads, and is published as None BEFORE a session starts closing.
+        self._session: Optional[RecordingSession] = None
+        self._session_seq = 0
+        self._lifecycle = INACTIVE
+        self._last_result: Optional[dict] = None
+        self._session_factory = RecordingSession   # swapped for a stub by the unit tests
+        self._recorder_desc = rec.build_recorder_description   # ditto (it probes the element registry)
+        self._stalled = False                       # the health tick saw no frames in its last window
+        self._fps = 0.0
+        self._raw_caps = ""
+        self._enc_parser = None
+        self._rec_enc = None                        # the recorder's resolved encoder (build-time probe)
+        self._settings_generation = uuid.uuid4().hex
+        self._settings_revision = 0
+        self._settings_view = None
+        self._session_desc_probe = None             # the session pipeline description, dry-run at build
+        # A recorder ERROR ends its SESSION, not the process -- unless nobody could ever re-activate it
+        # (boot-active with no control plane), where today's "disk full must not look clean" non-zero
+        # exit is kept. main.py sets this from the deploy shape.
+        self.session_error_fatal = False
+        self.on_session_ended = None                # lifecycle hook: an UNCOMMANDED close (error)
+        self.on_session_progress = None             # lifecycle hook: the open session moved on (a file
+        #                                             boundary, or the periodic tick) -- republish, no transition
+        self._progress_timer = None                 # GLib source id of the tick while a session is open
 
     # ---- build -------------------------------------------------------------
     @staticmethod
@@ -201,57 +265,29 @@ class CapturePipeline:
             log.warning("pixel format %s appears PACKED; fed as %s and will misinterpret data. "
                         "Use Mono8/Mono16/Bayer*8 or add an unpack step.", pf, self._gst_format)
 
-        fps = self.cfg.camera.frame_rate
+        # a playback source knows its real delivered rate (e.g. replay: sidecar median);
+        # an explicit camera.frame_rate still wins
+        fps = self.cfg.camera.frame_rate or self.source.delivered_frame_rate
         framerate = f"{int(round(fps))}/1" if fps else "0/1"
         self._frame_interval_ns = int(1_000_000_000 / fps) if fps else 1_000_000
         caps = (f"video/x-raw,format={self._gst_format},width={self._width},"
                 f"height={self._height},framerate={framerate}")
         self._image_size = bytes_per_frame(self._gst_format, self._width, self._height)
         frame_bytes = self._image_size
+        self._fps = fps
+        self._raw_caps = caps
 
         main = [
-            f'appsrc name=camsrc is-live=true do-timestamp=false format=time '
+            f'appsrc name=camsrc is-live=true do-timestamp=false format=time{self._feed_appsrc_props()} '
             f'max-bytes={_REC_QUEUE_FRAMES * frame_bytes} caps="{caps}"',
             "queue max-size-buffers=8 name=src_q",
             "tee name=t",
         ]
         branches = []
         is_encoded = self.source.encoded_caps is not None
-        enc_parser = self.source.encoded_parser if is_encoded else None
-        rec_desc = None
+        self._enc_parser = self.source.encoded_parser if is_encoded else None
         if self.cfg.recording.enabled:
-            loc = f"{self.cfg.recording.output_dir.rstrip('/')}/{self.cfg.recording.name_prefix}"
-            # The recorder resolves the encoder through every degrade (auto/explicit selection, the
-            # stream-copy-needs-a-parser fallback, the >8-bit depth guard, the element-availability
-            # probe) and hands the answer back, so the wiring decision below has ONE owner. Deriving
-            # it here from select_encoder alone used to disagree with the recorder for
-            # `encoder: stream-copy` on a RAW source: this said stream-copy (dropping the tee branch)
-            # while the recorder had already fallen back to ffv1, leaving the ffv1 fragment hung off
-            # an appsrc no raw source ever feeds -- a pipeline that built cleanly and recorded nothing.
-            rec_desc, rec_enc = rec.build_recorder_description(self.cfg.recording, self._bits, loc,
-                                                              fps, self._is_color, enc_parser)
-            self._stream_copy = (rec_enc == "stream-copy")
-            if self._stream_copy:
-                # Encoded source: the recorder stream-copies the delivered bitstream via a SEPARATE
-                # encoded appsrc (encsrc, appended below) -- NOT a tee branch. The decoded frames still
-                # flow to the consumer tee branches (transport/raw/preview), so live consumers are
-                # unaffected; only the LOG bypasses decode/re-encode.
-                log.info("recorder: stream-copy (%s) for encoded source", self.source.encoded_caps)
-            else:
-                # Raw recorder (raw source, or an encoded source the user forced to re-encode). CFA-tile
-                # only an 8-bit Bayer mosaic, recorder feed only (the tee keeps the mosaic for the rest).
-                if self._bayer and self._bits <= 8:
-                    from . import bayer_tile
-                    self._tile_mode = bayer_tile.normalize_mode(self.cfg.recording.bayer_tile)
-                    if self._tile_mode == "off" and self.cfg.recording.bayer_tile not in (False, None, "", "off"):
-                        log.warning("unknown recording.bayer_tile %r; recording the mosaic untiled",
-                                    self.cfg.recording.bayer_tile)
-                    if self._tile_mode != "off":
-                        pat, mode = (self._bayer or "rggb"), self._tile_mode
-                        self._tiler = lambda b: bayer_tile.tile_cfa(b, self._width, self._height, mode, pat)
-                        self._tile_rec = True
-                if not self._tile_rec:
-                    branches.append("t. ! " + rec_desc)
+            self._install_recording_plan(self.cfg.recording, self._recording_plan(self.cfg.recording))
 
         raw = self.cfg.transport.raw_endpoint
         if raw.enabled:
@@ -264,39 +300,22 @@ class CapturePipeline:
                 f"wait-for-connection=false sync=false")
             log.info("raw video endpoint -> %s (%d-byte shm)", raw.socket_path, shm)
 
+        self._discard_replay_main = (callable(getattr(self.source, "start_buffers", None))
+                                     and not raw.enabled and not self.cfg.preview.enabled)
         if self.cfg.preview.enabled:
             branches.append(f"t. ! queue leaky=downstream max-size-buffers=4 ! videoconvert ! {self.cfg.preview.sink}")
         else:
-            branches.append("t. ! queue leaky=downstream max-size-buffers=4 ! fakesink sync=false")
+            # A replay with no main consumers leaves camsrc idle. Do not wait for its first
+            # buffer to preroll: the separate plugin transport must still reach PLAYING.
+            async_prop = " async=false" if self._discard_replay_main else ""
+            branches.append("t. ! queue leaky=downstream max-size-buffers=4 ! fakesink sync=false" + async_prop)
 
         chains = [" ! ".join(main) + " " + " ".join(branches)]
 
-        # CFA tiling: the recorder gets a private appsrc fed deinterleaved (quadrant-tiled) frames so its
-        # lossless encoder sees smooth same-colour planes instead of the CFA checkerboard -- better spatial
-        # AND temporal compression. numpy is imported lazily (only when tiling is actually enabled).
-        if self._tile_rec:
-            chains.append(
-                f'appsrc name=recsrc is-live=true do-timestamp=false format=time '
-                f'max-bytes={_REC_QUEUE_FRAMES * frame_bytes} caps="{caps}" '
-                f'! {rec_desc}')
-            log.info("recorder: CFA-tiling 8-bit Bayer (%s) mode=%s before encode", self._bayer, self._tile_mode)
-
-        # Stream-copy recorder for an encoded source: a separate encoded appsrc feeds the delivered
-        # bitstream (set by the feeder's on_encoded) straight into <parser> ! splitmuxsink -- no decode,
-        # no re-encode, so the .mkv is byte-exact to what the host received.
-        if self._stream_copy:
-            # max-bytes uses the RAW frame size: encoded frames are (much) smaller, so the bound
-            # is roomy in frames while still hard-capping memory.
-            chains.append(
-                f'appsrc name=encsrc is-live=true do-timestamp=false format=time '
-                f'max-bytes={_REC_QUEUE_FRAMES * frame_bytes} '
-                f'caps="{self.source.encoded_caps}" ! {rec_desc}')
-
         # Plugin transport endpoint: prefer unixfd (native caps + GstBuffer metadata) where the element
-        # exists (JP7 / GStreamer 1.24), else the shm+header endpoint. unixfd REPLACES the header endpoint
-        # (the raw headless shm above is separate + config-optional). unixfdsink needs FD-backed buffers,
-        # so this is a SEPARATE appsrc fed memfd buffers by the feeder -- NOT a tee tap (the tee can't
-        # negotiate the memfd allocation across branches). The plane rides as video/x-bayer,<pattern>
+        # exists (GStreamer 1.24+), else the shm+header endpoint. A separate appsrc carries the
+        # transport caps and metadata. On 1.28+ replay can share pixels or use native pooled copying;
+        # live bytes and older runtimes keep the explicit memfd allocation. The plane rides as video/x-bayer,<pattern>
         # (8-bit Bayer) or video/x-raw GRAY8/16 (mono); offset=frame_id, offset_end=abs-ts (PTS stays relative).
         pe = self.cfg.transport.plugin_endpoint
         self._have_unixfd = bool(pe.enabled) and Gst.ElementFactory.find("unixfdsink") is not None
@@ -308,17 +327,24 @@ class CapturePipeline:
             self._unixfd_path = os.path.join(os.path.dirname(pe.socket_path) or "/tmp/cam", "unixfd")
             self._ensure_socket_dir(self._unixfd_path)
             self._clear_stale_socket(self._unixfd_path, "unixfd transport")
+            # Downstream encoders derive their GOP from these caps. Advertising the unfiltered
+            # source rate stretches a 2 s GOP to 6 s when 24 fps is decimated to 8 fps.
+            transport_rate = (Fraction(str(fps)).limit_denominator(1_000_000)
+                              / (self._publish_every_n() or 1)) if fps else Fraction(0)
+            transport_framerate = f"{transport_rate.numerator}/{transport_rate.denominator}"
             if self._bayer and self._bits <= 8:
                 ucaps = (f"video/x-bayer,format={self._bayer},width={self._width},"
-                         f"height={self._height},framerate={framerate}")
+                         f"height={self._height},framerate={transport_framerate}")
             else:
-                ucaps = caps   # mono: video/x-raw GRAY8/16
+                ucaps = (f"video/x-raw,format={self._gst_format},width={self._width},"
+                         f"height={self._height},framerate={transport_framerate}")
             chains.append(
                 f'appsrc name=unixfd_src is-live=true do-timestamp=false format=time '
                 f'max-bytes={_PUB_QUEUE_FRAMES * frame_bytes} caps="{ucaps}" '
-                f'! queue max-size-buffers=8 ! unixfdsink socket-path={self._unixfd_path} sync=false')
-            log.info("plugin transport endpoint (unixfd) -> %s  caps=%s", self._unixfd_path,
-                     ucaps.split(",", 1)[0] + (f",{self._bayer}" if (self._bayer and self._bits <= 8) else ""))
+                f'! queue max-size-buffers=8 ! unixfdsink name=unixfd_sink socket-path={self._unixfd_path} sync=false')
+            log.info("plugin transport endpoint (unixfd) -> %s  caps=%s  max_rate=%s%s", self._unixfd_path,
+                     ucaps.split(",", 1)[0] + (f",{self._bayer}" if (self._bayer and self._bits <= 8) else ""),
+                     pe.max_rate_hz or "unlimited", self._publish_rate_note())
         elif pe.enabled:
             self._ensure_socket_dir(pe.socket_path)
             self._clear_stale_socket(pe.socket_path, "plugin transport")
@@ -329,8 +355,8 @@ class CapturePipeline:
                 f'caps="{transport.CAPS}" ! queue max-size-buffers=8 ! '
                 f"shmsink socket-path={pe.socket_path} shm-size={shm} "
                 f"wait-for-connection=false sync=false")
-            log.info("plugin transport endpoint (shm+header) -> %s (%d-byte shm, max_rate=%s)",
-                     pe.socket_path, shm, pe.max_rate_hz or "unlimited")
+            log.info("plugin transport endpoint (shm+header) -> %s (%d-byte shm, max_rate=%s%s)",
+                     pe.socket_path, shm, pe.max_rate_hz or "unlimited", self._publish_rate_note())
 
         desc = "   ".join(chains)   # multiple top-level chains in one pipeline
         log.info("pipeline: %s", desc)
@@ -338,17 +364,50 @@ class CapturePipeline:
         self.appsrc = self.pipeline.get_by_name("camsrc")
         self.transport_src = self.pipeline.get_by_name("transport_src")
         self.unixfd_src = self.pipeline.get_by_name("unixfd_src")
-        self.rec_src = self.pipeline.get_by_name("recsrc")
-        self.enc_src = self.pipeline.get_by_name("encsrc")
+        unixfd_sink = self.pipeline.get_by_name("unixfd_sink")
+        self._unixfd_pool = (unixfd_sink is not None
+                             and unixfd_sink.find_property("min-memory-size") is not None)
         if self.appsrc is None:
             raise RuntimeError("appsrc 'camsrc' not found after parse_launch")
+        if self._session_desc_probe:
+            # Dry-run the session pipeline so a missing element fails HERE, legibly, as it always has.
+            # parse_launch creates the elements in NULL: no file is touched, no encoder is opened.
+            log.info("recorder session pipeline: %s", self._session_desc_probe)
+            Gst.parse_launch(self._session_desc_probe).set_state(Gst.State.NULL)
         return desc
 
+    def _publish_rate_note(self) -> str:
+        """' -> every 3rd frame (8.0 Hz)' for the build log, '' when uncapped / rate unknown."""
+        n = self._publish_every_n()
+        if not n:
+            return ""
+        nth = {1: "every frame", 2: "every 2nd frame"}.get(n, f"every {n}th frame" if n != 3 else "every 3rd frame")
+        return f" -> {nth} ({self._fps / n:.1f} Hz)"
+
     # ---- the timestamp-extracting feeder ----------------------------------
+    def _publish_every_n(self) -> int:
+        """Integer decimation factor for the plugin endpoint's rate cap, or 0 when a factor can't be
+        formed (no cap, or the source rate is unknown -> the timestamp gate below).
+
+        ceil(fps / max_rate_hz), so the cap is never EXCEEDED: 24 fps capped at 10 Hz publishes every
+        3rd frame (8 Hz), at 12 Hz every 2nd (12 Hz). Every-Nth is the only decimation with EVEN
+        spacing -- the timestamp gate on a 24 fps source at 10 Hz alternated 2- and 3-frame gaps
+        (91 / 136 ms) whenever arrival jitter nudged a pair over the 100 ms threshold, which a browser
+        renders as visible judder at a nominal '10 fps'. Pick a cap that divides the source rate."""
+        rate = self.cfg.transport.plugin_endpoint.max_rate_hz
+        if rate <= 0 or not self._fps or self._fps <= 0:
+            return 0
+        return max(1, math.ceil(self._fps / rate - 1e-9))
+
     def _should_publish(self, ts_ns: int) -> bool:
         rate = self.cfg.transport.plugin_endpoint.max_rate_hz
         if rate <= 0:
             return True
+        every_n = self._publish_every_n()
+        if every_n:
+            seq = self._pub_seq
+            self._pub_seq += 1
+            return seq % every_n == 0
         min_interval = 1_000_000_000.0 / rate
         # `ts_ns < _last_pub_ts` resets the window instead of waiting it out: the source clock CAN
         # step backward (camera clock reset across a reconnect, RTSP epoch change -- the same event
@@ -369,11 +428,27 @@ class CapturePipeline:
         self.drops.note_enqueue_failure()
         return self.drops.enqueue_failures
 
+    def _feed_appsrc_props(self) -> str:
+        """Extra properties for the appsrcs that FEED THE RECORDING (camsrc, and the session's recsrc).
+
+        A live camera keeps them block=false: a stalled encoder must drop frames (counted, attested)
+        rather than back-pressure the capture thread and grow RAM. A FINITE (playback) source is the
+        opposite case -- the data is already on disk, there is nothing to lose by waiting, and a batch
+        reprocess at `speed: 0` promises "as fast as the pipeline drains", which block=false quietly
+        turned into "as fast as the reader runs, dropping whatever the encoder can't keep up with".
+        block=true makes push-buffer wait for room, so every frame lands. The best-effort publish
+        feeds (transport / unixfd) stay non-blocking either way."""
+        return " block=true" if getattr(self.source, "finite", False) else ""
+
     def _queue_full(self, src, nbytes: int, what: str, publish: bool = False) -> bool:
         """True (recording the drop) if `src`'s internal queue can't take nbytes more. appsrc with
         block=false ignores its own max-bytes for queueing purposes (push still returns OK), so this
         check IS the bound: a full queue means downstream stalled -- drop this frame, count it, and
-        keep the service alive instead of growing RAM until the OOM killer ends the recording."""
+        keep the service alive instead of growing RAM until the OOM killer ends the recording.
+        A block=true appsrc (finite source, see _feed_appsrc_props) is never "full" here: its
+        push-buffer waits for room instead, which is the whole point."""
+        if src.get_property("block"):
+            return False
         max_bytes = src.get_property("max-bytes")
         if max_bytes and src.get_property("current-level-bytes") + nbytes > max_bytes:
             n = self._note_push_drop(publish)
@@ -435,8 +510,7 @@ class CapturePipeline:
                     return 0
                 return max(0, stamp.timestamp_ns - self._base_ts + self._pts_skew)
             if self._base_ts is None:
-                self._base_ts = stamp.timestamp_ns
-                self._write_header()
+                self._base_ts = stamp.timestamp_ns   # the session writes its header on its first frame
             pts = stamp.timestamp_ns - self._base_ts + self._pts_skew
             if self._last_pts is not None:
                 delta = pts - self._last_pts
@@ -470,20 +544,20 @@ class CapturePipeline:
                         "backward/repeated" if delta_ns <= 0 else "forward jump",
                         abs(delta_ns) / 1e9, self.drops.pts_rebases)
 
-    def _account(self, stamp: FrameStamp, pts: int, recorded: bool = True) -> None:
-        """Per-RECORDED-frame accounting: frame-id drop detection + the sidecar timestamp row
-        (+ a first-frames provenance eyeball). Driven by whichever callback feeds the recording:
-        _on_frame for raw / re-encode sources, _on_encoded for a stream-copy source. Deliberately
-        NOT the best-effort decode branch of a stream-copy source -- a leaky decode drop there is
-        expected (not a lost recorded frame) and must not desync the sidecar or trip drop warnings.
-        A frame whose recording push was dropped (recorded=False) is still observed for gap
-        accounting but gets NO sidecar row, keeping the CSV 1:1 with the .mkv."""
+    def _account(self, stamp: FrameStamp) -> None:
+        """Per-frame accounting on the path that FEEDS THE RECORDING -- _on_frame for raw / re-encode
+        sources, _on_encoded for a stream-copy source: frame-id gap detection (+ a first-frames
+        provenance eyeball). Runs whether or not a session is open, because a source gap is LINK
+        health and must be seen while inactive too. The sidecar row itself is written by
+        RecordingSession.push(), under the session lock, so the CSV stays 1:1 with what the muxer
+        received. Deliberately NOT the best-effort decode branch of a stream-copy source -- a leaky
+        decode drop there is expected (not a lost frame) and must not trip drop warnings."""
+        if self.source.take_discontinuity():
+            self.drops.resync()   # a replay's next session: its ids continue from elsewhere, nothing was lost
         gap = self.drops.observe_frame(stamp.frame_id)
         if gap:
             log.warning("frame-id gap: %d frame(s) lost before fid=%s (source/link drop; %d missing total)",
                         gap, stamp.frame_id, self.drops.frames_missing)
-        if recorded:
-            self.sidecar.add(stamp, pts)
         if self._n_pushed < 5:  # quick eyeball; full per-frame data is in the CSV
             d_cc = (stamp.chunk_ns - stamp.camera_ns) if stamp.chunk_ns is not None else None
             d_sc = (stamp.system_ns - stamp.chunk_ns) if stamp.chunk_ns is not None else None
@@ -492,66 +566,118 @@ class CapturePipeline:
                      stamp.system_ns, d_cc, d_sc)
         self._n_pushed += 1
 
-    def _on_frame(self, stamp: FrameStamp, frame_bytes: bytes) -> None:
-        """Source callback (runs on the source's feeder thread): a resolved timestamp +
-        clean image bytes. Set PTS/offset, push to the main appsrc (tee -> record/raw/
-        preview), and -- rate-limited -- to the plugin transport endpoint. Source-agnostic.
+    def _on_frame(self, stamp: FrameStamp, frame_bytes: FramePayload) -> None:
+        """Source callback (runs on the source's feeder thread): a resolved timestamp + clean image
+        bytes or a replay GstFrame. Set PTS/offset, push to the main appsrc (tee -> raw / preview),
+        feed the open recording session, and -- rate-limited -- the plugin transport endpoint.
 
         For a stream-copy (encoded) source this is the BEST-EFFORT decode branch: it feeds live
-        consumers only (the recording rides the encoded branch -> _on_encoded). So the per-recorded-
-        frame accounting (_account) runs here ONLY when this path feeds the recording (raw / re-encode);
-        for stream-copy it lives in _on_encoded, so leaky decode drops never desync the sidecar."""
+        consumers only (the recording rides the encoded branch -> _on_encoded). So the recording feed
+        and its accounting (_account) run here ONLY for raw / re-encode sources; for stream-copy they
+        live in _on_encoded, so leaky decode drops never desync the sidecar."""
         if self._stopping:
             return   # draining for EOS; stop feeding the pipeline
+        sess = self._session   # read ONCE: None while inactive, and once a close has begun
         # stream-copy: this branch is best-effort consumer pixels; the recording (_on_encoded) owns
         # the timeline and this call must not move it -- see _pts_for.
         pts = self._pts_for(stamp, own=not self._stream_copy)
 
-        rec_ok = not self._queue_full(self.appsrc, len(frame_bytes), "camsrc")
-        if rec_ok:
-            gbuf = Gst.Buffer.new_wrapped(frame_bytes)
-            gbuf.pts = pts
-            gbuf.dts = Gst.CLOCK_TIME_NONE
-            gbuf.offset = stamp.frame_id
-            rec_ok = self._push_checked(self.appsrc, gbuf, "camsrc")
+        # camsrc feeds the consumer tee (raw endpoint / preview) -- best-effort now that the recorder
+        # rides its own session pipeline, so a stall here is a publish drop, not a recording loss.
+        if not self._discard_replay_main and not self._queue_full(
+                self.appsrc, len(frame_bytes), "camsrc", publish=True):
+            self._push_checked(self.appsrc, _new_buffer(frame_bytes, pts, stamp.frame_id), "camsrc",
+                               publish=True)
 
-        # Recorder gets a CFA-tiled copy (quadrant sub-planes) for better lossless compression; the
-        # tee above keeps feeding the mosaic to transport/preview/raw. Same PTS/frame_id. When
-        # tiling is on, THIS push (not camsrc) is the recording feed.
-        if self.rec_src is not None:
-            tiled = self._tiler(frame_bytes)
-            rec_ok = not self._queue_full(self.rec_src, len(tiled), "recsrc")
-            if rec_ok:
-                rbuf = Gst.Buffer.new_wrapped(tiled)
-                rbuf.pts = pts
-                rbuf.dts = Gst.CLOCK_TIME_NONE
-                rbuf.offset = stamp.frame_id
-                rec_ok = self._push_checked(self.rec_src, rbuf, "recsrc")
+        # The recording feed (raw / re-encode): the open session's private appsrc, CFA-tiled when
+        # configured (the tee above keeps the mosaic for transport/preview/raw). Same PTS/frame_id.
+        if sess is not None and not self._stream_copy:
+            self._feed_recording(sess, stamp, pts, frame_bytes)
 
-        # plugin transport endpoint, rate-limited. JP7 (unixfd): native caps + buffer fields, but
-        # unixfdsink needs FD-backed memory -> copy the frame into a fresh memfd (~shm cost; the win
-        # is a header-free, self-describing stream). Carry frame_id in .offset and the absolute PTP
+        # Plugin transport endpoint, rate-limited before allocation/copying. Carry frame_id in
+        # .offset and the absolute PTP
         # capture time in .offset_end (an absolute-ns PTS would stall downstream flow). PTS stays
         # relative. JP6 (no unixfd): the legacy shm+header endpoint.
         if self._should_publish(stamp.timestamp_ns):
+            self._publish_transport(stamp, frame_bytes, pts)
+
+        if not self._stream_copy:
+            self._account(stamp)   # raw / re-encode: THIS path is the recording feed
+
+    def _transport_pts(self, pts: int, *, held: bool) -> int:
+        """Preview PTS advances with elapsed wall time for finite/playback sources, independent
+        of historical capture time, playback speed and gaps. Live sources retain source timing.
+
+        A HELD frame -- the same frame re-published while the source stands still: paused,
+        finished, the release gate, a silent gap (_still_tick) -- advances by the wall time since
+        the previous publish. Sent with its original PTS it is a REPEATED timestamp on the wire:
+        on unixfd the buffer PTS goes straight through to the bridge's encoder, webrtcsink emits
+        the same RTP timestamp again, the browser drops it as a duplicate and decodes nothing new,
+        and the dashboard's stall watchdog cycled the WebRTC session every ~20 s for as long as
+        the hold lasted (a paused or finished `rig replay`). The headered-shm path never showed it
+        because the bridge's PtsTracker re-times that transport itself.
+
+        Using wall time for BOTH held and real playback frames avoids adding a recorded gap
+        again after held frames already filled it. The recording feed and camsrc keep the plain
+        source PTS (_pts_for); capture timestamps in plugin metadata also remain unchanged."""
+        now = time.monotonic()
+        with self._tpts_lock:
+            if getattr(self.source, "finite", False):
+                # A replay's capture clock is historical and can run at 0.5x/2x or jump over a
+                # gap already filled by held frames. Feeding it to RTP double-counts those gaps
+                # and makes the browser accumulate playout delay. Preview PTS follows elapsed
+                # wall time; the capture stamp and recording PTS remain untouched.
+                tpts = (self._tpts_last + max(int((now - self._tpts_last_mono) * 1e9), 1)
+                        if self._tpts_last is not None else 0)
+            elif held and self._tpts_last is not None:
+                tpts = self._tpts_last + max(int((now - self._tpts_last_mono) * 1e9), 1)
+            else:
+                tpts = pts + self._tpts_shift_ns
+                if self._tpts_last is not None and tpts <= self._tpts_last:
+                    tpts = self._tpts_last + self._frame_interval_ns   # a source step back: keep advancing
+            self._tpts_shift_ns = tpts - pts
+            self._tpts_last = tpts
+            self._tpts_last_mono = now
+            return tpts
+
+    def _publish_transport(self, stamp: FrameStamp, frame_bytes: FramePayload, pts: int, *,
+                           held: bool = False) -> None:
+        """One frame to the plugin transport endpoint (unixfd or shm+header). Remembers it as the
+        HELD frame: a paused/finished playback re-publishes it (_still_tick, held=True) so a
+        consumer that attaches late -- a bridge restarted behind the core, a viewer opening the
+        page -- still gets a picture and its caps, instead of nothing until release. `pts` is the
+        SOURCE PTS; what goes on the wire is _transport_pts, fresh on every publish."""
+        self._still = (stamp, frame_bytes, pts)
+        self._still_pushed_mono = time.monotonic()
+        tpts = self._transport_pts(pts, held=held)
+        if True:
             try:
                 if self.unixfd_src is not None:
                     # bound check BEFORE the memfd: no point paying the copy for a frame we then drop
                     if not self._queue_full(self.unixfd_src, len(frame_bytes), "unixfd transport", publish=True):
-                        fd = os.memfd_create("cam", 0)
-                        try:
-                            os.ftruncate(fd, len(frame_bytes))
-                            os.pwrite(fd, frame_bytes, 0)
-                            mem = self._GstAllocators.FdAllocator.alloc(
-                                self._fd_alloc, fd, len(frame_bytes),
-                                self._GstAllocators.FdMemoryFlags.NONE)   # on success the allocator owns/closes the fd
-                        except Exception:
-                            os.close(fd)   # ownership never transferred; the handler below would otherwise
-                            raise          # silently leak one fd per published frame until EMFILE
-                        ubuf = Gst.Buffer.new()
-                        ubuf.insert_memory(-1, mem)
-                        ubuf.pts = pts
-                        ubuf.offset = stamp.frame_id
+                        if isinstance(frame_bytes, GstFrame) and self._unixfd_pool:
+                            # Shared decoder/converter allocations pass straight through. If
+                            # upstream declined that allocator, 1.28 copies in C into its pool.
+                            ubuf = frame_bytes.to_buffer(tpts, stamp.frame_id)
+                        else:
+                            # Keep the live byte path and older unixfd runtimes unchanged.
+                            fd = os.memfd_create("cam", 0)
+                            try:
+                                os.ftruncate(fd, len(frame_bytes))
+                                if isinstance(frame_bytes, GstFrame):
+                                    frame_bytes.write_to_fd(fd)
+                                else:
+                                    os.pwrite(fd, frame_bytes, 0)
+                                mem = self._GstAllocators.FdAllocator.alloc(
+                                    self._fd_alloc, fd, len(frame_bytes),
+                                    self._GstAllocators.FdMemoryFlags.NONE)
+                            except Exception:
+                                os.close(fd)   # allocation did not transfer ownership
+                                raise
+                            ubuf = Gst.Buffer.new()
+                            ubuf.insert_memory(-1, mem)
+                            ubuf.pts = tpts
+                            ubuf.offset = stamp.frame_id
                         ubuf.offset_end = stamp.timestamp_ns
                         self._push_checked(self.unixfd_src, ubuf, "unixfd transport", publish=True)
                 elif self.transport_src is not None:
@@ -559,12 +685,17 @@ class CapturePipeline:
                         timestamp_ns=stamp.timestamp_ns, frame_id=stamp.frame_id,
                         width=self._width, height=self._height,
                         pixfmt=self._gst_format, ts_source=stamp.source.value).pack()
-                    payload = hdr + frame_bytes
-                    if not self._queue_full(self.transport_src, len(payload), "shm transport", publish=True):
-                        tbuf = Gst.Buffer.new_wrapped(payload)
-                        tbuf.pts = pts
-                        tbuf.offset = stamp.frame_id
-                        self._push_checked(self.transport_src, tbuf, "shm transport", publish=True)
+                    if isinstance(frame_bytes, GstFrame):
+                        if self._queue_full(self.transport_src, len(hdr) + len(frame_bytes),
+                                            "shm transport", publish=True):
+                            return
+                        buf = frame_bytes.to_buffer(tpts, stamp.frame_id, prefix=hdr)
+                        self._push_checked(self.transport_src, buf, "shm transport", publish=True)
+                    else:
+                        payload = hdr + frame_bytes
+                        if not self._queue_full(self.transport_src, len(payload), "shm transport", publish=True):
+                            self._push_checked(self.transport_src, _new_buffer(payload, tpts, stamp.frame_id),
+                                               "shm transport", publish=True)
             except Exception as e:
                 # The plugin endpoint is best-effort: a per-frame publish failure (e.g. a
                 # TransportError for a pixel format the header can't carry, or a memfd
@@ -576,65 +707,364 @@ class CapturePipeline:
                     self._pub_err_last = now
                     log.warning("plugin transport publish failed (throttled 5s): %s", e)
 
-        if not self._stream_copy:
-            self._account(stamp, pts, recorded=rec_ok)   # raw / re-encode: THIS path is the recording feed
+    def _still_tick(self) -> bool:
+        """~1 Hz on the main loop for a playback source: whenever nothing reached the plugin
+        transport for ~1 s -- held (paused / finished) OR playing through silence (a lead-in
+        before the first recorded frame, a gap between sessions) -- re-publish the last frame.
+        A bridge that attaches during the silence still negotiates and advertises. Never the
+        recorder (it is not a new frame); a feeder publishing at any real rate keeps this idle.
+        Each re-publish carries a FRESH transport PTS (_transport_pts): the same pixels, but never
+        the same timestamp twice on the wire."""
+        if self._stopping:
+            return False
+        pb = getattr(self.source, "playback", None)
+        if pb is None or self._still is None:
+            return True
+        if time.monotonic() - self._still_pushed_mono < 0.9:
+            return True
+        stamp, frame_bytes, pts = self._still
+        self._publish_transport(stamp, frame_bytes, pts, held=True)   # fresh transport PTS each time
+        return True
 
     def _on_encoded(self, stamp: FrameStamp, enc_bytes: bytes, caps_str: str = None) -> None:
-        """Encoded-source callback (parallel to on_frame, SAME per-frame stamp): push the delivered
-        bitstream to the stream-copy recorder's appsrc with a stamp-derived PTS, so the .mkv aligns
-        with the sidecar + the raw consumer path. No decode/re-encode -- byte-exact to delivery."""
-        if self._stopping or self.enc_src is None:
-            return
-        # Apply the source's NEGOTIATED encoded caps once (carries stream-format + codec_data -- e.g.
-        # the H.264/H.265 VPS/SPS/PPS that hvc1/avc keep in caps, not in the bytes) so the appsrc ->
-        # h26xparse -> matroskamux chain negotiates. The build-time caps were the bare media type
-        # ("video/x-h265"), enough for MJPEG (no codec_data) but not for H.264/H.265.
-        if caps_str and not self._enc_caps_applied:
-            self.enc_src.set_property("caps", Gst.Caps.from_string(caps_str))
-            self._enc_caps_applied = True
-        pts = self._pts_for(stamp)   # shared with _on_frame; see _pts_for for why that matters here
-        rec_ok = not self._queue_full(self.enc_src, len(enc_bytes), "encsrc")
-        if rec_ok:
-            ebuf = Gst.Buffer.new_wrapped(enc_bytes)
-            ebuf.pts = pts
-            ebuf.dts = Gst.CLOCK_TIME_NONE
-            ebuf.offset = stamp.frame_id
-            rec_ok = self._push_checked(self.enc_src, ebuf, "encsrc")
-        # stream-copy: the encoded branch IS the recording -> account the recorded frame here (drop
-        # detection + sidecar timestamp), NOT on the best-effort decode branch (_on_frame). This keeps
-        # the sidecar 1:1 with the .mkv and the RTCP->NTP provenance complete even under decode-branch load.
-        self._account(stamp, pts, recorded=rec_ok)
+        """Encoded-source callback (parallel to on_frame, SAME per-frame stamp): the stream-copy
+        recording feed. Pushes the delivered bitstream to the open session with a stamp-derived PTS,
+        so the .mkv aligns with the sidecar + the raw consumer path. No decode/re-encode -- byte-exact
+        to delivery. The session applies the negotiated caps (stream-format + codec_data) itself."""
+        if self._stopping or not self._stream_copy:
+            return   # a forced re-encode records via _on_frame, which then owns the timeline
+        # ALWAYS derive the PTS here, session or not: this branch OWNS the timeline (_pts_for), and
+        # _on_frame's read-only view would return 0 for every consumer frame until the base exists.
+        pts = self._pts_for(stamp)
+        sess = self._session
+        if sess is not None:
+            self._feed_recording(sess, stamp, pts, enc_bytes, caps_str)
+        # stream-copy: the encoded branch IS the recording -> account here, NOT on the best-effort
+        # decode branch (_on_frame), so the RTCP->NTP provenance stays complete under decode-branch load.
+        self._account(stamp)
 
-    def _write_header(self) -> None:
+    def _feed_recording(self, sess, stamp: FrameStamp, pts: int, payload: FramePayload,
+                        caps_str: str = None) -> bool:
+        """Push one frame into the open session (CFA-tiled when configured). DROPPED = the recording
+        feed could not take it: counted as an enqueue failure, the recording's own loss counter.
+        SKIPPED (closing / waiting for a sync point) is not a loss and is not counted here."""
+        tiler = getattr(sess, "recording_tiler", self._tiler)
+        if tiler is not None:
+            payload = tiler(bytes(payload) if isinstance(payload, GstFrame) else payload)
+        r = sess.push(payload, pts, stamp, caps_str)
+        if r is PushResult.DROPPED:
+            n = self._note_push_drop(publish=False)
+            if n % 100 == 1:
+                log.warning("recording feed full (session %d stalled); dropped %d frame(s) so far",
+                            sess.index, n)
+        return r is PushResult.OK
+
+    def _session_header(self, stamp: FrameStamp, pts: int, sess) -> SidecarHeader:
+        """The sidecar header for a session, written on its first recorded frame. base_timestamp_ns is
+        the PROCESS base (so pts_ns = timestamp_ns - base holds across sessions); the session's own
+        first frame is recorded alongside."""
         _x, _y, width, height = self.source.geometry()
-        self.sidecar.write_header(SidecarHeader(
+        prov = self.source.provenance() if hasattr(self.source, "provenance") else {}
+        from .recorder import x264_settings
+        cfg = getattr(sess, "recording_config", self.cfg.recording)
+        enc = getattr(sess, "recording_encoder", self._rec_enc)
+        return SidecarHeader(
             created_unix_s=time.time(),
             base_timestamp_ns=int(self._base_ts),
             timestamp_source=self.source.active_timestamp_source,
             ptp_synced=self.source.ptp_locked,
             pixel_format=self.source.pixel_format(),
-            bayer_pattern=self.cfg.recording.bayer_pattern or self._bayer,
+            bayer_pattern=cfg.bayer_pattern or self._bayer,
             bits_per_pixel=self._bits,
             width=int(width),
             height=int(height),
             tick_frequency_hz=self.source.tick_frequency_hz,
-            cfa_tile_mode=self._tile_mode,
-        ))
+            cfa_tile_mode=getattr(sess, "recording_tile_mode", self._tile_mode),
+            session_index=sess.index,
+            session_prefix=sess.prefix,
+            first_pts_ns=int(pts),
+            first_frame_id=int(stamp.frame_id),
+            first_timestamp_ns=int(stamp.timestamp_ns),
+            replay_of=prov.get("replay_of"),
+            replay_epoch_unix_ns=prov.get("replay_epoch_unix_ns"),
+            recording_encoder=enc or None,
+            recording_lossy=(enc == "x264") if enc not in (None, "", "stream-copy") else None,
+            recording_settings=x264_settings(cfg) if enc == "x264" else None,
+            recording_settings_file=getattr(sess, "settings_path", None),
+        )
+
+    def _recording_plan(self, cfg):
+        """Resolve a candidate without changing the live source or consumer pipelines."""
+        loc = f"{cfg.output_dir.rstrip('/')}/{cfg.name_prefix}"
+        desc, enc = self._recorder_desc(cfg, self._bits, loc, self._fps, self._is_color, self._enc_parser)
+        if enc == "x264" and (self._width % 2 or self._height % 2):
+            raise ValueError("recording.encoder=x264 requires even width and height for 4:2:0; use ffv1 for this geometry")
+        mode, tiler = "off", None
+        if self._bayer and self._bits <= 8 and enc not in ("x264", "stream-copy"):
+            from . import bayer_tile
+            mode = bayer_tile.normalize_mode(cfg.bayer_tile)
+            if mode != "off":
+                if self._width % 2 or self._height % 2:
+                    raise ValueError("Bayer tiling requires even width and height")
+                pattern, width, height = self._bayer, self._width, self._height
+                tiler = lambda b: bayer_tile.tile_cfa(b, width, height, mode, pattern)
+        if self._bayer and enc == "x264":
+            log.warning("recorder: lossy H.264 records an approximate Bayer mosaic; CFA tiling is disabled")
+        return desc, enc, mode, tiler
+
+    def _install_recording_plan(self, cfg, plan):
+        desc, enc, mode, tiler = plan
+        self.cfg.recording = cfg
+        self._rec_enc, self._tile_mode, self._tiler = enc, mode, tiler
+        self._stream_copy = enc == "stream-copy"
+        self._session_desc_probe = self._session_desc(desc)
+        # Publish a complete immutable view in one assignment for Zenoh's reader thread.
+        encoders = list(settings.CHOICES["encoder"])
+        if self._enc_parser:
+            encoders = (["auto", "stream-copy"] if self._stream_copy else
+                        [e for e in encoders if e not in ("auto", "stream-copy")])
+        else:
+            encoders.remove("stream-copy")
+        requested = settings.requested(cfg)
+        # Present canonical choices for legacy YAML booleans/numeric presets. The session audit
+        # retains the actual requested config values, including these deployment aliases.
+        if requested["bayer_tile"] is True:
+            requested["bayer_tile"] = "plain"
+        elif requested["bayer_tile"] in (False, None):
+            requested["bayer_tile"] = "off"
+        level = rec._preset_level(requested["nvenc_preset"])
+        requested["nvenc_preset"] = ("disable", "ultrafast", "fast", "medium", "slow")[level] if level is not None else ""
+        self._settings_view = {
+            "generation": self._settings_generation, "revision": self._settings_revision,
+            "requested": requested,
+            "resolved": {"encoder": enc, "lossy": None if enc == "stream-copy" else enc == "x264",
+                         "bayer_tile": mode,
+                         "x264": rec.x264_settings(cfg) if enc == "x264" else None},
+            "encoders": encoders,
+            "source_mode_fixed": bool(self._enc_parser),
+        }
+
+    def recording_settings(self):
+        if self._settings_view is None:
+            return None
+        locked = (not self.cfg.recording.enabled or self._stopping
+                  or self._lifecycle != INACTIVE or self._session is not None)
+        return {**deepcopy(self._settings_view), "editable": not locked}
+
+    def check_recording_settings(self, expected):
+        view = self._settings_view
+        if (not isinstance(expected, dict) or view is None
+                or expected.get("generation") != view["generation"]
+                or type(expected.get("revision")) is not int
+                or expected["revision"] != view["revision"]):
+            raise ValueError("recording settings changed; refresh and review before retrying")
+
+    def configure_recording(self, request):
+        """Main loop only, serialized with activation and finalization. Refuse partial changes."""
+        if (not self.cfg.recording.enabled or self._stopping or self._lifecycle != INACTIVE
+                or self._session is not None):
+            raise ValueError("recording settings are locked; stop recording before changing them")
+        if not isinstance(request, dict) or set(request) != {"settings", "expected"}:
+            raise ValueError("request must contain settings and expected generation/revision")
+        self.check_recording_settings(request["expected"])
+        cfg = settings.apply_patch(self.cfg.recording, request["settings"])
+        plan = self._recording_plan(cfg)
+        if (plan[1] == "stream-copy") != self._stream_copy:
+            raise ValueError("switching between source-copy and re-encoding requires a service restart")
+        # Parse/link in NULL before committing; this neither opens a file nor touches live ingest.
+        probe = Gst.parse_launch(self._session_desc(plan[0]))
+        probe.set_state(Gst.State.NULL)
+        if (settings.requested(cfg) == settings.requested(self.cfg.recording)
+                and plan[1] == self._rec_enc and plan[2] == self._tile_mode):
+            return {"ok": True, "noop": True}
+        self._settings_revision += 1
+        self._install_recording_plan(cfg, plan)
+        return {"ok": True}
+
+    # ---- recording sessions (lifecycle activate / deactivate) ---------------
+    def _session_desc(self, rec_desc: str) -> str:
+        """The per-session pipeline: one private appsrc -> the recorder fragment. Raw and CFA-tiled
+        share a description (tiling changes bytes, not caps); stream-copy carries the encoded caps.
+        max-bytes uses the RAW frame size either way: encoded frames are (much) smaller, so the bound
+        is roomy in frames while still hard-capping memory."""
+        src_caps = self.source.encoded_caps if self._stream_copy else self._raw_caps
+        # block=true for a FINITE (playback) source -- see _feed_appsrc_props: a batch reprocess must
+        # wait for the encoder, not drop. The recorder's appsrc moved from the main pipeline into
+        # the session; the rule moved with it (session.push honours `block` before its level check).
+        return (f'appsrc name=recsrc is-live=true do-timestamp=false format=time{self._feed_appsrc_props()} '
+                f'max-bytes={_REC_QUEUE_FRAMES * self._image_size} caps="{src_caps}" ! {rec_desc}')
+
+    def activate(self, run_id: str = None) -> dict:
+        """Open a recording session (main loop). Refusals are result dicts, never exceptions."""
+        if not self.cfg.recording.enabled or not self._session_desc_probe:
+            return {"ok": False, "error": "recording disabled by config", "state": self._lifecycle}
+        if self._stopping:
+            return {"ok": False, "error": "stopping", "state": self._lifecycle}
+        if self._session is not None:
+            return {"ok": False, "error": "already recording", "state": self._lifecycle}
+        self._lifecycle = ACTIVATING
+        self._session_seq += 1
+        try:
+            cfg = deepcopy(self.cfg.recording)
+            out_dir = cfg.output_dir
+            prefix = unique_run_prefix(out_dir, cfg.name_prefix + (f"-{run_id}" if run_id else ""))
+            loc = f"{out_dir.rstrip('/')}/{prefix}"
+            rec_desc, enc = self._recorder_desc(cfg, self._bits, loc, self._fps,
+                                               self._is_color, self._enc_parser)
+            if self._rec_enc is not None and enc != self._rec_enc:
+                raise RuntimeError("resolved encoder changed; review recording settings again")
+            sess = self._session_factory(self._session_seq, prefix, out_dir, self._session_desc(rec_desc),
+                                         header_factory=self._session_header, encoded=self._stream_copy,
+                                         on_error=self._on_session_error, on_fragment=self._on_session_fragment)
+            sess.recording_config, sess.recording_encoder = cfg, enc
+            sess.recording_tile_mode, sess.recording_tiler = self._tile_mode, self._tiler
+            sess.settings_path = loc + ".recording-settings.json"
+            snapshot = {"schema_version": 1, "created_unix_s": time.time(),
+                        "session_index": sess.index, "session_prefix": prefix, "run_id": run_id,
+                        "generation": self._settings_generation, "revision": self._settings_revision,
+                        "requested": settings.requested(cfg),
+                        "resolved": deepcopy((self._settings_view or {}).get("resolved", {"encoder": enc})),
+                        "source": {"pixel_format": self.source.pixel_format(),
+                                   "width": self._width, "height": self._height, "frame_rate": self._fps}}
+            settings.write_snapshot(sess.settings_path, snapshot)
+            sess.start(self.drops.summary())
+        except Exception as e:   # noqa: BLE001 -- a session that can't open is a refusal, not a crash
+            self._lifecycle = INACTIVE
+            log.error("recording session %d could not start: %s", self._session_seq, e)
+            self._last_result = {"ok": False, "error": f"session start failed: {e}", "state": INACTIVE}
+            return self._last_result
+        self._session = sess
+        self._lifecycle = ACTIVE
+        # Progress while active: a viewer's "recording for 1m12s - 1 file" only moves if the
+        # descriptor is republished between transitions. Files changing is event-driven (the
+        # fragment hook); frames/elapsed ride this low-rate tick. Self-cancelling once no session
+        # is open, and removed explicitly on deactivate so a quick re-activate can't double it.
+        self._progress_timer = GLib.timeout_add_seconds(PROGRESS_INTERVAL_S, self._progress_tick)
+        self._last_result = {"ok": True, "state": ACTIVE, "session": sess.describe()}
+        return self._last_result
+
+    def deactivate(self, wait_eos: bool = True) -> dict:
+        """Finalize the open session (main loop; blocks for at most the drain budget). The session is
+        unpublished BEFORE it starts closing, so the feeders stop seeing it first."""
+        sess = self._session
+        if sess is None:
+            return {"ok": False, "error": "not recording", "state": self._lifecycle}
+        self._lifecycle = DEACTIVATING
+        self._session = None
+        self._stop_progress_timer()
+        result = self._close_session_sync(sess, wait_eos)
+        self._lifecycle = INACTIVE
+        result["state"] = INACTIVE
+        self._last_result = result
+        return result
+
+    # ---- progress (between transitions) ----------------------------------
+    def _stop_progress_timer(self) -> None:
+        if self._progress_timer is not None:
+            try:
+                GLib.source_remove(self._progress_timer)
+            except Exception:   # noqa: BLE001 -- already fired its last False
+                pass
+            self._progress_timer = None
+
+    def _on_session_fragment(self, sess) -> None:
+        """A file opened or closed in the OPEN session (main loop, one iteration after the bus)."""
+        if self._session is sess:
+            self._fire_progress()
+
+    def _progress_tick(self) -> bool:
+        if self._session is None:
+            self._progress_timer = None
+            return False   # nothing open: let the source go
+        self._fire_progress()
+        return True
+
+    def _fire_progress(self) -> None:
+        if self.on_session_progress is None:
+            return
+        try:
+            self.on_session_progress()
+        except Exception as e:   # noqa: BLE001 -- a publisher must never touch the recording
+            log.warning("session-progress hook failed: %s", e)
+
+    def get_state(self) -> dict:
+        """A fresh dict of scalars: safe from any thread (the zenoh adapter reads it off the loop)."""
+        sess = self._session
+        return {
+            "state": self._lifecycle,
+            "session": sess.describe() if sess is not None else None,
+            "health": {**self.drops.summary(), "stalled": self._stalled,
+                       "reconnecting": self._reconnecting},
+            "encoder": self._rec_enc,
+            "recording_settings": self.recording_settings(),
+            "last_result": self._last_result,
+        }
+
+    def _close_session_sync(self, sess, wait_eos: bool) -> dict:
+        """begin_close + finish_close, bounded by SESSION_DRAIN_S when the EOS is worth waiting for
+        (a session that already ERRORed may never deliver one)."""
+        sess.begin_close()
+        info = sess.finish_close(SESSION_DRAIN_S if wait_eos else 0.0, self.drops.summary())
+        where = f"{sess.path_base}-*"
+        if info.get("error"):
+            log.error("recording session %d closed on an error: %s (%d frame(s), %d segment(s) -> %s)",
+                      sess.index, info["error"], info["frames"], info["segments"], where)
+        elif info.get("truncated"):
+            log.warning("recording session %d finalized LATE: %d frame(s), %d segment(s) -> %s "
+                        "(the last segment may be truncated)", sess.index, info["frames"], info["segments"], where)
+        else:
+            log.info("recording session %d finalized: %d frame(s), %d segment(s) -> %s",
+                     sess.index, info["frames"], info["segments"], where)
+        out = {"ok": True, "session": info}
+        if info.get("error"):
+            out["error"] = info["error"]
+        return out
+
+    def _on_session_error(self, sess) -> None:
+        """A session pipeline posted ERROR (disk full, encoder failure). Runs on the main loop, one
+        iteration after the bus dispatch. Ends THAT session; the process keeps serving consumers
+        unless session_error_fatal says nobody could ever re-activate it."""
+        if self._session is not sess or self._stopping:
+            return   # already closed (a deactivate raced the error), or the process is stopping
+        log.error("recording session %d failed (%s); closing it", sess.index, sess.error)
+        result = self.deactivate(wait_eos=False)
+        if self.on_session_ended is not None:
+            try:
+                self.on_session_ended(result)
+            except Exception as e:   # noqa: BLE001
+                log.warning("session-ended hook failed: %s", e)
+        if self.session_error_fatal:
+            log.error("recorder failed with no control plane to re-activate it; exiting non-zero")
+            self._fatal = True
+            if self.loop:
+                self.loop.quit()
 
     # ---- shutdown ----------------------------------------------------------
     def request_stop(self) -> None:
-        """Clean stop: halt acquisition and inject EOS so the muxer finalizes the file.
-        The bus EOS handler then quits the loop; a timer is the safety net."""
+        """Clean stop: halt acquisition, finalize the open recording session, and inject EOS so the
+        main pipeline drains. The bus EOS handler then quits the loop; a timer is the safety net."""
         if self._stopping:
             return
         self._stopping = True
         self._stop_event.set()   # wake the reconnect backoff, if one is in progress
-        log.info("stop requested: stopping acquisition + sending EOS to finalize recording")
+        log.info("stop requested: stopping acquisition + finalizing the recording")
+        # Armed BEFORE the bounded, blocking session drain below, so the worst case is the larger of
+        # the two budgets rather than their sum.
+        GLib.timeout_add_seconds(5, self._force_quit)
+        sess = self._session
+        if sess is not None:
+            self._session = None
+            self._lifecycle = DEACTIVATING
+            sess.begin_close()   # recorder EOS first, so its drain overlaps the main pipeline's
+        # Replay's reader NULL transition joins its feed callback. Cancel a blocked recorder
+        # push before waiting for that callback, while leaving accepted frames queued to drain.
         self.source.stop()
-        for src in (self.appsrc, self.transport_src, self.unixfd_src, self.rec_src, self.enc_src):
+        for src in (self.appsrc, self.transport_src, self.unixfd_src):
             if src is not None:
                 src.emit("end-of-stream")
-        GLib.timeout_add_seconds(5, self._force_quit)
+        if sess is not None:
+            self._last_result = self._close_session_sync(sess, wait_eos=True)
+            self._lifecycle = INACTIVE
 
     def _force_quit(self) -> bool:
         log.warning("EOS did not drain within 5s; forcing stop (recording may be truncated)")
@@ -652,22 +1082,42 @@ class CapturePipeline:
         return self._fatal
 
     # ---- run loop ----------------------------------------------------------
-    def run(self) -> None:
+    def run(self, on_playing=None) -> None:
+        """Start the main pipeline, then capture. `on_playing` runs in between -- pipeline PLAYING, no
+        frame delivered yet -- so a boot-active recording session exists before the first frame
+        (record-from-frame-one, as always). It returns False to abort: a boot session that cannot
+        open is fatal, exactly as an unbuildable recorder always was."""
         bus = self.pipeline.get_bus()
         bus.add_signal_watch()
         bus.connect("message", self._on_bus)
 
         self.loop = GLib.MainLoop()
         self.pipeline.set_state(Gst.State.PLAYING)
-        self.source.start(self._on_frame, self._on_encoded)
-        if self.source.reconnect_enabled:
+        if on_playing is not None and not on_playing():
+            self._fatal = True
+            log.error("startup hook failed; shutting down without capturing")
+            self.shutdown()
+            return
+        self._start_source()
+        if self.source.reconnect_enabled or self.source.finite:
             GLib.timeout_add_seconds(1, self._watchdog)
+        if getattr(self.source, "playback", None) is not None:
+            GLib.timeout_add(1000, self._still_tick)   # a held playback keeps its frame on the wire
         GLib.timeout_add_seconds(_HEALTH_INTERVAL_S, self._log_health)
         log.info("running")
         try:
             self.loop.run()
         finally:
             self.shutdown()
+
+    def _start_source(self) -> None:
+        # Only ReplaySource opts in. Live GigE/USB/RTSP, pcap, and external byte consumers
+        # keep their existing callback contracts and reconnect behavior.
+        start = getattr(self.source, "start_buffers", None)
+        if start is not None:
+            start(self._on_frame, self._on_encoded, shared_memory=self._unixfd_pool)
+        else:
+            self.source.start(self._on_frame, self._on_encoded)
 
     def _log_health(self) -> bool:
         """~every _HEALTH_INTERVAL_S: surface drop accounting as a first-class live signal (not just
@@ -680,11 +1130,20 @@ class CapturePipeline:
         if self._stopping:
             return False
         s = self.drops.summary()
+        # A playback source that is paused or finished delivers nothing BY DESIGN: idle, not stalled.
+        pb = getattr(self.source, "playback", None)
+        if pb is not None and pb.state != "playing":
+            self._stalled = False
+            self._last_health_frames = self._n_pushed
+            log.info("health: playback %s (frames=%d)", pb.state, self._n_pushed)
+            return True
         # An active reconnect is a KNOWN gap, already logged by the watchdog -- don't double-report.
         if self._n_pushed == self._last_health_frames and not self._reconnecting:
+            self._stalled = True
             log.error("health: NO frames in the last %ds (total=%d) -- the pipeline is still PLAYING "
                       "but capture is stalled, not idle", _HEALTH_INTERVAL_S, self._n_pushed)
             return True
+        self._stalled = False
         self._last_health_frames = self._n_pushed
         if s["source_gaps"] or s["enqueue_failures"] or s["publish_drops"] or s["pts_rebases"]:
             log.warning("health: frames=%(frames)d source_gaps=%(source_gaps)d "
@@ -696,11 +1155,36 @@ class CapturePipeline:
 
     def _watchdog(self) -> bool:
         """Runs on the main loop ~1 Hz: ask the source whether it's disconnected and, if so,
-        kick off a reconnect in its own thread (so backoff doesn't block the pipeline)."""
+        kick off a reconnect in its own thread (so backoff doesn't block the pipeline). For a
+        finite (playback) source, also notice EOF and finalize cleanly."""
         if self._stopping:
             return False   # remove the watchdog
+        if self.source.finite and self.source.finished:
+            if self.source.finished_error:
+                log.error("playback ended on an error -> finalizing recording, exiting non-zero")
+                self._fatal = True   # a truncated reprocess must not look like a complete one
+                self.request_stop()
+                return False
+            if not self.hold_on_finish:
+                log.info("playback finished -> finalizing recording and exiting")
+                self.request_stop()
+                return False
+            if not self._held:
+                self._held = True
+                log.info("playback finished -> finalizing the recording session; holding for a restart")
+                if self._session is not None:
+                    result = self.deactivate(wait_eos=True)
+                    if self.on_playback_finished is not None:
+                        try:
+                            self.on_playback_finished(result)
+                        except Exception as e:   # noqa: BLE001
+                            log.warning("playback-finished hook failed: %s", e)
+            return True
+        self._held = False   # a restart from the end: the next end finalizes again
         if self._reconnecting:
             return True
+        if not self.source.reconnect_enabled:
+            return True    # finite-only watchdog: nothing to reconnect
         if self.source.is_disconnected():
             log.warning("source reports disconnect -> reconnecting")
             self._reconnecting = True
@@ -757,6 +1241,7 @@ class CapturePipeline:
                 #    (usb/rtsp are immune: gstbase's frame_id is a host counter that deliberately
                 #    survives reopen for drop accounting.)
                 self._last_pub_ts = None
+                self._pub_seq = 0
                 with self._base_lock:
                     self._pts_memo.clear()
                 # start() is INSIDE the try deliberately. For GigE it issues Aravis CONTROL writes
@@ -766,7 +1251,7 @@ class CapturePipeline:
                 # starts. Left outside, that exception escaped the thread with `_reconnecting` stuck
                 # True and the watchdog gated shut, so capture stopped PERMANENTLY and silently. In
                 # here it is just a failed attempt: log it, back off, try again.
-                self.source.start(self._on_frame, self._on_encoded)
+                self._start_source()
             except SourceConfigChanged as e:
                 # The stream came back DIFFERENT (codec/geometry). The appsrc caps are fixed at
                 # build(), so no in-process reopen can carry on: finalize the recording cleanly and
@@ -817,10 +1302,20 @@ class CapturePipeline:
 
     def shutdown(self) -> None:
         log.info("shutting down (pushed %d frames)", self._n_pushed)
-        if not self._stopping:   # error/EOS path that didn't go through request_stop
-            self._stopping = True
-            self.source.stop()
+        stop_source = not self._stopping   # error/EOS path that didn't go through request_stop
+        self._stopping = True
         self._stop_event.set()   # wake a reconnect backoff so the worker can exit and be joined
+        sess = self._session
+        if sess is not None:
+            # Only reachable when the MAIN pipeline errored (its bus handler quits the loop without
+            # request_stop): a transport-sink failure must not truncate a healthy recording.
+            self._session = None
+            sess.begin_close()   # wake a blocked replay push before source.stop joins the feeder
+        if stop_source:
+            self.source.stop()
+        if sess is not None:
+            self._last_result = self._close_session_sync(sess, wait_eos=True)
+            self._lifecycle = INACTIVE
         if self.pipeline:
             self.pipeline.set_state(Gst.State.NULL)
         self._join_reconnect()   # must precede close(): a late reopen would re-take the device
@@ -832,9 +1327,3 @@ class CapturePipeline:
         log.info("drop summary: frames=%(frames)d source_gaps=%(source_gaps)d "
                  "frames_missing=%(frames_missing)d enqueue_failures=%(enqueue_failures)d "
                  "publish_drops=%(publish_drops)d pts_rebases=%(pts_rebases)d", s)
-        # stop() BEFORE write_summary: stop() joins the CSV writer, which is where the final flush
-        # happens -- so a failure in that last flush sets the writer's failed flag in time for the
-        # summary to attest it. The other order wrote the JSON while the CSV was still open, and a
-        # final-flush ENOSPC then went unrecorded in the very field added to make it self-describing.
-        self.sidecar.stop()
-        self.sidecar.write_summary(s)

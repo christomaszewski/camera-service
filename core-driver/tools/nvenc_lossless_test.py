@@ -53,6 +53,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="bit-exact check for the HW HEVC-lossless recorder path")
     ap.add_argument("--frames", type=int, default=60, help="number of random GRAY8 frames (default 60)")
     n_in = ap.parse_args().frames
+    if n_in <= 0:
+        ap.error("--frames must be positive")
 
     with open(IN, "wb") as f:                          # near-incompressible ground truth
         for i in range(n_in):
@@ -65,7 +67,8 @@ def main() -> int:
             print(f"FAIL: gst-launch exited {r.returncode} ({stage})")
             return 1
 
-    n_out = os.path.getsize(OUT) // IMG
+    out_bytes = os.path.getsize(OUT)
+    n_out = out_bytes // IMG
     comp = min(n_in, n_out)
     ok = worst = worst_frame = 0
     worst_frame = -1
@@ -85,15 +88,16 @@ def main() -> int:
           f"(noise is incompressible, so lossless ~>= 1.0x; a tiny ratio would mean lossy)")
     print(f"=== {ok}/{comp} frames bit-exact, {n_out}/{n_in} survived encode ===")
     lossless = ok == comp and comp > 0
-    all_frames = n_out == n_in
+    all_frames = out_bytes == n_in * IMG
     if not lossless:
         kind = "range/colorimetry scale (systematic small delta)" if 0 < worst <= 20 else "corruption"
         print(f"worst mismatch: frame {worst_frame}, max |delta| = {worst}  -> likely {kind}")
-    elif not all_frames:
-        print(f"note: {n_in - n_out} tail frame(s) didn't survive the gst-launch EOS flush "
-              f"(a launch-only artefact; the real recorder finalizes via splitmuxsink EOS)")
-    print("NVENC LOSSLESS PASS (bit-exact)" if lossless else "NVENC LOSSLESS FAIL")
-    return 0 if lossless else 1
+    if not all_frames:
+        print(f"FAIL: expected {n_in * IMG} decoded bytes, got {out_bytes}; "
+              "missing/extra frames or a partial frame invalidate the roundtrip")
+    passed = lossless and all_frames
+    print("NVENC LOSSLESS PASS (bit-exact, all frames)" if passed else "NVENC LOSSLESS FAIL")
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":

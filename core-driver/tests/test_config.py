@@ -7,7 +7,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from cam_driver.config import parse_config, resolve_recording_dir, unique_run_prefix  # noqa: E402
+from cam_driver.config import (hold_on_finish, lifecycle_state_file, parse_config,  # noqa: E402
+                               resolve_input_path, resolve_recording_dir,
+                               unique_run_prefix)
 from cam_driver.sources import make_source  # noqa: E402
 
 
@@ -278,6 +280,120 @@ def test_unique_run_prefix():
     assert unique_run_prefix("/nonexistent-dir-for-test", "cam", _now=1700000000) == "cam-20231114-221320"
 
 
+# ---- playback blocks (replay / pcap) -----------------------------------------
+def test_replay_block_defaults_and_parse():
+    r = parse_config({}).replay
+    assert (r.path, r.run, r.speed, r.loop, r.retime, r.decoder) == ("", "", 1.0, False, "original", "auto")
+    c = parse_config({"camera": {"type": "replay"},
+                      "replay": {"path": "/data/runs/x", "speed": 0, "loop": True, "retime": "wall"}})
+    assert c.camera.type == "replay"
+    assert (c.replay.path, c.replay.speed, c.replay.loop, c.replay.retime) == ("/data/runs/x", 0.0, True, "wall")
+
+
+def test_pcap_block_defaults_and_parse():
+    p = parse_config({}).pcap
+    assert (p.pixel_format, p.width, p.height) == ("GRAY16_LE", 640, 512)
+    assert p.bus is None and p.device is None and p.endpoint is None
+    c = parse_config({"camera": {"type": "pcap"},
+                      "pcap": {"path": "/input/cam.pcapng", "pixel_format": "MJPEG",
+                               "width": 1280, "height": "720", "device": 5}})
+    assert (c.pcap.width, c.pcap.height, c.pcap.device) == (1280, 720, 5)   # "720" coerced
+
+
+def test_pcap_numeric_typo_is_legible():
+    try:
+        parse_config({"pcap": {"width": "640px"}})
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "PcapConfig.width" in str(e)
+
+
+def test_playback_speed_must_not_be_negative_but_zero_is_the_drain_mode():
+    for block in ("replay", "pcap"):
+        try:
+            parse_config({block: {"speed": -1}})
+            assert False, "expected ValueError"
+        except ValueError as e:
+            assert f"{block}.speed" in str(e)
+    assert parse_config({"replay": {"speed": 0}}).replay.speed == 0     # as fast as the pipeline drains
+
+
+def test_pcap_source_needs_a_path():
+    # an empty path used to surface as FileNotFoundError('') deep in the parser; name the knob instead
+    try:
+        parse_config({"camera": {"type": "pcap"}})
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "pcap.path" in str(e)
+    assert parse_config({"pcap": {}}).pcap.path == ""   # only required when the source IS pcap
+
+
+def test_general_frame_rate_overlays_playback_blocks():
+    c = parse_config({"camera": {"frame_rate": 42.0}})
+    assert c.replay.frame_rate == 42.0 and c.pcap.frame_rate == 42.0
+    # and stays None when unset (playback derives its own rate from the data)
+    c2 = parse_config({})
+    assert c2.replay.frame_rate is None and c2.pcap.frame_rate is None
+
+
+def test_resolve_input_path_absolute_pins_verbatim():
+    # An absolute pcap/replay path is the SAME path on the host and in the container (cam-up
+    # self-maps the bind), so it must survive untouched -- whatever the input root says.
+    assert resolve_input_path("/data/captures/t.pcapng", "/input") == "/data/captures/t.pcapng"
+    assert resolve_input_path("/data/captures/t.pcapng", "") == "/data/captures/t.pcapng"
+
+
+def test_resolve_input_path_relative_rides_the_input_mount():
+    # A bare name is the portable shape: only the FOLDER is deployment-specific.
+    assert resolve_input_path("thermal.pcapng", "/data/captures") == "/data/captures/thermal.pcapng"
+    assert resolve_input_path("runs/a.pcapng", "/data/captures") == "/data/captures/runs/a.pcapng"
+    # trailing slashes on the root must not double up
+    assert resolve_input_path("t.pcapng", "/data/captures/") == "/data/captures/t.pcapng"
+
+
+def test_resolve_input_path_defaults_to_the_documented_mount_point():
+    # No CAM_INPUT_DIR (a bare `docker run`, or cam-up's dev default) -> /input, the mount point
+    # README.md and config/pcap-thermal.yaml have documented by hand since playback landed.
+    assert resolve_input_path("thermal.pcapng") == "/input/thermal.pcapng"
+    assert resolve_input_path("thermal.pcapng", "  ") == "/input/thermal.pcapng"
+
+
+def test_resolve_input_path_leaves_an_unset_path_alone():
+    # "" must stay "" so parse_config's `pcap.path: required` error is what the user sees,
+    # rather than a confusing "/input" that was never asked for.
+    assert resolve_input_path("", "/input") == ""
+    assert resolve_input_path("   ", "/input") == ""
+
+
+def test_control_defaults_boot_active_and_remember():
+    # Every existing config (no `control:` block) must behave exactly as before: record from frame one.
+    c = parse_config({})
+    assert c.control.initial_state == "active"
+    assert c.control.resume_state is True
+    assert c.control.state_file == ""
+
+
+def test_control_initial_state_is_validated():
+    assert parse_config({"control": {"initial_state": "inactive"}}).control.initial_state == "inactive"
+    assert parse_config({"control": {"initial_state": " Active\n"}}).control.initial_state == "active"
+    try:
+        parse_config({"control": {"initial_state": "activ"}})
+    except ValueError as e:
+        assert "initial_state" in str(e) and "activ" in str(e)
+    else:
+        raise AssertionError("a typo'd initial_state must fail at parse time, not boot the wrong way")
+
+
+def test_lifecycle_state_file_sits_next_to_the_transport_sockets():
+    # The socket volume is external and per-sensor, so it outlives the container: the right place for
+    # a state a crash restart should find.
+    assert lifecycle_state_file(parse_config({})) == "/tmp/cam/lifecycle.state"
+    c = parse_config({"transport": {"plugin_endpoint": {"socket_path": "/run/x/frames"}}})
+    assert lifecycle_state_file(c) == "/run/x/lifecycle.state"
+    c = parse_config({"control": {"state_file": "/var/lib/cam/state"}})
+    assert lifecycle_state_file(c) == "/var/lib/cam/state"
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:
@@ -286,5 +402,69 @@ def _main():
     print(f"{len(tests)} passed")
 
 
+
+def test_playback_block_defaults_and_parse():
+    c = parse_config({})
+    assert c.playback.initial_state == "playing" and c.playback.on_finish == "auto"
+    assert c.playback.start_at_unix_s is None and c.playback.epoch_unix_ns is None
+    c = parse_config({"playback": {"initial_state": "Paused", "start_at_unix_s": "1757200000.5",
+                                   "epoch_unix_ns": "1757199000000000000", "from_s": 2, "to_s": 30,
+                                   "on_finish": "hold"}})
+    assert c.playback.initial_state == "paused" and c.playback.start_at_unix_s == 1757200000.5
+    assert c.playback.epoch_unix_ns == 1757199000000000000 and (c.playback.from_s, c.playback.to_s) == (2.0, 30.0)
+    assert c.playback.on_finish == "hold"
+
+
+def test_playback_block_is_validated():
+    for bad, needle in (({"initial_state": "stopped"}, "initial_state"),
+                        ({"on_finish": "loop"}, "on_finish"),
+                        ({"from_s": -1}, "from_s"),
+                        ({"from_s": 5, "to_s": 5}, "to_s")):
+        try:
+            parse_config({"playback": bad})
+        except ValueError as e:
+            assert needle in str(e)
+        else:
+            raise AssertionError(f"{bad} must be refused")
+
+
+def test_hold_on_finish_follows_the_control_plane_unless_told():
+    assert hold_on_finish(parse_config({})) is True                                   # control on by default
+    assert hold_on_finish(parse_config({"control": {"enabled": False}})) is False     # nothing could restart it
+    assert hold_on_finish(parse_config({"control": {"enabled": False}, "playback": {"on_finish": "hold"}})) is True
+    assert hold_on_finish(parse_config({"playback": {"on_finish": "exit"}})) is False
+
+
+# ---- shm input block --------------------------------------------------------------------
+def test_shm_config_defaults_and_parse():
+    c = parse_config({})
+    assert (c.shm.socket_path, c.shm.framing, c.shm.pixel_format) == ("/tmp/cam/in", "raw", "RGB")
+    assert (c.shm.width, c.shm.height, c.shm.frame_rate) == (640, 480, 10.0) and c.shm.reconnect is True
+    c = parse_config({"camera": {"type": "shm", "frame_rate": 15, "reconnect": False},
+                      "shm": {"socket_path": "/tmp/cam/preview", "framing": "Header", "pixel_format": "GRAY8",
+                              "width": 1024, "height": 384}})
+    assert c.camera.type == "shm" and c.shm.framing == "header" and c.shm.socket_path == "/tmp/cam/preview"
+    assert (c.shm.pixel_format, c.shm.width, c.shm.height) == ("GRAY8", 1024, 384)
+    assert c.shm.frame_rate == 15.0 and c.shm.reconnect is False      # the general camera: block overlays
+
+
+def test_shm_config_is_validated():
+    for bad, needle in (({"framing": "framed"}, "shm.framing"), ({"socket_path": ""}, "shm.socket_path")):
+        try:
+            parse_config({"camera": {"type": "shm"}, "shm": bad})
+        except ValueError as e:
+            assert needle in str(e)
+        else:
+            raise AssertionError(f"{bad} must be refused")
+
+
 if __name__ == "__main__":
     _main()
+
+
+def test_shm_framing_unixfd_is_accepted_and_normalized():
+    c = parse_config({"camera": {"type": "shm"},
+                      "shm": {"socket_path": "/tmp/cam/in", "framing": "UnixFD", "pixel_format": "BayerRG8",
+                              "width": 320, "height": 240}})
+    assert c.shm.framing == "unixfd"
+    assert (c.shm.pixel_format, c.shm.width, c.shm.height) == ("BayerRG8", 320, 240)

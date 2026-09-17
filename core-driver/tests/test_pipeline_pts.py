@@ -31,21 +31,13 @@ FPS = 30
 INTERVAL = 1_000_000_000 // FPS
 
 
-class _FakeSidecar:
-    def __init__(self):
-        self.header = None
-
-    def write_header(self, h):
-        self.header = h
-
-
 def _pipe(interval_ns=INTERVAL):
-    """A CapturePipeline with only the collaborators _pts_for/_write_header touch."""
+    """A CapturePipeline with only the collaborators _pts_for touches."""
     source = SimpleNamespace(
         geometry=lambda: (0, 0, 8, 8), pixel_format=lambda: "Mono8",
         active_timestamp_source="ptp_chunk", ptp_locked=True, tick_frequency_hz=1_000_000_000)
     cfg = SimpleNamespace(recording=SimpleNamespace(bayer_pattern=None))
-    p = CapturePipeline(cfg, source, _FakeSidecar())
+    p = CapturePipeline(cfg, source)
     p._frame_interval_ns = interval_ns
     return p
 
@@ -55,11 +47,12 @@ def _stamp(fid, ts):
                       system_ns=ts, camera_ns=ts, chunk_ns=ts)
 
 
-def test_first_frame_defines_the_base_and_writes_the_header():
+def test_first_frame_defines_the_base():
+    # The sidecar header is written by the recording SESSION on its first recorded frame
+    # (test_session.py); _pts_for only owns the time base.
     p = _pipe()
     assert p._pts_for(_stamp(1, 5_000)) == 0
     assert p._base_ts == 5_000
-    assert p.sidecar.header is not None and p.sidecar.header.base_timestamp_ns == 5_000
 
 
 def test_steady_stream_is_the_plain_difference():
@@ -133,7 +126,6 @@ def test_a_real_outage_stays_visible():
 def test_negative_pts_is_clamped():
     p = _pipe()
     p._base_ts = 10_000_000_000          # pre-set a base ahead of the first stamp
-    p.sidecar.header = object()
     assert p._pts_for(_stamp(0, 1_000)) == 0
 
 
