@@ -34,7 +34,9 @@ docker run --rm --network none -v "$PWD/core-driver:/app" "$IMG" bash -c '
   sleep 4
   grep -q "lifecycle: booting inactive (config)" /tmp/core.log \
     || { echo "FAIL: did not boot inactive"; tail -20 /tmp/core.log; exit 1; }
-  python3 tools/shm_probe.py --count 5 --timeout 5
+  # PTS starts at the first captured frame, not at process launch. Consume two seconds
+  # of this 25 fps source before activating, even if camera startup was delayed in CI.
+  python3 tools/shm_probe.py --count 51 --timeout 15
   [ -z "$(ls "$R"/fake-*.mkv 2>/dev/null)" ] || { echo "FAIL: recorded while inactive"; ls -la "$R"; exit 1; }
   [ ! -e /tmp/cam/lifecycle.state ] || { echo "FAIL: state remembered before any transition"; exit 1; }
   echo "inactive: consumers fed, no recording, no remembered state"
@@ -58,9 +60,9 @@ d = json.load(open(sys.argv[1]))
 s = d["session"]
 assert d["drops"]["frames"] > 0, d
 assert s["frames_recorded"] > 0 and s["truncated"] is False and s["error"] is None, s
-assert s["first_pts_ns"] > 1_000_000_000, "opened seconds in: the first PTS is the PROCESS timeline, not 0"
+assert s["first_pts_ns"] > 1_000_000_000, f"expected >1s of source timeline before activation: {s}"
 assert d["session_index"] == 1 and d["first_pts_ns"] == s["first_pts_ns"], d
-print("session 1 JSON attests:", {k: s[k] for k in ("frames_recorded", "segments", "truncated")})
+print("session 1 JSON attests:", {k: s[k] for k in ("frames_recorded", "segments", "truncated", "first_pts_ns")})
 EOF
   grep -q "recording session 1 finalized" /tmp/core.log || { echo "FAIL: no finalize log for session 1"; exit 1; }
 
