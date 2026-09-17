@@ -18,11 +18,12 @@ first_pts_ns and keeps the process base so the CSV<->mkv join stays exact. RULE:
 to a session pipeline must be sync=false.
 
 Threading: the feeders run on the SOURCE threads and read the pipeline's current session once per
-frame; push() and begin_close() share one lock so a frame racing the EOS is skipped (not a drop) and
-never lands after end-of-stream. The bus watch runs on the GLib main loop; a session ERROR is
-reported through on_error on the NEXT loop iteration (never from inside the bus dispatch, so the
-close path may remove the watch), ends the session, and leaves the process running -- a recorder
-that dies must not take the transport with it.
+frame. Closing rejects new pushes and wakes a blocked replay push with appsrc EOS BEFORE waiting
+for the feed lock; the lock then joins any in-flight push and its sidecar accounting. A frame
+cancelled by EOS is skipped (not a drop), and queued frames still drain. The bus watch runs on the
+GLib main loop; a session ERROR is reported through on_error on the NEXT loop iteration (never
+from inside the bus dispatch, so the close path may remove the watch), ends the session, and
+leaves the process running -- a recorder that dies must not take the transport with it.
 """
 from __future__ import annotations
 
@@ -98,6 +99,8 @@ class RecordingSession:
         self._open_fragment: Optional[str] = None  # the .mkv splitmuxsink is writing RIGHT NOW (None between)
         self._parse_launch = parse_launch or Gst.parse_launch
         self.lock = threading.Lock()
+        self._close_lock = threading.Lock()       # serializes close calls without locking out EOS
+        self._closing = False
         self.closed = False
         self._await_key = bool(encoded)           # stream-copy: wait for a sync point before muxing
         self._caps_applied = False
@@ -140,10 +143,9 @@ class RecordingSession:
         log.info("recording session %d open -> %s-*.mkv", self.index, self.path_base)
 
     def push(self, payload: FramePayload, pts: int, stamp, caps_str: Optional[str] = None) -> PushResult:
-        """Feed one frame (source thread). The whole check-and-push runs under the session lock so a
-        frame can never land after begin_close() emitted end-of-stream."""
+        """Feed one frame (source thread), keeping accepted frames and sidecar rows in sync."""
         with self.lock:
-            if self.closed or self.error is not None or self._appsrc is None:
+            if self._closing or self.closed or self.error is not None or self._appsrc is None:
                 return PushResult.SKIPPED
             if self._await_key:
                 if self._caps_kind is None and caps_str:
@@ -177,22 +179,35 @@ class RecordingSession:
                     # failure must not escape and kill acquisition/preview/transport.
                     self._record_error(f"sidecar header write failed: {exc}")
                     return PushResult.DROPPED
-            if self._appsrc.emit("push-buffer", _wrap_buffer(payload, pts, stamp.frame_id)) != Gst.FlowReturn.OK:
+            flow = self._appsrc.emit("push-buffer", _wrap_buffer(payload, pts, stamp.frame_id))
+            if flow != Gst.FlowReturn.OK:
+                if self._closing and flow == Gst.FlowReturn.EOS:
+                    return PushResult.SKIPPED   # close cancelled a blocked replay push, no row
                 return PushResult.DROPPED
             self.frames += 1
             self.sidecar.add(stamp, pts)
             return PushResult.OK
 
     def begin_close(self) -> None:
-        """Stop accepting frames and send EOS down the session pipeline (non-blocking)."""
-        with self.lock:
+        """Stop accepting frames, cancel a blocked push, then join its accounting before draining."""
+        with self._close_lock:
             if self.closed:
                 return
-            self.closed = True
-            # GStreamer 1.20 splitmuxsink can assert on EOS before its first GOP. There is
-            # nothing to drain when no frame was accepted (also while waiting for an IDR).
-            if self._appsrc is not None and self.frames:
-                self._appsrc.emit("end-of-stream")
+            self._closing = True
+            appsrc = self._appsrc
+            # appsrc EOS wakes push-buffer's block=true queue wait without discarding queued
+            # buffers. Waiting for self.lock first would deadlock against that push. Keep the
+            # live block=false path serialized as before. With no accepted frames the queue
+            # cannot be full, so it is safe to join the first push before deciding to send EOS.
+            eos_sent = appsrc is not None and self.frames > 0 and _blocking(appsrc)
+            if eos_sent:
+                appsrc.emit("end-of-stream")
+            with self.lock:
+                self.closed = True
+                # GStreamer 1.20 splitmuxsink can assert on EOS before its first GOP. There is
+                # nothing to drain when no frame was accepted (also while waiting for an IDR).
+                if appsrc is not None and self.frames and not eos_sent:
+                    appsrc.emit("end-of-stream")
 
     def finish_close(self, timeout_s: float, drops_now: dict) -> dict:
         """Wait (bounded) for the EOS to drain so splitmuxsink finalizes the open segment, set NULL --

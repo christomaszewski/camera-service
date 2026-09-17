@@ -389,8 +389,8 @@ def test_request_stop_finalizes_the_session_first_then_the_main_pipeline():
         p.activate()
         del events[:]
         p.request_stop()
-        assert events == ["source-stop", "begin:1", "eos:camsrc", "finish:1"], \
-            "recorder EOS first (its drain overlaps the main one), main EOS, then the bounded wait"
+        assert events == ["begin:1", "source-stop", "eos:camsrc", "finish:1"], \
+            "recorder EOS releases blocked pushes before joining the source, then main EOS and drain"
         assert p._session is None and p._stopping and p.get_state()["state"] == INACTIVE
         assert created[0].finish_calls[0][0] == SESSION_DRAIN_S
         assert p.get_state()["last_result"]["ok"]
@@ -403,7 +403,7 @@ def test_shutdown_closes_a_session_the_error_path_left_open():
         p.activate()
         del events[:]
         p.shutdown()                    # the main-bus ERROR path: loop quit without request_stop
-        assert events[:4] == ["source-stop", "begin:1", "finish:1", "main:null"]
+        assert events[:4] == ["begin:1", "source-stop", "finish:1", "main:null"]
         assert "source-close" in events and p._session is None
 
 

@@ -11,6 +11,8 @@ Run: python3 core-driver/tests/test_session.py
 import os
 import sys
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -442,6 +444,57 @@ def test_zero_frame_session_still_attests_itself():
         info = s.finish_close(1.0, DROPS0)
         assert sc.headers == 0 and sc.extra["session"]["frames_recorded"] == 0 and info["frames"] == 0
         assert sc.summary["frames"] == 0
+
+
+def test_empty_blocking_session_never_sends_eos_even_while_waiting_for_an_idr():
+    for encoded in (False, True):
+        with tempfile.TemporaryDirectory() as tmp:
+            s, appsrc, bus, pipe, sc, order = _session(tmp, block=True, encoded=encoded)
+            s.start(DROPS0)
+            if encoded:
+                assert s.push(P_FRAME, 100, _stamp(), H264_BS) is PushResult.SKIPPED
+            s.begin_close()
+            s.begin_close()
+            info = s.finish_close(1, DROPS0)
+            assert appsrc.eos == 0 and bus.pop_calls == [], "empty splitmuxsink must not receive EOS"
+            assert info["frames"] == 0 and not info["truncated"]
+
+
+def test_close_waits_for_the_first_push_and_its_row_before_sending_eos():
+    with tempfile.TemporaryDirectory() as tmp:
+        s, appsrc, bus, pipe, sc, order = _session(tmp, block=True)
+        s.start(DROPS0)
+        entered, release = threading.Event(), threading.Event()
+        emit = appsrc.emit
+
+        def push_in_progress(signal, *args):
+            if signal == "push-buffer":
+                entered.set()
+                release.wait(3)
+            return emit(signal, *args)
+
+        appsrc.emit = push_in_progress
+        results = []
+        feeder = threading.Thread(target=lambda: results.append(s.push(b"a" * 8, 100, _stamp())))
+        closer = threading.Thread(target=s.begin_close)
+        feeder.start()
+        try:
+            assert entered.wait(2)
+            closer.start()
+            deadline = time.monotonic() + 2
+            while not s._closing and time.monotonic() < deadline:
+                time.sleep(.001)
+            assert s._closing and not s.closed and appsrc.eos == 0
+        finally:
+            release.set()
+            feeder.join(3)
+            if closer.ident is not None:
+                closer.join(3)
+        assert not feeder.is_alive() and not closer.is_alive()
+        assert results == [PushResult.OK] and s.frames == 1 and len(sc.rows) == 1
+        assert appsrc.eos == 1 and order.index("push") < order.index("eos")
+        s.begin_close()
+        assert appsrc.eos == 1
 
 
 def test_describe_is_plain_scalars():

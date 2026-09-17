@@ -1048,7 +1048,6 @@ class CapturePipeline:
         self._stopping = True
         self._stop_event.set()   # wake the reconnect backoff, if one is in progress
         log.info("stop requested: stopping acquisition + finalizing the recording")
-        self.source.stop()
         # Armed BEFORE the bounded, blocking session drain below, so the worst case is the larger of
         # the two budgets rather than their sum.
         GLib.timeout_add_seconds(5, self._force_quit)
@@ -1057,6 +1056,9 @@ class CapturePipeline:
             self._session = None
             self._lifecycle = DEACTIVATING
             sess.begin_close()   # recorder EOS first, so its drain overlaps the main pipeline's
+        # Replay's reader NULL transition joins its feed callback. Cancel a blocked recorder
+        # push before waiting for that callback, while leaving accepted frames queued to drain.
+        self.source.stop()
         for src in (self.appsrc, self.transport_src, self.unixfd_src):
             if src is not None:
                 src.emit("end-of-stream")
@@ -1300,15 +1302,18 @@ class CapturePipeline:
 
     def shutdown(self) -> None:
         log.info("shutting down (pushed %d frames)", self._n_pushed)
-        if not self._stopping:   # error/EOS path that didn't go through request_stop
-            self._stopping = True
-            self.source.stop()
+        stop_source = not self._stopping   # error/EOS path that didn't go through request_stop
+        self._stopping = True
         self._stop_event.set()   # wake a reconnect backoff so the worker can exit and be joined
         sess = self._session
         if sess is not None:
             # Only reachable when the MAIN pipeline errored (its bus handler quits the loop without
             # request_stop): a transport-sink failure must not truncate a healthy recording.
             self._session = None
+            sess.begin_close()   # wake a blocked replay push before source.stop joins the feeder
+        if stop_source:
+            self.source.stop()
+        if sess is not None:
             self._last_result = self._close_session_sync(sess, wait_eos=True)
             self._lifecycle = INACTIVE
         if self.pipeline:
