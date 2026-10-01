@@ -28,6 +28,16 @@ usb:
   height: 512
   sof_timestamps: true     # v4l2 driver per-frame timestamp (closer to capture than host arrival;
   #                          sanity-checked -- falls back to arrival if the device reports zeros)
+  # The camera's COMMAND channel -> camera health (FPA temperature, FFC state, frame counter, serial;
+  # docs/HEALTH.md). A FLIR Boson on USB is ALSO a serial port beside the video; the two are independent,
+  # so this polls while the video streams. cam-up maps the device (docker-compose.control.yml -- see its
+  # ModemManager note). Find it with `ls -l /dev/serial/by-id/`.
+  # control_protocol: flir-boson
+  # control_device: /dev/serial/by-id/usb-FLIR_Boson_<sn>-if00    # <-- your Boson's by-id path
+
+# health:                  # on by default; the Boson adds `camera` once control_* is set. Thresholds are
+#   limits:                #   per camera model -- none ship. e.g.:
+#     temp.sensor_c: {warn_above: 60, error_above: 70}
 
 recording:
   enabled: true

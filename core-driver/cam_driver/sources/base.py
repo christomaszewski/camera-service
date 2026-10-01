@@ -138,6 +138,11 @@ class Source(ABC):
         its origin. A live camera has nothing to add."""
         return {}
 
+    def genicam(self):
+        """The GenICam handle the health provider polls (camera.GigECamera: .device, .stream,
+        .hardware_id, .control_lost) for an Aravis-backed source, or None. docs/HEALTH.md."""
+        return None
+
     @property
     def delivered_frame_rate(self) -> Optional[float]:
         """The fps this source will actually deliver, when it knows better than the config

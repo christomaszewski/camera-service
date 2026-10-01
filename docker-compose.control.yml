@@ -1,0 +1,19 @@
+# Camera COMMAND-channel overlay: maps usb.control_device (e.g. the FLIR Boson's serial port,
+# /dev/serial/by-id/usb-FLIR_Boson_<sn>-if00) into the core container, beside the video device of
+# docker-compose.usb.yml. cam-up applies it whenever the sensor config names a control_device on a real
+# usb source; sensor_env exports it as CAM_CONTROL_DEVICE. The core's `boson` health provider polls it
+# (docs/HEALTH.md).
+#
+# Same rules as the usb overlay: the path is SELF-MAPPED (host:container identical, no bake-time
+# readlink); Docker resolves the host symlink and mknods it at `up`, and errors if it is absent -- the
+# runtime existence check. Same HOTPLUG CAVEAT: the node is created once at container start, so after an
+# unplug/replug the core's health reports the camera STALE until the container restarts.
+#
+# Host prep: if ModemManager runs on the host it probes every new ttyACM port, which can disrupt the
+# Boson's command channel. Tell it to leave the Boson (USB 09cb:4007) alone:
+#   echo 'ATTRS{idVendor}=="09cb", ATTRS{idProduct}=="4007", ENV{ID_MM_DEVICE_IGNORE}="1"' \
+#     | sudo tee /etc/udev/rules.d/99-flir-boson.rules && sudo udevadm control --reload
+services:
+  core-driver:
+    devices:
+      - "${CAM_CONTROL_DEVICE}:${CAM_CONTROL_DEVICE}"

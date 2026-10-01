@@ -12,6 +12,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from cam_driver.health import health_key
 from cam_driver.playback import PlaybackState
 from cam_driver.control_zenoh import (ZenohControl, encode_json, lifecycle_key,  # noqa: E402
                                       parse_change_state, zenoh_connect_endpoints, parse_playback_request, playback_key)
@@ -427,6 +428,83 @@ def test_close_withdraws_the_playback_presence_too():
     assert [t.key for t in s.tokens] == [KEY, PKEY] and all(t.undeclared == 1 for t in s.tokens)
     assert s.publishers[PKEY + "/state"].undeclared == 1
     assert s.closed == 1 and ctl._playback_token is None and ctl._playback_publisher is None
+
+
+# ---- health (docs/HEALTH.md) ---------------------------------------------------
+HKEY = health_key("veh", "cam_test")
+
+
+class _Health:
+    """The HealthMonitor surface the adapter uses."""
+    instance, service, interval_s = "cam_test", "camera-service", 1.0
+
+    def __init__(self):
+        self.latest = None
+        self.observers = []
+
+    def add_observer(self, fn):
+        self.observers.append(fn)
+
+    def emit(self, snap):
+        self.latest = snap
+        for fn in self.observers:
+            fn(snap)
+
+
+def _control_with_health():
+    lc, health, sessions = _Lifecycle(), _Health(), []
+
+    def factory(endpoints):
+        s = _Session(endpoints)
+        sessions.append(s)
+        return s
+
+    ctl = ZenohControl(lc, KEY, connect=("tcp/localhost:7447",), enabled=True,
+                       dispatch=lambda fn, *a: None, session_factory=factory,
+                       health=health, health_key=HKEY)
+    return ctl, health, sessions
+
+
+def test_health_keys_are_declared_queried_and_published():
+    ctl, health, sessions = _control_with_health()
+    health.emit({"schema_version": 1, "status": [], "early": True})   # before the session: nowhere to go
+    assert ctl.advertise()
+    s = sessions[0]
+    assert set(s.queryables) == {KEY, KEY + "/change_state", HKEY}
+    assert [t.key for t in s.tokens] == [KEY, HKEY], "the health token LAST, after its queryable + publisher"
+    pub = s.publishers[HKEY + "/state"]
+    assert pub.puts == [], "nothing is replayed at declare time; the next poll publishes"
+    snap = {"schema_version": 1, "service": "camera-service", "instance": "cam_test",
+            "stamp_unix_ns": 5, "level": 1, "status": [{"level": 1, "name": "cam_test: camera",
+                                                          "message": "hot", "hardware_id": "", "values": {}}]}
+    health.emit(snap)
+    assert pub.puts == [snap]
+    q = _Query("fleet/*/svc/*/health")
+    s.queryables[HKEY][0](q)
+    assert q.replies == [(HKEY, snap)], \
+        "the latest snapshot, on the zenoh thread, under the CONCRETE key even for a wildcard query"
+
+
+def test_health_query_before_the_first_poll_is_an_empty_well_formed_snapshot():
+    ctl, health, sessions = _control_with_health()
+    ctl.advertise()
+    q = _Query(HKEY)
+    sessions[0].queryables[HKEY][0](q)
+    r = q.replies[0][1]
+    assert r["status"] == [] and r["level"] == 0 and r["instance"] == "cam_test" and r["schema_version"] == 1
+
+
+def test_no_health_keys_without_a_monitor_and_close_withdraws_them():
+    ctl, lc, sessions, dispatched, fail = _control()
+    ctl.advertise()
+    assert HKEY not in sessions[0].queryables and HKEY + "/state" not in sessions[0].publishers
+    ctl, health, sessions = _control_with_health()
+    ctl.advertise()
+    s = sessions[0]
+    ctl.close()
+    assert all(t.undeclared == 1 for t in s.tokens) and s.publishers[HKEY + "/state"].undeclared == 1
+    health.emit({"status": []})   # a poll racing the close must not raise
+    assert s.publishers[HKEY + "/state"].puts == []
 
 if __name__ == "__main__":
     _main()

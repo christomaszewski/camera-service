@@ -124,6 +124,9 @@ class GigeSource(Source):
     def pixel_format(self) -> str:
         return self.camera.pixel_format_string()
 
+    def genicam(self):
+        return self.camera
+
     @property
     def tick_frequency_hz(self) -> int:
         return self.camera.tick_frequency_hz

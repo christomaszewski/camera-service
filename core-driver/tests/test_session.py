@@ -325,6 +325,24 @@ def test_finish_close_order_and_attestation():
         assert sc.extra["session"]["first_pts_ns"] == 100 and sc.extra["session"]["truncated"] is False
 
 
+def test_finish_close_writes_the_health_summary_beside_the_attestation():
+    with tempfile.TemporaryDirectory() as tmp:
+        s, appsrc, bus, pipe, sc, order = _session(tmp)
+        s.start(DROPS0)
+        s.push(b"a" * 8, 100, _stamp(1))
+        s.begin_close()
+        s.finish_close(5.0, DROPS1)
+        assert "health" not in sc.extra, "no health monitor -> no health key"
+    with tempfile.TemporaryDirectory() as tmp:
+        s, appsrc, bus, pipe, sc, order = _session(tmp)
+        s.start(DROPS0)
+        s.health_summary = {"schema_version": 1, "samples": 3, "status": {}}
+        s.begin_close()
+        s.finish_close(5.0, DROPS1)
+        assert sc.extra["health"] == {"schema_version": 1, "samples": 3, "status": {}}
+        assert "session" in sc.extra, "health rides beside the session attestation, never instead of it"
+
+
 def test_finish_close_timeout_is_attested_as_truncated_and_still_nulls():
     with tempfile.TemporaryDirectory() as tmp:
         s, appsrc, bus, pipe, sc, order = _session(tmp, pop_msg=None)

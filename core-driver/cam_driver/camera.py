@@ -36,6 +36,7 @@ class GigECamera:
         self.ptp_locked: bool = False
         self.chunks_enabled: bool = False
         self.control_lost: bool = False   # set by the device "control-lost" signal
+        self.hardware_id: str = ""        # "<vendor> <model> sn <serial>", set at open()
 
     # ---- feature helpers ---------------------------------------------------
     def _has(self, feature: str) -> bool:
@@ -81,9 +82,11 @@ class GigECamera:
             self.device.connect("control-lost", self._on_control_lost)
         except (GLib.Error, TypeError) as e:
             log.debug("control-lost signal unavailable: %s", e)
-        log.info("opened %s %s (sn %s)",
-                 self.camera.get_vendor_name(), self.camera.get_model_name(),
-                 self.camera.get_device_serial_number())
+        vendor, model, serial = (self.camera.get_vendor_name(), self.camera.get_model_name(),
+                                 self.camera.get_device_serial_number())
+        log.info("opened %s %s (sn %s)", vendor, model, serial)
+        # The health snapshot's hardware_id (docs/HEALTH.md): read once here, not per poll.
+        self.hardware_id = " ".join(str(p) for p in (vendor, model) if p) + (f" sn {serial}" if serial else "")
         # Diagnostic breadcrumb for stuck-controller hunts: after an UNCLEAN exit (SIGKILL -- no
         # control-privilege release) the camera refuses new controllers for exactly this window.
         # If a "pingable but won't connect" incident outlives it, the owner is a LIVE process

@@ -85,6 +85,7 @@ UTF-8 **JSON**, `application/json`. The core is generic; a service adds its own 
   "boot_reason": "config",         // how the boot state was chosen: config | derived | resumed
   "recording_enabled": true,       // camera-service: can it ever be activated
   "health": {                      // camera-service: process-lifetime link/drop counters + stall flag
+                                   //   (the full, ROS-diagnostics-shaped health is its own key: HEALTH.md)
     "frames": 12345, "source_gaps": 0, "frames_missing": 0, "enqueue_failures": 0,
     "publish_drops": 0, "pts_rebases": 0, "stalled": false, "reconnecting": false },
   "recording": {                   // camera-service, present while active: the open session

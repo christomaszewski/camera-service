@@ -32,7 +32,7 @@ v4l2 SOF on USB, RTCP→NTP on RTSP — with a graceful provenance-tracked fallb
 records a **lossless, temporally-compressed** video file, and fans the stream out to consumer
 "plugins" (ROS2, ROS1, WebRTC, MQTT, ...).
 
-> **Design & decisions** → [docs/DESIGN.md](docs/DESIGN.md) · **Status & roadmap** → [docs/ROADMAP.md](docs/ROADMAP.md) · **Lifecycle control (standby/active over Zenoh)** → [docs/LIFECYCLE.md](docs/LIFECYCLE.md) · **PTP experiment** → [docs/ptp-timestamp-experiment.md](docs/ptp-timestamp-experiment.md) · **JetPack 7 (Orin) bring-up** → [docs/jetpack7-bringup.md](docs/jetpack7-bringup.md)
+> **Design & decisions** → [docs/DESIGN.md](docs/DESIGN.md) · **Status & roadmap** → [docs/ROADMAP.md](docs/ROADMAP.md) · **Lifecycle control (standby/active over Zenoh)** → [docs/LIFECYCLE.md](docs/LIFECYCLE.md) · **Health (ROS-diagnostics-shaped, over Zenoh)** → [docs/HEALTH.md](docs/HEALTH.md) · **PTP experiment** → [docs/ptp-timestamp-experiment.md](docs/ptp-timestamp-experiment.md) · **JetPack 7 (Orin) bring-up** → [docs/jetpack7-bringup.md](docs/jetpack7-bringup.md)
 
 ## Why it's built this way
 
@@ -377,6 +377,19 @@ or no router means signals only, never a stopped camera.
 # from any host with the python binding, e.g. the dev container: `python3 -c ...` or the probe
 python3 core-driver/tools/lifecycle_probe.py --connect tcp/<vehicle>:7447 --steps wait-put get activate wait-state:active
 ```
+
+### Health
+
+Every core publishes a health snapshot shaped like ROS 2 `diagnostic_msgs/DiagnosticArray`
+([docs/HEALTH.md](docs/HEALTH.md)) on the same zenoh session: `fleet/<VEHICLE_ID>/svc/<name>/health`
+(token + queryable = the latest snapshot) and `…/health/state` (every second). It carries `stream`
+(fps, frame age, drops, reconnecting) and `recording` (state, errors, free disk) for every source,
+plus `camera` for a GigE camera (temperatures, uptime, supply, link speed, PTP state — whatever
+GenICam features the camera has) or a FLIR Boson (FPA temperature, FFC state — over its serial
+command channel, `usb.control_protocol: flir-boson` + `usb.control_device`). Levels are ROS's OK/WARN/ERROR/STALE; thresholds are
+`health.limits` in the sensor YAML. The same snapshot is written to `/tmp/cam/health.json` on the
+socket volume, and each recording session's JSON gets a `health` summary (worst level, min/max per
+value) of the conditions it was recorded in.
 
 ### Playback control (pcap / replay sources)
 

@@ -39,7 +39,7 @@ _BAYER = {"RG": "rggb", "GR": "grbg", "GB": "gbrg", "BG": "bggr"}
 _ENV_KEY = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 _RESERVED_KEYS = {
     "COMPOSE_PROJECT_NAME", "COMPOSE_PROFILES", "CAM_INSTANCE", "CAM_SOCK_VOLUME",
-    "CAM_SOURCE_TYPE", "CAM_DEVICE", "CAM_CONFIG", "CAM_NETWORK", "CAM_PLATFORM",
+    "CAM_SOURCE_TYPE", "CAM_DEVICE", "CAM_CONTROL_DEVICE", "CAM_CONFIG", "CAM_NETWORK", "CAM_PLATFORM",
     "CAM_INPUT_SRC", "CAM_INPUT_DST", "CAM_INPUT_ROOT", "CAM_INPUT_DIR",   # the playback input
     #                              bind -- a YAML param must never be able to mount a host path
     "PATH", "HOME", "SHELL", "IFS", "TMPDIR", "PYTHONPATH", "LD_LIBRARY_PATH", "LD_PRELOAD",
@@ -241,6 +241,12 @@ def main() -> int:
     # CAM_DEVICE to apply docker-compose.usb.yml (gige/rtsp need no device, so it's absent for them).
     if stype == "usb" and not src.get("fake", False):
         env["CAM_DEVICE"] = str(src.get("device", "/dev/video0"))
+        # ...and its COMMAND channel when the config names one (usb.control_device, e.g. the FLIR
+        # Boson's serial port): cam-up reads CAM_CONTROL_DEVICE to apply docker-compose.control.yml.
+        # Same self-map, same no-probe rule as CAM_DEVICE.
+        ctl = str(src.get("control_device") or "").strip()
+        if ctl:
+            env["CAM_CONTROL_DEVICE"] = ctl
     # A playback source (pcap/replay) reads its data from the host -- cam-up reads CAM_INPUT_SRC to
     # apply docker-compose.input.yml. Two shapes, matching config.resolve_input_path:
     #   ABSOLUTE path in the config -> bind that exact path to ITSELF (host == container), so the
