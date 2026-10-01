@@ -8,6 +8,8 @@ Usage: lifecycle_probe.py [--listen tcp/127.0.0.1:7447] [--connect tcp/host:7447
 Steps, run in order (the first liveliness PUT picks the key under test):
   wait-put            a liveliness token appears (presence)
   get[:STATE]         fetch the descriptor via the queryable; validate; optionally assert its state
+  snapshot            the fleet snapshot: ONE wildcard get (fleet/*/svc/*/lifecycle); every reply must
+                      arrive under its instance's CONCRETE key, the key under test among them
   activate            change_state {"transition": "activate"} -> expect ok
   deactivate          change_state {"transition": "deactivate"} -> expect ok
   bad                 change_state {"transition": "reboot"} -> expect a refusal (ok=false), not an error
@@ -22,6 +24,7 @@ Emits flushed, line-oriented markers for a test harness to grep:
   READY
   EVENT PUT <key>            EVENT DELETE <key>
   DESCRIPTOR <key> state=<s> ok    DESCRIPTOR <key> bad <reason>
+  SNAPSHOT <reply key> state=<s> ok   SNAPSHOT <reply key> bad <reason>
   REPLY <transition> ok=<True|False> state=<s> [error=<...>]
   STATE <key> <state>        (from the /state publisher)
   STEP_OK <step>             STEP_FAIL <step> <reason>
@@ -38,6 +41,7 @@ import time
 import zenoh
 
 REQUIRED = {"schema_version": int, "service": str, "instance": str, "state": str, "transitions": list}
+FLEET_PATTERN = "fleet/*/svc/*/lifecycle"
 
 _T0 = time.monotonic()
 
@@ -114,12 +118,17 @@ class Probe:
         return True, "ok"
 
     def _get(self, key, payload=None):
+        """The first reply's payload -- None for no reply, an error reply, or a reply that did not
+        arrive under the key that was asked (replies carry the producer's concrete key)."""
         kw = {"timeout": 20.0}
         if payload is not None:
             kw["payload"] = payload
             kw["encoding"] = zenoh.Encoding.APPLICATION_JSON
         for reply in self.session.get(key, **kw):
             if reply.ok:
+                if str(reply.ok.key_expr) != key:
+                    emit("REPLY_KEY", "bad", str(reply.ok.key_expr), "!=", key)
+                    return None
                 pb = reply.ok.payload
                 return pb.to_bytes() if hasattr(pb, "to_bytes") else bytes(pb)
             return None
@@ -144,6 +153,26 @@ class Probe:
         emit("DESCRIPTOR", self.key, "state={}".format(d["state"]), "ok")
         if want_state and d["state"] != want_state:
             return False, "state {} != {}".format(d["state"], want_state)
+        return True, "ok"
+
+    def snapshot(self):
+        seen = set()
+        for reply in self.session.get(FLEET_PATTERN, timeout=20.0):
+            if not reply.ok:
+                continue
+            key = str(reply.ok.key_expr)
+            pb = reply.ok.payload
+            if "*" in key:
+                emit("SNAPSHOT", key, "bad", "wildcard-reply-key")
+                return False, "reply under the wildcard key {}".format(key)
+            d, reason = validate(key, pb.to_bytes() if hasattr(pb, "to_bytes") else bytes(pb))
+            if d is None:
+                emit("SNAPSHOT", key, "bad", reason)
+                return False, reason
+            emit("SNAPSHOT", key, "state={}".format(d["state"]), "ok")
+            seen.add(key)
+        if self.key not in seen:
+            return False, "no snapshot reply under {}".format(self.key)
         return True, "ok"
 
     def change(self, transition, expect_ok=True):
@@ -180,6 +209,8 @@ def run_steps(probe, steps):
             ok, why = probe.wait_delete()
         elif name == "get":
             ok, why = probe.get(arg or None)
+        elif name == "snapshot":
+            ok, why = probe.snapshot()
         elif name in ("activate", "deactivate"):
             ok, why = probe.change(name)
         elif name == "bad":

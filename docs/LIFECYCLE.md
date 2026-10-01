@@ -35,7 +35,9 @@ fleet/<vehicle_id>/svc/<instance>/lifecycle/state          publisher: the descri
   sensor name (`CAM_INSTANCE`), the same segment its media key uses (`fleet/<vehicle_id>/media/<instance>`,
   [DISCOVERY.md](DISCOVERY.md)).
 - A consumer watches `fleet/*/svc/*/lifecycle` (one vehicle: `fleet/<vehicle_id>/svc/*/lifecycle`).
-  A **fleet snapshot is one query**: `get("fleet/*/svc/*/lifecycle")`.
+  A **fleet snapshot is one query**: `get("fleet/*/svc/*/lifecycle")`, one reply per instance.
+- Every queryable replies **on its own concrete key** — never on the query's key expression — so the
+  replies to a wildcard query are told apart by `reply.key_expr`, with no need to open the payload.
 
 | Zenoh primitive | Key | Role | Consumer uses |
 |---|---|---|---|
@@ -215,7 +217,12 @@ Replay discovery requires a JSON/CSV pair, so the settings file does not become 
 ### Discovery and transitions
 
 ```
-# fleet snapshot (+ presence)
+# fleet snapshot in ONE query: each instance replies under its own concrete key
+# (fleet/<vehicle_id>/svc/<instance>/lifecycle)
+for reply in session.get("fleet/*/svc/*/lifecycle"):
+    key, d = str(reply.ok.key_expr), json.loads(reply.ok.payload.to_bytes())
+
+# or presence first, then one descriptor per token
 for token in session.liveliness().get("fleet/*/svc/*/lifecycle"):
     d = json.loads(session.get(token.key_expr).next().ok.payload.to_bytes())
 
@@ -246,6 +253,9 @@ for reply in session.get(key + "/change_state", payload=b'{"transition":"activat
   scouting (`"ROS setting"`), so it is reached only through the explicit endpoint — which is why the
   default endpoint stays listed. Any order of start-up works: a router or the dashboard's backend that
   comes up an hour later gets linked within seconds.
+- **Reply on the queryable's own key**, not `query.key_expr`: echoing the query's key puts every
+  instance's answer to `get("fleet/*/svc/*/lifecycle")` under the same wildcard key. (The declared key
+  always intersects the query that reached it, so the reply is always accepted.)
 - **Best-effort**: a missing binding, an unreachable router, a failed declare — the control plane is
   logged, abandoned and **retried on a timer**; the service's real work is never taken down. Every
   producer must also keep a control path that needs no Zenoh at all (camera-service: SIGUSR1/SIGUSR2).

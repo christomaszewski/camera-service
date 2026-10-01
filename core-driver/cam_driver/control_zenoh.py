@@ -158,6 +158,8 @@ class ZenohControl:
                  health=None, health_key: Optional[str] = None):
         self.lifecycle = lifecycle
         self.key_base = key_base
+        self._change_key = key_base + "/change_state"
+        self._recording_key = key_base + "/configure_recording"
         # Health (docs/HEALTH.md): a health.HealthMonitor, or None when health is off -- then the
         # health keys are never declared. Snapshots arrive on the monitor's own thread.
         self.health = health
@@ -169,6 +171,7 @@ class ZenohControl:
         # so a consumer can't mistake a `source: pcap` label for something it can drive.
         self.playback = playback
         self.playback_key = playback_key
+        self._playback_control_key = playback_key + "/control" if playback_key else None
         self._playback_token = None
         self._playback_publisher = None
         self._playback_tick = None
@@ -225,10 +228,10 @@ class ZenohControl:
             # must always find something to query.
             self._queryables.append(self._session.declare_queryable(self.key_base, self._on_query_state))
             self._queryables.append(
-                self._session.declare_queryable(self.key_base + "/change_state", self._on_query_change))
+                self._session.declare_queryable(self._change_key, self._on_query_change))
             if hasattr(self.lifecycle, "configure_recording"):
                 self._queryables.append(self._session.declare_queryable(
-                    self.key_base + "/configure_recording", self._on_query_recording))
+                    self._recording_key, self._on_query_recording))
             self._publisher = self._session.declare_publisher(self.key_base + "/state")
             self._token = self._session.liveliness().declare_token(self.key_base)
             log.info("control plane: %s  (connect=%s)", self.key_base, self._connect or "scout")
@@ -237,7 +240,7 @@ class ZenohControl:
                 pk = self.playback_key
                 self._queryables.append(self._session.declare_queryable(pk, self._on_query_playback))
                 self._queryables.append(
-                    self._session.declare_queryable(pk + "/control", self._on_query_playback_control))
+                    self._session.declare_queryable(self._playback_control_key, self._on_query_playback_control))
                 self._playback_publisher = self._session.declare_publisher(pk + "/state")
                 self._playback_token = self._session.liveliness().declare_token(pk)
                 log.info("control plane: %s (playback: %s)", pk, self.playback.source_kind)
@@ -306,10 +309,11 @@ class ZenohControl:
     def _json_encoding(self):
         return self._zenoh.Encoding.APPLICATION_JSON if self._zenoh is not None else None
 
-    def _reply(self, query, obj, key: Optional[str] = None) -> None:
+    def _reply(self, query, obj, key: str) -> None:
+        """Reply on `key` -- always the queryable's own CONCRETE key, never `query.key_expr`: a fleet
+        query (`get("fleet/*/svc/*/lifecycle")`) would otherwise get every instance's reply under the
+        same wildcard key, and a consumer could not tell them apart by key."""
         try:
-            if key is None:
-                key = self.key_base if not hasattr(query, "key_expr") else query.key_expr
             query.reply(key, encode_json(obj), encoding=self._json_encoding())
         except Exception as e:   # noqa: BLE001
             log.warning("control plane: reply failed: %s", e)
@@ -317,7 +321,7 @@ class ZenohControl:
     def _on_query_state(self, query) -> None:
         """get_state: answered on the zenoh thread -- the descriptor is fresh scalars only."""
         try:
-            self._reply(query, self.lifecycle.descriptor())
+            self._reply(query, self.lifecycle.descriptor(), key=self.key_base)
         except Exception as e:   # noqa: BLE001
             log.warning("control plane: descriptor reply failed: %s", e)
 
@@ -327,7 +331,7 @@ class ZenohControl:
             self._dispatch(self._handle_change, query)
         except Exception as e:   # noqa: BLE001
             log.warning("control plane: could not dispatch change_state: %s", e)
-            self._reply(query, {"ok": False, "error": f"dispatch failed: {e}"})
+            self._reply(query, {"ok": False, "error": f"dispatch failed: {e}"}, key=self._change_key)
 
     def _handle_change(self, query) -> bool:
         """Main loop. Parse, run the transition to completion, reply. Always returns False (one-shot)."""
@@ -345,17 +349,17 @@ class ZenohControl:
                 result = self.lifecycle.request(req["transition"], req)
                 log.info("control plane: %s -> ok=%s state=%s%s", req["transition"], result.get("ok"),
                          result.get("state"), f" error={result['error']}" if result.get("error") else "")
-            self._reply(query, result)
+            self._reply(query, result, key=self._change_key)
         except Exception as e:   # noqa: BLE001
             log.exception("control plane: change_state failed")
-            self._reply(query, {"ok": False, "error": f"internal error: {e}"})
+            self._reply(query, {"ok": False, "error": f"internal error: {e}"}, key=self._change_key)
         return False
 
     def _on_query_recording(self, query) -> None:
         try:
             self._dispatch(self._handle_recording, query)
         except Exception as e:
-            self._reply(query, {"ok": False, "error": f"dispatch failed: {e}"})
+            self._reply(query, {"ok": False, "error": f"dispatch failed: {e}"}, key=self._recording_key)
 
     def _handle_recording(self, query) -> bool:
         try:
@@ -371,7 +375,7 @@ class ZenohControl:
         except Exception as e:
             log.exception("control plane: configure_recording failed")
             result = {"ok": False, "error": f"internal error: {e}"}
-        self._reply(query, result)
+        self._reply(query, result, key=self._recording_key)
         return False
 
     # ---- playback (docs/PLAYBACK.md) --------------------------------------------
@@ -382,7 +386,7 @@ class ZenohControl:
 
     def _on_query_playback(self, query) -> None:
         try:
-            self._reply(query, self._playback_descriptor())
+            self._reply(query, self._playback_descriptor(), key=self.playback_key)
         except Exception as e:   # noqa: BLE001
             log.warning("control plane: playback descriptor reply failed: %s", e)
 
@@ -391,7 +395,7 @@ class ZenohControl:
             self._dispatch(self._handle_playback, query)
         except Exception as e:   # noqa: BLE001
             log.warning("control plane: could not dispatch playback control: %s", e)
-            self._reply(query, {"ok": False, "error": f"dispatch failed: {e}"})
+            self._reply(query, {"ok": False, "error": f"dispatch failed: {e}"}, key=self._playback_control_key)
 
     def _handle_playback(self, query) -> bool:
         """Main loop. Parse, apply on the policy (which drives the feeder), reply. One-shot."""
@@ -410,10 +414,10 @@ class ZenohControl:
                 result["descriptor"] = self._playback_descriptor()
                 log.info("control plane: playback %s -> ok=%s state=%s%s", req["op"], result.get("ok"),
                          result.get("state"), f" error={result['error']}" if result.get("error") else "")
-            self._reply(query, result)
+            self._reply(query, result, key=self._playback_control_key)
         except Exception as e:   # noqa: BLE001
             log.exception("control plane: playback control failed")
-            self._reply(query, {"ok": False, "error": f"internal error: {e}"})
+            self._reply(query, {"ok": False, "error": f"internal error: {e}"}, key=self._playback_control_key)
         return False
 
     def _on_playback_change(self, _descriptor: dict) -> None:
