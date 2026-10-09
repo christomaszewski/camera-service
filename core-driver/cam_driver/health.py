@@ -27,6 +27,7 @@ import math
 import os
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
@@ -77,6 +78,27 @@ def _numeric(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
+def supply_power(values: dict) -> None:
+    """Derive watts from valid SI readings in this poll; an explicit device power wins."""
+    if "supply.power_w" in values:
+        return
+    voltage, current = values.get("supply.voltage_v"), values.get("supply.current_a")
+    if _numeric(voltage) and _numeric(current):
+        power = voltage * current
+        if _numeric(power):
+            values["supply.power_w"] = round(power, 6)
+
+
+def validate_measurements(values: dict, expected=()) -> None:
+    """Unavailable numeric readings remain visible, independently of successful features."""
+    keys = set(expected) | {k for k in values if k.startswith("temp.") and k.endswith("_c")
+                            or k in ("supply.voltage_v", "supply.current_a", "supply.power_w")}
+    for key in keys:
+        if not _numeric(values.get(key)):
+            values[key] = None
+            values[f"health.metric.{key}.state"] = "unavailable"
+
+
 def evaluate_limits(values: dict, limits: dict):
     """(level, [messages]) for the values that cross a configured limit."""
     level, msgs = OK, []
@@ -110,6 +132,8 @@ def merge(reports: List[Report], instance: str, limits: dict) -> List[dict]:
         values = {}
         for r in rs:
             for k, v in r.values.items():
+                if k.startswith("health.") and k in values:
+                    continue  # the primary component provider owns its observation metadata
                 values[k] = _scalar(v)
         level = max(r.level for r in rs)
         msgs = [r.message for r in rs if r.message and r.level == level and r.level != OK]
@@ -118,6 +142,13 @@ def merge(reports: List[Report], instance: str, limits: dict) -> List[dict]:
             level, msgs = lim_level, lim_msgs + msgs
         elif lim_level == level and lim_msgs:
             msgs = msgs + lim_msgs
+        if level == STALE:
+            # Several providers can contribute to one component (pipeline + Aravis
+            # stream stats). A missing provider must not hide another provider's fault.
+            known = [r.level if r.level != STALE else r.values.get("health.last_level", OK) for r in rs]
+            values["health.last_level"] = max([lim_level] + [v for v in known if v in (OK, WARN, ERROR)])
+            values["health.availability"] = "stale"
+            msgs += [r.message for r in rs if r.level in (WARN, ERROR) and r.message] + lim_msgs
         if not msgs:
             msgs = [next((r.message for r in rs if r.message), LEVEL_NAMES[level])]
         out.append({
@@ -348,6 +379,10 @@ class HealthMonitor:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._file_warned = False
+        self._publisher_id = str(uuid.uuid4())
+        self._sequence = 0
+        self._sample_ids: Dict[str, str] = {}
+        self._latest_at = None
 
     # ---- fan-out -----------------------------------------------------------
     def add_observer(self, fn: Callable[[dict], None]) -> None:
@@ -356,7 +391,24 @@ class HealthMonitor:
 
     @property
     def latest(self) -> Optional[dict]:
-        return self._latest
+        # A late query must not give a frozen observation a new lease of life.
+        # Copy the immutable published snapshot and age it using our own clock.
+        with self._lock:
+            if self._latest is None:
+                return None
+            elapsed = max(0, self._clock() - self._latest_at)
+            statuses = []
+            for row in self._latest["status"]:
+                values = dict(row["values"])
+                values["health.sample_age_s"] = round(values.get("health.sample_age_s", 0) + elapsed, 3)
+                level = row["level"]
+                if values["health.sample_age_s"] >= self.stale_after_s:
+                    if level != STALE:
+                        values["health.last_level"] = level
+                    level = STALE
+                    values["health.availability"] = "stale"
+                statuses.append({**row, "level": level, "values": values})
+            return {**self._latest, "status": statuses, "level": max((r["level"] for r in statuses), default=OK)}
 
     def open_window(self) -> HealthWindow:
         w = HealthWindow()
@@ -380,25 +432,56 @@ class HealthMonitor:
         if self._started_t is None:
             self._started_t = now
         reports: List[Report] = []
+        reported_at = []
+        self._sequence += 1
         for p in self.providers:
             name = getattr(p, "name", type(p).__name__)
             try:
                 rs = list(p.poll() or [])
+                now = self._clock()
                 self._last_ok[name] = now
                 self._last_reports[name] = rs
-                reports.extend(rs)
+                self._sample_ids[name] = f"{self._publisher_id}:{name}:{self._sequence}"
+                age, availability = 0.0, "current"
             except Exception as e:   # noqa: BLE001 -- a provider must never take health down
+                now = self._clock()
                 silent = now - self._last_ok.get(name, self._started_t)
-                if silent < self.stale_after_s and name in self._last_reports:
-                    reports.extend(self._last_reports[name])
-                else:
-                    log.debug("health provider %s failed: %s", name, e)
-                    reports.extend(Report(c, STALE, f"no data for {silent:.0f}s: {e}")
-                                   for c in getattr(p, "components", ()))
+                previous = self._last_reports.get(name, [])
+                stale = silent >= self.stale_after_s or not previous
+                age, availability = silent, "stale" if stale else "retrying"
+                rs = [Report(r.component, STALE if stale else r.level,
+                             f"no data for {silent:.0f}s: {e}" if stale else r.message,
+                             r.hardware_id, {**r.values, "health.error": str(e),
+                                             "health.last_level": max(r.level, evaluate_limits(r.values, self.limits)[0])}) for r in previous]
+                if not rs:
+                    rs = [Report(c, STALE, f"no data for {silent:.0f}s: {e}",
+                                 values={"health.error": str(e)}) for c in getattr(p, "components", ())]
+            for r in rs:
+                reported_at.append(now)
+                reports.append(Report(r.component, r.level, r.message, r.hardware_id, {
+                    **r.values,
+                    "health.publisher_id": self._publisher_id,
+                    "health.sequence": self._sequence,
+                    "health.sample_id": self._sample_ids.get(name, ""),
+                    "health.sample_age_s": round(age, 3),
+                    "health.stale_after_s": self.stale_after_s,
+                    "health.publish_interval_s": self.interval_s,
+                    "health.availability": availability if r.level != STALE else "stale",
+                }))
+        published_at = self._clock()
+        for report, at in zip(reports, reported_at):
+            age = report.values["health.sample_age_s"] + max(0, published_at - at)
+            report.values["health.sample_age_s"] = round(age, 3)
+            if age >= self.stale_after_s:
+                if report.level != STALE:
+                    report.values["health.last_level"] = max(report.level, evaluate_limits(report.values, self.limits)[0])
+                report.level = STALE
+                report.values["health.availability"] = "stale"
         snap = build_snapshot(self.instance, self._wall_ns(),
                               merge(reports, self.instance, self.limits), self.service)
         with self._lock:
             self._latest = snap
+            self._latest_at = published_at
             for w in self._windows:
                 w.add(snap)
         self._log_changes(snap)

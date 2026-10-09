@@ -22,7 +22,7 @@ import re
 import threading
 from typing import Callable, Dict, List, Optional
 
-from .health import ERROR, OK, STALE, WARN, Report
+from .health import ERROR, OK, STALE, WARN, Report, supply_power, validate_measurements
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +82,8 @@ class GenicamProvider:
             self._features[value_name] = [(feature, 1)]   # a configured name wins over the defaults
         self._stop = stop_event or threading.Event()
         self._selector_cache = (None, None)   # (id(device), [entries]) -- probed once per device
+        self._measurements = set()
+        self._device_id = None
 
     def poll(self) -> List[Report]:
         if self._busy():
@@ -92,6 +94,9 @@ class GenicamProvider:
             return [Report("camera", STALE, "camera not connected",
                            hardware_id=getattr(cam, "hardware_id", "") or "")]
         hw = getattr(cam, "hardware_id", "") or ""
+        if self._device_id != id(dev):
+            self._measurements.clear()
+            self._device_id = id(dev)
         values, errors, reads = {}, [], 0
 
         if self._has(dev, PTP_LATCH) and any(self._has(dev, f) for f in ("PtpStatus", "PtpOffsetFromMaster")):
@@ -121,6 +126,20 @@ class GenicamProvider:
             # Every read failed: the control channel is gone, not a missing feature. Let the monitor
             # hold the last good values, then go STALE.
             raise RuntimeError(f"all {reads} feature reads failed ({errors[0]})")
+        self._measurements.update(k for k in values if k.startswith("temp.") and k.endswith("_c")
+                                  or k in ("supply.voltage_v", "supply.current_a", "supply.power_w"))
+        for k, candidates in self._features.items():
+            metric = k.startswith("temp.") and k.endswith("_c") or k in ("supply.voltage_v", "supply.current_a", "supply.power_w")
+            if metric and any(self._has(dev, feature) for feature, _ in candidates):
+                self._measurements.add(k)
+        if self._has(dev, TEMPERATURE):
+            self._measurements.update(f"temp.{snake(entry)}_c" for entry in self._selector_entries(dev))
+            if not self._selector_entries(dev):
+                self._measurements.add("temp.device_c")
+        validate_measurements(values, self._measurements)
+        supply_power(values)
+        if "supply.power_w" not in values and {"supply.voltage_v", "supply.current_a"} <= self._measurements:
+            validate_measurements(values, ["supply.power_w"])
         reports = [self._camera_report(hw, values, errors)]
         stream = self._stream_stats(cam)
         if stream:
@@ -189,6 +208,9 @@ class GenicamProvider:
         if errors:
             values["read_errors"] = len(errors)
             log.debug("health: genicam read errors: %s", "; ".join(errors))
+        if any(v == "unavailable" for k, v in values.items() if k.startswith("health.metric.")):
+            level = max(level, WARN)
+            msgs.append("measurement unavailable")
         return Report("camera", level, "; ".join(msgs), hardware_id=hw, values=values)
 
     @staticmethod

@@ -31,7 +31,7 @@ import threading
 import time
 from typing import Callable, List, Optional
 
-from .health import OK, Report
+from .health import OK, WARN, Report, validate_measurements
 
 log = logging.getLogger(__name__)
 
@@ -264,6 +264,7 @@ class BosonProvider:
         if errors:
             values["read_errors"] = len(errors)
             log.debug("boson: read errors: %s", "; ".join(errors))
+        validate_measurements(values, ["temp.sensor_c"])
         msgs = []
         if isinstance(values.get("temp.sensor_c"), float):
             msgs.append(f"{values['temp.sensor_c']:g} C")
@@ -271,7 +272,10 @@ class BosonProvider:
             # Normal operation (the shutter closes for ~a second, the image freezes): OK, but said,
             # so a viewer knows why the picture is frozen right now.
             msgs.append(f"FFC {values['ffc.state'].replace('_', ' ')}")
-        return [Report("camera", OK, "; ".join(msgs) or "OK", hardware_id=self._hardware_id, values=values)]
+        level = WARN if values.get("temp.sensor_c") is None else OK
+        if level == WARN:
+            msgs.append("temperature unavailable")
+        return [Report("camera", level, "; ".join(msgs) or "OK", hardware_id=self._hardware_id, values=values)]
 
     def _ensure_port(self) -> BosonPort:
         if self._port is not None and self._port.is_open:

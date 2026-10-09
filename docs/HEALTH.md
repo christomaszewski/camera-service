@@ -168,7 +168,7 @@ Flat keys, deliberately: cam-up's stdlib YAML fallback reads source blocks as fl
 service runs — and if the host runs ModemManager, exclude the Boson (USB `09cb:4007`) with the udev rule
 in `docker-compose.control.yml`.
 
-A provider that throws keeps its last good values for `stale_after_s`, then its components go STALE.
+A provider that throws retains its last good values with sample identity and age; after `stale_after_s` its components go STALE while the values remain explicitly last-known. `health.last_level` preserves fault severity. Query replies also age cached observations. See [the shared health contract](SERVICE_HEALTH.md) for the metadata and dashboard behavior.
 
 ### Config
 
@@ -207,3 +207,12 @@ Unknown providers, bounds and non-numeric thresholds are config errors (exit 2),
 
 The lifecycle descriptor's `health` field ([LIFECYCLE.md](LIFECYCLE.md)) predates this and still
 carries the raw drop counters; this contract is the full picture.
+
+## Shared dashboard contract and electrical telemetry
+
+[SERVICE_HEALTH.md](SERVICE_HEALTH.md) is the portable contract shared with Ouster and the
+dashboard. GenICam publishes `supply.voltage_v` and `supply.current_a` when available and
+computes `supply.power_w = V * A` from each poll. An explicit power feature override wins.
+Overrides must return V/A/W. Unsupported features stay absent; a supported but failed or
+non-finite reading is null with `health.metric.<key>.state: unavailable` and WARN. Boson
+has no electrical measurements in this provider. No temperature or power limits are assumed.

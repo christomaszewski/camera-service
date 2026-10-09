@@ -271,11 +271,17 @@ def test_a_failing_provider_holds_its_last_values_then_goes_stale():
     prov.fail = True
     clock.t += 3.0
     held = m.poll_once()
-    assert held["status"] == first["status"], "brief failure: last good values, same level"
+    [current], [cached] = first["status"], held["status"]
+    assert cached["level"] == current["level"] and cached["values"]["temp.device_c"] == current["values"]["temp.device_c"]
+    assert cached["values"]["health.sample_id"] == current["values"]["health.sample_id"]
+    assert cached["values"]["health.sample_age_s"] == 3
+    assert cached["values"]["health.availability"] == "retrying"
     clock.t += 3.0
     stale = m.poll_once()
     [st] = stale["status"]
-    assert st["level"] == STALE and st["message"] == "no data for 6s: link down" and st["values"] == {}
+    assert st["level"] == STALE and st["message"] == "no data for 6s: link down"
+    assert st["values"]["temp.device_c"] == 41 and st["values"]["health.sample_age_s"] == 6
+    assert st["values"]["health.sample_id"] == current["values"]["health.sample_id"]
     _assert_ros_mappable(stale)
     prov.fail = False
     assert m.poll_once()["level"] == OK
@@ -445,6 +451,75 @@ def test_genicam_temperature_selector_names_each_reading():
     single.current = "Sensor"
     [cam] = _genicam(_Cam(single)).poll()
     assert cam.values == {"temp.sensor_c": 48.5} and single.writes == [], "one entry: no selector writes"
+
+
+def test_supply_power_is_derived_only_from_valid_voltage_and_current_and_recovers():
+    dev = _Device({"PowerSupplyVoltage": "24", "PowerSupplyCurrent": "0.5", "DeviceUptime": "1"})
+    provider = _genicam(_Cam(dev))
+    assert provider.poll()[0].values["supply.power_w"] == 12
+    dev.values["PowerSupplyCurrent"] = "0"
+    assert provider.poll()[0].values["supply.power_w"] == 0
+    for bad in ("nan", "inf", "true", RuntimeError("read failed")):
+        dev.values["PowerSupplyCurrent"] = bad
+        report = provider.poll()[0]
+        assert report.level == WARN
+        assert report.values["supply.power_w"] is None
+        assert report.values["health.metric.supply.power_w.state"] == "unavailable"
+    dev.values["PowerSupplyCurrent"] = "0.75"
+    assert provider.poll()[0].values["supply.power_w"] == 18
+
+
+def test_partial_temperature_failure_is_visible_even_if_uptime_succeeds():
+    report = _genicam(_Cam(_Device({"DeviceTemperature": RuntimeError("timeout"), "DeviceUptime": "5"}))).poll()[0]
+    assert report.level == WARN and report.values["temp.device_c"] is None
+    assert report.values["health.metric.temp.device_c.state"] == "unavailable"
+    custom = _genicam(_Cam(_Device({"LensTemp": RuntimeError("timeout"), "DeviceUptime": "5"})), features={"temp.lens_c": "LensTemp"}).poll()[0]
+    assert custom.level == WARN and custom.values["temp.lens_c"] is None
+
+
+def test_cached_error_severity_is_preserved_after_staleness():
+    clock, provider = Clock(), _Flaky()
+    monitor = HealthMonitor([provider], instance="c", clock=clock, limits={"temp.device_c": {"error_above": 40}})
+    assert monitor.poll_once()["level"] == ERROR
+    provider.fail = True
+    clock.t += 20
+    status = monitor.poll_once()["status"][0]
+    assert status["level"] == STALE and status["values"]["health.last_level"] == ERROR
+
+
+def test_late_query_ages_the_cached_snapshot_without_mutating_the_publication():
+    clock = Clock()
+    monitor = HealthMonitor([_Flaky()], instance="c", clock=clock)
+    published = monitor.poll_once()
+    clock.t += 12
+    queried = monitor.latest
+    assert queried["status"][0]["values"]["health.sample_age_s"] == 12
+    assert queried["level"] == STALE
+    assert published["status"][0]["values"]["health.sample_age_s"] == 0
+    assert queried["status"][0]["values"]["health.sequence"] == published["status"][0]["values"]["health.sequence"]
+
+
+def test_a_slow_provider_cannot_refresh_an_earlier_components_observation():
+    clock = Clock()
+
+    class Slow:
+        name = "slow"
+
+        def poll(self):
+            clock.t += 6
+            return [Report("service", OK)]
+
+    snapshot = HealthMonitor([_Flaky(), Slow()], instance="c", clock=clock).poll_once()
+    camera, service = snapshot["status"]
+    assert camera["level"] == STALE and camera["values"]["health.sample_age_s"] == 6
+    assert service["level"] == OK and service["values"]["health.sample_age_s"] == 0
+
+
+def test_merged_provider_staleness_cannot_hide_another_providers_fault():
+    [status] = merge([Report("stream", ERROR, "no frames"), Report("stream", STALE, "stats unavailable")], "c", {})
+    assert status["level"] == STALE
+    assert status["values"]["health.last_level"] == ERROR
+    assert "no frames" in status["message"]
 
 
 def test_genicam_sfnc_link_speed_is_bytes_per_second_and_config_features_win():
