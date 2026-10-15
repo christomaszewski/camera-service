@@ -6,7 +6,7 @@ set -euo pipefail
 
 download_archive() {
   local download_url="$1" archive_path="$2"
-  local download_deadline=$((SECONDS + 300)) retry_delay=1
+  local download_deadline=$((SECONDS + ${3:-120})) retry_delay=1
   while true; do
     # Restart curl to re-read the partial file's size after every interrupted transfer.
     # HTTP/1.1 avoids the release CDN's intermittent HTTP/2 stream resets.
@@ -38,7 +38,12 @@ mkdir -p /tmp/gstreamer-src
 cd /tmp/gstreamer-src
 for module in gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav gst-rtsp-server; do
   archive="$module-1.28.7.tar.xz"
-  download_archive "https://gstreamer.freedesktop.org/src/$module/$archive" "$archive"
+  if ! download_archive "https://gstreamer.freedesktop.org/src/$module/$archive" "$archive" 30; then
+    # Debian mirrors the unchanged upstream release archives. Never splice bytes from two hosts;
+    # the same pinned upstream SHA-256 below must pass before either download is extracted.
+    rm -f "$archive"
+    download_archive "https://deb.debian.org/debian/pool/main/g/${module}1.0/${module}1.0_1.28.7.orig.tar.xz" "$archive"
+  fi
   awk -v file="$archive" '$2 == file' /build-gstreamer/SHA256SUMS | sha256sum --check --strict
   tar -xf "$archive"
   options=()
