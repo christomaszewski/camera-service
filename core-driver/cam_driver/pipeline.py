@@ -206,6 +206,18 @@ class CapturePipeline:
         self.on_session_progress = None             # lifecycle hook: the open session moved on (a file
         #                                             boundary, or the periodic tick) -- republish, no transition
         self._progress_timer = None                 # GLib source id of the tick while a session is open
+        # health.HealthMonitor (main.py sets it; None = health off): each recording session opens a
+        # window on it and its summary lands in the session's JSON (docs/HEALTH.md).
+        self.health = None
+
+    @property
+    def reconnecting(self) -> bool:
+        return self._reconnecting
+
+    @property
+    def frame_rate(self) -> float:
+        """The rate the pipeline was built for (0.0 before build)."""
+        return self._fps
 
     # ---- build -------------------------------------------------------------
     @staticmethod
@@ -933,6 +945,11 @@ class CapturePipeline:
             log.error("recording session %d could not start: %s", self._session_seq, e)
             self._last_result = {"ok": False, "error": f"session start failed: {e}", "state": INACTIVE}
             return self._last_result
+        if self.health is not None:
+            try:
+                sess.health_window = self.health.open_window()
+            except Exception as e:   # noqa: BLE001 -- health must never refuse a recording
+                log.warning("health window for session %d not opened: %s", sess.index, e)
         self._session = sess
         self._lifecycle = ACTIVE
         # Progress while active: a viewer's "recording for 1m12s - 1 file" only moves if the
@@ -1004,6 +1021,12 @@ class CapturePipeline:
         """begin_close + finish_close, bounded by SESSION_DRAIN_S when the EOS is worth waiting for
         (a session that already ERRORed may never deliver one)."""
         sess.begin_close()
+        window = getattr(sess, "health_window", None)
+        if window is not None and self.health is not None:
+            try:
+                sess.health_summary = self.health.close_window(window)
+            except Exception as e:   # noqa: BLE001
+                log.warning("health summary for session %d lost: %s", sess.index, e)
         info = sess.finish_close(SESSION_DRAIN_S if wait_eos else 0.0, self.drops.summary())
         where = f"{sess.path_base}-*"
         if info.get("error"):
@@ -1305,6 +1328,11 @@ class CapturePipeline:
         stop_source = not self._stopping   # error/EOS path that didn't go through request_stop
         self._stopping = True
         self._stop_event.set()   # wake a reconnect backoff so the worker can exit and be joined
+        if self.health is not None:
+            # Join the health thread (bounded) BEFORE the source is released: a device read in flight
+            # holds a reference that would delay the GigE control-privilege release. Also removes
+            # the snapshot file -- a stopped service must not read as current.
+            self.health.stop()
         sess = self._session
         if sess is not None:
             # Only reachable when the MAIN pipeline errored (its bus handler quits the loop without

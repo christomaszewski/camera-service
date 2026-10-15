@@ -89,6 +89,14 @@ class UsbConfig:
     #   'sof' provenance) instead of host arrival. OPT-IN: the gain is camera-dependent -- a cam that
     #   timestamps at start-of-exposure wins; many cheap UVC cams timestamp at dequeue (== arrival, no
     #   gain) or report zeros (we sanity-check and fall back to arrival). Ignored for fake sources.
+    # The camera's own COMMAND channel, beside the video: the protocol it speaks + its device node.
+    # flir-boson = FLIR's serial command protocol on the Boson's USB CDC-ACM port (use the stable
+    # /dev/serial/by-id/usb-FLIR_Boson_<sn>-if00 path). Drives the `boson` health provider
+    # (docs/HEALTH.md); cam-up maps the device into the core container. FLAT keys on purpose: cam-up's
+    # stdlib YAML fallback reads source blocks as flat scalars, and a nested `device:` would clobber
+    # usb.device.
+    control_protocol: str = ""        # "" = none | flir-boson
+    control_device: str = ""
 
     # General settings -- set in the `camera:` block; parse_config overlays them here (NOT per-source YAML).
     frame_rate: float = 30.0
@@ -121,6 +129,7 @@ class RtspConfig:
 
 
 SHM_FRAMINGS = ("raw", "header", "unixfd")
+CONTROL_PROTOCOLS = ("flir-boson",)   # usb.control_protocol
 
 
 @dataclass
@@ -333,6 +342,34 @@ class ControlConfig:
     zenoh_connect: Optional[str] = None
 
 
+HEALTH_PROVIDERS = ("genicam", "boson")
+HEALTH_AUTO = ("auto", True, False)
+
+
+@dataclass
+class HealthConfig:
+    """Service health (docs/HEALTH.md): one snapshot shaped like ROS 2 diagnostic_msgs/DiagnosticArray
+    -- `stream` + `recording` from the pipeline's own counters (every config), `camera` from a device
+    provider when one applies -- published at fleet/<VEHICLE_ID>/svc/<CAM_INSTANCE>/health on the
+    control plane's zenoh session, written to a JSON file on the socket volume, and summarized into
+    each recording session's JSON. Observational only: nothing here ever stops capture."""
+    enabled: bool = True
+    interval_s: float = 1.0
+    # A provider that keeps failing holds its last good values this long, then its components go STALE.
+    stale_after_s: float = 5.0
+    # No frame for this long (or 3 frame intervals, whichever is longer) -> `stream` is ERROR.
+    stall_after_s: float = 5.0
+    write_file: bool = True
+    file: str = ""            # default: <dir of transport.plugin_endpoint.socket_path>/health.json
+    # Per-provider settings, keyed by provider name. genicam: {enabled: auto|true|false,
+    # features: {<value name>: <GenICam feature>}} -- auto = on for a GenICam-backed source (gige).
+    # boson: {enabled: auto|true|false} -- auto = on when usb.control_protocol is flir-boson.
+    providers: dict = field(default_factory=dict)
+    # Thresholds by value name: {temp.sensor_c: {warn_above: 65, error_above: 75}}. Keys:
+    # warn_above / error_above / warn_below / error_below. Overlays the built-in disk.free_pct rule.
+    limits: dict = field(default_factory=dict)
+
+
 @dataclass
 class AppConfig:
     camera: CameraConfig = field(default_factory=CameraConfig)   # GENERAL settings + source `type`
@@ -346,6 +383,7 @@ class AppConfig:
     preview: PreviewConfig = field(default_factory=PreviewConfig)
     transport: TransportConfig = field(default_factory=TransportConfig)
     control: ControlConfig = field(default_factory=ControlConfig)
+    health: HealthConfig = field(default_factory=HealthConfig)
     playback: PlaybackConfig = field(default_factory=PlaybackConfig)   # start / timeline / end policy
     plugins: list = field(default_factory=list)   # list[PluginConfig], for the plugin supervisor
 
@@ -411,6 +449,16 @@ def parse_config(raw: dict) -> AppConfig:
     gige = _build(GigeConfig, gige_raw)
     gige.roi = _build(ROI, roi_raw) if roi_raw else None
     usb = _build(UsbConfig, raw.get("usb"))
+    usb.control_protocol = str(usb.control_protocol or "").strip().lower()
+    usb.control_device = str(usb.control_device or "").strip()
+    if usb.control_protocol and usb.control_protocol not in CONTROL_PROTOCOLS:
+        raise ValueError(f"usb.control_protocol: expected one of {CONTROL_PROTOCOLS}, "
+                         f"got {usb.control_protocol!r}")
+    if usb.control_protocol and not usb.control_device:
+        raise ValueError(f"usb.control_device: required with control_protocol {usb.control_protocol!r} "
+                         f"(e.g. /dev/serial/by-id/usb-FLIR_Boson_<sn>-if00)")
+    if usb.control_device and not usb.control_protocol:
+        raise ValueError("usb.control_protocol: required with control_device (which protocol does it speak?)")
     rtsp = _build(RtspConfig, raw.get("rtsp"))
     shm = _build(ShmConfig, raw.get("shm"))
     shm.framing = str(shm.framing or "raw").strip().lower()
@@ -501,9 +549,70 @@ def parse_config(raw: dict) -> AppConfig:
         preview=_build(PreviewConfig, raw.get("preview")),
         transport=transport_cfg,
         control=control,
+        health=_parse_health(raw.get("health")),
         playback=pb,
         plugins=plugins,
     )
+
+
+def _parse_health(data) -> HealthConfig:
+    """HealthConfig with the nested maps validated here, naming the offending key: a typo'd limit
+    would otherwise never fire and a typo'd provider would silently never run."""
+    h = _build(HealthConfig, data)
+    h.providers = {} if h.providers is None else h.providers
+    h.limits = {} if h.limits is None else h.limits
+    for name in ("interval_s", "stale_after_s", "stall_after_s"):
+        if getattr(h, name) <= 0:
+            raise ValueError(f"health.{name}: must be > 0, got {getattr(h, name)!r}")
+    if not isinstance(h.providers, dict):
+        raise ValueError(f"health.providers: expected a map of provider -> settings, got {h.providers!r}")
+    providers = {}
+    for name, settings in h.providers.items():
+        if name not in HEALTH_PROVIDERS:
+            raise ValueError(f"health.providers.{name}: unknown provider (known: {', '.join(HEALTH_PROVIDERS)})")
+        settings = dict(settings or {})
+        en = settings.get("enabled", "auto")
+        en = en.strip().lower() if isinstance(en, str) else en
+        if en not in HEALTH_AUTO:
+            raise ValueError(f"health.providers.{name}.enabled: expected auto|true|false, got {en!r}")
+        settings["enabled"] = en
+        feats = settings.get("features") or {}
+        if not isinstance(feats, dict) or not all(isinstance(k, str) and isinstance(v, str)
+                                                  for k, v in feats.items()):
+            raise ValueError(f"health.providers.{name}.features: expected a map of value name -> "
+                             f"feature name, got {feats!r}")
+        settings["features"] = feats
+        providers[name] = settings
+    h.providers = providers
+    if not isinstance(h.limits, dict):
+        raise ValueError(f"health.limits: expected a map of value name -> thresholds, got {h.limits!r}")
+    limits = {}
+    for key, rule in h.limits.items():
+        if not isinstance(rule, dict) or not rule:
+            raise ValueError(f"health.limits.{key}: expected a map of warn_above/error_above/"
+                             f"warn_below/error_below, got {rule!r}")
+        out = {}
+        for bound, t in rule.items():
+            if bound not in ("warn_above", "error_above", "warn_below", "error_below"):
+                raise ValueError(f"health.limits.{key}.{bound}: unknown bound (expected warn_above, "
+                                 f"error_above, warn_below or error_below)")
+            if isinstance(t, bool) or not isinstance(t, (int, float)):
+                raise ValueError(f"health.limits.{key}.{bound}: expected a number, got {t!r}")
+            out[bound] = float(t)
+        limits[str(key)] = out
+    h.limits = limits
+    return h
+
+
+def health_file(cfg: AppConfig) -> str:
+    """Where the latest health snapshot is written ("" = off): next to the transport sockets by
+    default -- the per-sensor socket volume every bridge container already mounts."""
+    if not cfg.health.write_file:
+        return ""
+    if cfg.health.file:
+        return cfg.health.file
+    sock_dir = os.path.dirname(cfg.transport.plugin_endpoint.socket_path) or "/tmp/cam"
+    return os.path.join(sock_dir, "health.json")
 
 
 def hold_on_finish(cfg: AppConfig) -> bool:

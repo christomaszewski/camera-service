@@ -271,3 +271,41 @@ def test_ros2_source_env_comes_from_the_shm_block_and_the_plugin_params():
     e = _env({"name": "x", "camera": {"type": "shm"}, "plugins": [{"name": "ros2-source", "isolation": "container", "params": {"topic": "/t"}}]})
     assert (e["CAM_SOURCE_TRANSPORT"], e["CAM_SOURCE_FORMAT"], e["CAM_SOURCE_WIDTH"], e["CAM_SOURCE_COMPRESSED"], e["CAM_SOURCE_QOS"]) == \
         ("raw", "RGB", "640", "false", "sensor")
+
+
+# ---- the camera's command channel (usb.control_device -> docker-compose.control.yml) ------------
+
+def _usb(**extra):
+    return {"name": "thermal", "camera": {"type": "usb"},
+            "usb": dict({"device": "/dev/v4l/by-id/usb-FLIR_Boson_1-video-index0"}, **extra)}
+
+
+def test_a_usb_command_channel_is_mapped_beside_the_video_device():
+    e = _env(_usb(control_protocol="flir-boson", control_device="/dev/serial/by-id/usb-FLIR_Boson_1-if00"))
+    assert e["CAM_DEVICE"] == "/dev/v4l/by-id/usb-FLIR_Boson_1-video-index0", "the video device is untouched"
+    assert e["CAM_CONTROL_DEVICE"] == "/dev/serial/by-id/usb-FLIR_Boson_1-if00"
+    assert "CAM_CONTROL_DEVICE" not in _env(_usb()), "no channel configured -> no overlay"
+    assert "CAM_CONTROL_DEVICE" not in _env(_usb(fake=True, control_protocol="flir-boson",
+                                                 control_device="/dev/ttyACM0")), "a fake source maps nothing"
+
+
+def test_the_stdlib_parser_maps_the_same_command_channel():
+    # Flat keys are what keep the fallback parser right: a nested `control: {device: ...}` would be
+    # flattened by it into usb.device and map the serial port AS the video device.
+    cfg = _usb(control_protocol="flir-boson", control_device="/dev/serial/by-id/usb-FLIR_Boson_1-if00")
+    with_yaml = _env(cfg)
+    sensor_env._HAVE_YAML = False
+    try:
+        without = _env(cfg)
+    finally:
+        sensor_env._HAVE_YAML = True
+    for k in ("CAM_DEVICE", "CAM_CONTROL_DEVICE"):
+        assert without.get(k) == with_yaml.get(k), (k, without.get(k), with_yaml.get(k))
+
+
+def test_a_yaml_param_cannot_forge_a_device_mapping():
+    cfg = _usb()
+    cfg["plugins"] = [{"name": "webrtc-bridge", "enabled": True, "isolation": "container",
+                       "params": {"CAM_CONTROL_DEVICE": "/dev/sda", "CAM_DEVICE": "/dev/sda"}}]
+    e = _env(cfg)
+    assert "CAM_CONTROL_DEVICE" not in e and e["CAM_DEVICE"] == "/dev/v4l/by-id/usb-FLIR_Boson_1-video-index0"

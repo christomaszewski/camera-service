@@ -108,6 +108,22 @@ recording:
 #   #                        Unset -> the ZENOH_CONNECT env (compose: the vehicle's rmw_zenohd), which
 #   #                        rmw_zenohd needs (it disables scouting); a stock zenohd is scouted anyway.
 
+# ---- health (docs/HEALTH.md) -----------------------------------------------------------------------
+# On by default, nothing to set: a ROS-diagnostics-shaped snapshot of `stream` / `recording` (every
+# source) + `camera` (GigE: temperature/uptime/supply/link/PTP read from the camera) every second, at
+# fleet/<VEHICLE_ID>/svc/<name>/health (on the control plane's zenoh session), in
+# <transport socket dir>/health.json, and summarized into each recording session's JSON.
+# health:
+#   interval_s: 1.0
+#   providers:
+#     genicam:
+#       enabled: auto        # auto (= on for gige) | true | false
+#       # features: {temp.lens_c: LensTemperature}   # add/rename values: <value name>: <GenICam feature>
+#   limits:                  # warn_above / error_above / warn_below / error_below, by value name.
+#     temp.sensor_c: {warn_above: 65, error_above: 75}   # per camera model: none ship by default
+#     # fps.delivered: {warn_below: 23}
+#     # disk.free_pct: {warn_below: 10, error_below: 2}  # the built-in default
+
 # ---- local debug preview (headless by default) ---------------------------------------------------
 # preview:
 #   enabled: false

@@ -187,6 +187,12 @@ if [ -n "${CAM_DEVICE:-}" ]; then
   export CAM_DEVICE
   FILES+=(-f "$REPO/docker-compose.usb.yml")
 fi
+# ...and the camera's command channel (usb.control_device, e.g. a FLIR Boson's serial port) when the
+# config names one -- same self-map, same runtime-only existence check (docker-compose.control.yml).
+if [ -n "${CAM_CONTROL_DEVICE:-}" ]; then
+  export CAM_CONTROL_DEVICE
+  FILES+=(-f "$REPO/docker-compose.control.yml")
+fi
 # Playback source (camera.type pcap/replay): bind the capture / recorded run in from the host.
 # sensor_env derives BOTH ends from the config's path -- an absolute path self-maps, a bare name
 # rides the deployment's input folder (docker-compose.input.yml documents the two shapes). Rendered

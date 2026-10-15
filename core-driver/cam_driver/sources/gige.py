@@ -69,9 +69,10 @@ class GigeSource(Source):
 
     def start(self, on_frame: OnFrame, on_encoded: OnFrame = None) -> None:
         self._on_frame = on_frame   # gige delivers raw only; on_encoded is unused (not an encoded source)
-        stream = self.camera.stream
-        stream.set_emit_signals(True)
-        stream.connect("new-buffer", self._on_new_buffer)
+        with self.camera.stream_lock:
+            stream = self.camera.stream
+            stream.set_emit_signals(True)
+            stream.connect("new-buffer", self._on_new_buffer)
         self._last_buf_t = time.monotonic()   # reset liveness so the watchdog ignores spin-up
         self.camera.start()
 
@@ -82,12 +83,13 @@ class GigeSource(Source):
         # point: the handler can still fire on the Aravis receive thread while we tear the stream
         # down underneath it. reopen() builds a fresh stream and start() re-arms the signal, so
         # this is safe on the reconnect path too.
-        stream = getattr(self.camera, "stream", None)
-        if stream is not None:
-            try:
-                stream.set_emit_signals(False)
-            except Exception as e:   # noqa: BLE001 -- stop() is best-effort and must finish
-                log.debug("set_emit_signals(False): %s", e)
+        with self.camera.stream_lock:
+            stream = getattr(self.camera, "stream", None)
+            if stream is not None:
+                try:
+                    stream.set_emit_signals(False)
+                except Exception as e:   # noqa: BLE001 -- stop() is best-effort and must finish
+                    log.debug("set_emit_signals(False): %s", e)
         self.camera.stop()
 
     def close(self) -> None:
@@ -123,6 +125,9 @@ class GigeSource(Source):
 
     def pixel_format(self) -> str:
         return self.camera.pixel_format_string()
+
+    def genicam(self):
+        return self.camera
 
     @property
     def tick_frequency_hz(self) -> int:

@@ -10,6 +10,7 @@ Camera-quirk facts this handles generically (FLIR cited as a common example):
 from __future__ import annotations
 
 import logging
+from functools import wraps
 import threading
 import time
 from typing import Optional
@@ -25,9 +26,22 @@ class CameraError(RuntimeError):
     pass
 
 
+def _serialized(fn):
+    """Serialize the shared Aravis device, including nested setup/reopen calls."""
+    @wraps(fn)
+    def call(self, *args, **kwargs):
+        with self.io_lock:
+            return fn(self, *args, **kwargs)
+    return call
+
+
 class GigECamera:
     def __init__(self, cfg):
         self.cfg = cfg
+        self.io_lock = threading.RLock()
+        # Disabling stream signals can wait for a frame callback that reads camera metadata.
+        # Keep stream control separate from io_lock so that callback can finish.
+        self.stream_lock = threading.RLock()
         self.camera: Optional[Aravis.Camera] = None
         self.device = None
         self.stream = None
@@ -36,6 +50,7 @@ class GigECamera:
         self.ptp_locked: bool = False
         self.chunks_enabled: bool = False
         self.control_lost: bool = False   # set by the device "control-lost" signal
+        self.hardware_id: str = ""        # "<vendor> <model> sn <serial>", set at open()
 
     # ---- feature helpers ---------------------------------------------------
     def _has(self, feature: str) -> bool:
@@ -61,6 +76,7 @@ class GigECamera:
             return False
 
     # ---- lifecycle ---------------------------------------------------------
+    @_serialized
     def open(self) -> None:
         if getattr(self.cfg, "fake", False):
             Aravis.enable_interface("Fake")
@@ -81,9 +97,11 @@ class GigECamera:
             self.device.connect("control-lost", self._on_control_lost)
         except (GLib.Error, TypeError) as e:
             log.debug("control-lost signal unavailable: %s", e)
-        log.info("opened %s %s (sn %s)",
-                 self.camera.get_vendor_name(), self.camera.get_model_name(),
-                 self.camera.get_device_serial_number())
+        vendor, model, serial = (self.camera.get_vendor_name(), self.camera.get_model_name(),
+                                 self.camera.get_device_serial_number())
+        log.info("opened %s %s (sn %s)", vendor, model, serial)
+        # The health snapshot's hardware_id (docs/HEALTH.md): read once here, not per poll.
+        self.hardware_id = " ".join(str(p) for p in (vendor, model) if p) + (f" sn {serial}" if serial else "")
         # Diagnostic breadcrumb for stuck-controller hunts: after an UNCLEAN exit (SIGKILL -- no
         # control-privilege release) the camera refuses new controllers for exactly this window.
         # If a "pingable but won't connect" incident outlives it, the owner is a LIVE process
@@ -99,16 +117,19 @@ class GigECamera:
         log.error("camera control channel lost (%s)", self.cfg.camera_id or "device")
         self.control_lost = True
 
+    @_serialized
     def _release(self) -> None:
         """Drop the old stream/camera so their GVSP sockets + receive thread close before a
         reopen -- otherwise a new stream can't bind the receive port and gets no frames."""
-        self.stream = None
+        with self.stream_lock:
+            self.stream = None
         self.camera = None
         self.device = None
         self.chunk_parser = None
         import gc
         gc.collect()
 
+    @_serialized
     def close(self) -> None:
         """Deterministically release the camera at shutdown. Finalizing the ArvDevice writes the
         control privilege back to the camera (Aravis does this in its finalizer), freeing it for
@@ -117,6 +138,7 @@ class GigECamera:
         it); close() is the end-of-life counterpart."""
         self._release()
 
+    @_serialized
     def reopen(self, n_buffers: int, stop: Optional[threading.Event] = None) -> None:
         """Full re-setup after a disconnect: release the dead stream, then open + configure +
         chunks/PTP + a new stream (NOT started -- the caller attaches the new-buffer handler,
@@ -134,6 +156,7 @@ class GigECamera:
             self.enable_ptp(self.cfg.ptp_lock_timeout_s, stop=stop)
         self.create_stream(n_buffers)
 
+    @_serialized
     def configure(self) -> None:
         c, cfg = self.camera, self.cfg
 
@@ -178,6 +201,7 @@ class GigECamera:
             self.tick_frequency_hz = 0
         log.info("GevTimestampTickFrequency = %s Hz", self.tick_frequency_hz)
 
+    @_serialized
     def enable_chunks(self) -> bool:
         try:
             self.camera.set_chunk_mode(True)
@@ -190,6 +214,7 @@ class GigECamera:
             self.chunks_enabled = False
         return self.chunks_enabled
 
+    @_serialized
     def enable_ptp(self, timeout_s: float = 10.0, stop: Optional[threading.Event] = None) -> bool:
         """Enable IEEE-1588 and wait for the camera to slave to the grandmaster.
 
@@ -235,6 +260,7 @@ class GigECamera:
         log.warning("PTP did not lock within %.1fs (last %s=%s)", timeout_s, status_feature, last)
         return False
 
+    @_serialized
     def create_stream(self, n_buffers: int = 20):
         self.stream = self.camera.create_stream(None, None)
         if self.stream is None:
@@ -245,11 +271,13 @@ class GigECamera:
         log.info("stream created, payload=%d bytes, %d buffers queued", payload, n_buffers)
         return self.stream
 
+    @_serialized
     def start(self) -> None:
         self.camera.set_acquisition_mode(Aravis.AcquisitionMode.CONTINUOUS)
         self.camera.start_acquisition()
         log.info("acquisition started")
 
+    @_serialized
     def stop(self) -> None:
         try:
             if self.camera:
@@ -258,9 +286,11 @@ class GigECamera:
             log.warning("stop_acquisition: %s", e)
 
     # ---- introspection -----------------------------------------------------
+    @_serialized
     def sensor_geometry(self):
         return self.camera.get_region()  # (x, y, width, height)
 
+    @_serialized
     def pixel_format_string(self) -> str:
         """The DEVICE's current pixel format (source of truth for what the frames actually are);
         the config value is only a fallback when the device won't say. An unreported Bayer format

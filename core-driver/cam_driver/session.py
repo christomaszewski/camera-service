@@ -115,6 +115,8 @@ class RecordingSession:
         self.segments: list = []
         self.drops_at_start: Optional[dict] = None
         self.started_unix_s: Optional[float] = None
+        self.health_window = None                 # health.HealthWindow while open (pipeline sets it)
+        self.health_summary: Optional[dict] = None   # its summary, written into the JSON at close
         self._pipeline = None
         self._appsrc = None
         self._bus = None
@@ -256,7 +258,10 @@ class RecordingSession:
         # stop() BEFORE write_summary: stop() joins the CSV writer, where the final flush happens, so a
         # failure there sets the writer's failed flag in time for the summary to attest it.
         self.sidecar.stop()
-        self.sidecar.write_summary(drops, {"session": attest})
+        extra = {"session": attest}
+        if getattr(self, "health_summary", None):
+            extra["health"] = self.health_summary   # the conditions it was recorded in (docs/HEALTH.md)
+        self.sidecar.write_summary(drops, extra)
         return self.describe(final=True)
 
     def _teardown_pipeline(self) -> None:

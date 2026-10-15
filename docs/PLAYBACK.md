@@ -33,7 +33,9 @@ fleet/<vehicle_id>/svc/<instance>/playback/state      publisher: the descriptor 
 ```
 
 `vehicle_id` and `instance` are single segments and the SAME segments the instance's media and
-lifecycle keys use. A consumer watches `fleet/*/svc/*/playback`.
+lifecycle keys use. A consumer watches `fleet/*/svc/*/playback`. As in LIFECYCLE.md, both queryables
+reply on their own concrete key, so `get("fleet/*/svc/*/playback")` is one reply per instance, told
+apart by key.
 
 | Zenoh primitive | Key | Role |
 |---|---|---|

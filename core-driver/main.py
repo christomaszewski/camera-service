@@ -25,10 +25,11 @@ except (ImportError, ValueError):
     class CameraError(Exception):
         pass
 
-from cam_driver.config import (hold_on_finish, lifecycle_state_file, load_config, resolve_input_path,
-                               resolve_recording_dir)
+from cam_driver.config import (health_file, hold_on_finish, lifecycle_state_file, load_config,
+                               resolve_input_path, resolve_recording_dir)
 from cam_driver.control_zenoh import (ZenohControl, lifecycle_key, playback_key, vehicle_id,
                                       zenoh_connect_endpoints)
+from cam_driver.health import HealthMonitor, health_key
 from cam_driver.lifecycle import ACTIVE, Lifecycle
 from cam_driver.pipeline import CapturePipeline
 from cam_driver.sources import make_source
@@ -119,6 +120,13 @@ def main(argv=None) -> int:
         log.info("playback: initial_state=%s start_at=%s epoch=%s window=%s..%s on_finish=%s",
                  pb.initial_state, pb.start_at_unix_s, pb.epoch_unix_ns, pb.from_s, pb.to_s,
                  "hold" if pipe.hold_on_finish else "exit")
+    # Health (docs/HEALTH.md): a ROS-diagnostics-shaped snapshot of stream / recording / camera,
+    # polled on its own thread. Recording sessions summarize it into their JSON via pipe.health.
+    health = None
+    if cfg.health.enabled:
+        health = HealthMonitor.from_config(cfg, instance=instance, lifecycle=lifecycle, pipeline=pipe,
+                                           file_path=health_file(cfg))
+        pipe.health = health
     # A source that plays data back (pcap/replay) hands over its playback policy and the playback
     # keys are declared beside the lifecycle's (docs/PLAYBACK.md); a live camera hands None and
     # advertises nothing -- the capability, not the label, is what a dashboard keys off.
@@ -126,17 +134,22 @@ def main(argv=None) -> int:
                            connect=zenoh_connect_endpoints(cfg.control.zenoh_connect),
                            enabled=cfg.control.enabled,
                            playback=pipe.source.playback,
-                           playback_key=playback_key(vehicle_id(), instance))
+                           playback_key=playback_key(vehicle_id(), instance),
+                           health=health, health_key=health_key(vehicle_id(), instance))
 
     def _on_playing() -> bool:
         if not lifecycle.boot():
             return False
+        if health is not None:
+            health.start()  # before the control plane, so the first health query has a snapshot
         control.start()    # presence only once PLAYING + the lifecycle is initialised; retries until reachable
         return True
 
     def _stop(_signum, _frame):
         log.info("signal received, stopping")
         lifecycle.forget()      # a DELIBERATE stop: the next boot follows the config, not the last command
+        if health is not None:
+            health.stop(wait=False)   # never join here: a device read can block the signal handler
         control.close()         # withdraw presence now, not after the drain
         pipe.request_stop()
 
@@ -158,7 +171,7 @@ def main(argv=None) -> int:
     signal.signal(signal.SIGUSR1, _transition("activate"))
     signal.signal(signal.SIGUSR2, _transition("deactivate"))
 
-    pipe.run(on_playing=_on_playing)
+    pipe.run(on_playing=_on_playing)   # its shutdown() stops health before releasing the source
     control.close()   # the error/EOS paths that never went through _stop
     if pipe.had_error:
         log.error("exited after a pipeline error")   # disk full / encoder failure / fatal source change

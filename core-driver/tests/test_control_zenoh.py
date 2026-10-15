@@ -12,6 +12,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from cam_driver.health import health_key
 from cam_driver.playback import PlaybackState
 from cam_driver.control_zenoh import (ZenohControl, encode_json, lifecycle_key,  # noqa: E402
                                       parse_change_state, zenoh_connect_endpoints, parse_playback_request, playback_key)
@@ -243,10 +244,51 @@ def test_state_query_replies_the_descriptor_on_the_zenoh_thread():
     ctl, lc, sessions, dispatched, fail = _control()
     ctl.advertise()
     cb, _q = sessions[0].queryables[KEY]
-    q = _Query("fleet/*/svc/*/lifecycle")
+    q = _Query(KEY)
     cb(q)
     assert dispatched == [], "no main-loop hop for a read"
-    assert q.replies == [("fleet/*/svc/*/lifecycle", lc.descriptor())]
+    assert q.replies == [(KEY, lc.descriptor())]
+
+
+def test_a_wildcard_fleet_query_is_answered_on_each_instances_concrete_key():
+    """`get("fleet/*/svc/*/lifecycle")` is the fleet snapshot (docs/LIFECYCLE.md): every instance
+    answers under ITS OWN key -- echoing the query's key would put them all under the wildcard."""
+    q = _Query("fleet/*/svc/*/lifecycle")
+    keys = [lifecycle_key("veh", "cam_a"), lifecycle_key("veh2", "cam_b")]
+    for key in keys:
+        ctl = ZenohControl(_Lifecycle(), key, dispatch=lambda fn, *a: None,
+                           session_factory=lambda eps: _Session(eps))
+        ctl.advertise()
+        ctl._session.queryables[key][0](q)
+    assert [k for k, _d in q.replies] == keys, "one reply per instance, told apart by key"
+    assert not any("*" in k for k, _d in q.replies)
+
+
+def test_wildcard_change_state_and_configure_recording_reply_on_their_concrete_keys():
+    class _Recordable(_Lifecycle):
+        def configure_recording(self, request):
+            return {"ok": True, "state": self.state, "descriptor": self.descriptor()}
+
+    dispatched = []
+    ctl = ZenohControl(_Recordable(), KEY, dispatch=lambda fn, *a: dispatched.append((fn, a)),
+                       session_factory=lambda eps: _Session(eps))
+    ctl.advertise()
+    qs = ctl._session.queryables
+    for suffix, payload in (("/change_state", b'{"transition": "activate"}'), ("/change_state", b"nope"),
+                            ("/configure_recording", b'{"settings": {}}'), ("/configure_recording", b"nope")):
+        q = _Query("fleet/*/svc/*/lifecycle" + suffix, payload=payload)
+        qs[KEY + suffix][0](q)
+        _run_dispatched(dispatched)
+        assert [k for k, _r in q.replies] == [KEY + suffix], (suffix, payload, q.replies)
+
+    def broken_dispatch(_fn, *_a):
+        raise RuntimeError("no loop")
+
+    ctl._dispatch = broken_dispatch          # the reply-without-a-main-loop paths name their key too
+    for suffix in ("/change_state", "/configure_recording"):
+        q = _Query("fleet/**", payload=b"{}")
+        qs[KEY + suffix][0](q)
+        assert q.replies[0][0] == KEY + suffix and "dispatch failed" in q.replies[0][1]["error"]
 
 
 def test_change_state_round_trip_runs_on_the_main_loop_and_publishes():
@@ -374,6 +416,28 @@ def test_playback_keys_are_declared_after_the_lifecycle_and_the_descriptor_carri
     assert q.replies[0][1]["instance"] == "cam_test" and q.replies[0][1]["state"] == "playing"
 
 
+def test_wildcard_playback_queries_reply_on_their_concrete_keys():
+    ctl, pb, hooks, sessions, dispatched = _control_with_playback()
+    ctl.advertise()
+    s = sessions[0]
+    q = _Query("fleet/*/svc/*/playback")
+    s.queryables[PKEY][0](q)
+    assert [k for k, _r in q.replies] == [PKEY], "a fleet playback snapshot tells instances apart by key"
+    for payload in (b'{"op": "pause"}', b'{"op": "seek"}', b"{bad"):       # applied, refused, unparseable
+        q = _Query("fleet/*/svc/*/playback/control", payload)
+        s.queryables[PKEY + "/control"][0](q)
+        _run_dispatched(dispatched)
+        assert [k for k, _r in q.replies] == [PKEY + "/control"], (payload, q.replies)
+
+    def broken_dispatch(_fn, *_a):
+        raise RuntimeError("no loop")
+
+    ctl._dispatch = broken_dispatch
+    q = _Query("fleet/*/svc/*/playback/control", b'{"op": "resume"}')
+    s.queryables[PKEY + "/control"][0](q)
+    assert q.replies[0][0] == PKEY + "/control" and "dispatch failed" in q.replies[0][1]["error"]
+
+
 def test_playback_control_round_trip_publishes_and_replies_when_applied():
     ctl, pb, hooks, sessions, dispatched = _control_with_playback()
     ctl.advertise()
@@ -427,6 +491,83 @@ def test_close_withdraws_the_playback_presence_too():
     assert [t.key for t in s.tokens] == [KEY, PKEY] and all(t.undeclared == 1 for t in s.tokens)
     assert s.publishers[PKEY + "/state"].undeclared == 1
     assert s.closed == 1 and ctl._playback_token is None and ctl._playback_publisher is None
+
+
+# ---- health (docs/HEALTH.md) ---------------------------------------------------
+HKEY = health_key("veh", "cam_test")
+
+
+class _Health:
+    """The HealthMonitor surface the adapter uses."""
+    instance, service, interval_s = "cam_test", "camera-service", 1.0
+
+    def __init__(self):
+        self.latest = None
+        self.observers = []
+
+    def add_observer(self, fn):
+        self.observers.append(fn)
+
+    def emit(self, snap):
+        self.latest = snap
+        for fn in self.observers:
+            fn(snap)
+
+
+def _control_with_health():
+    lc, health, sessions = _Lifecycle(), _Health(), []
+
+    def factory(endpoints):
+        s = _Session(endpoints)
+        sessions.append(s)
+        return s
+
+    ctl = ZenohControl(lc, KEY, connect=("tcp/localhost:7447",), enabled=True,
+                       dispatch=lambda fn, *a: None, session_factory=factory,
+                       health=health, health_key=HKEY)
+    return ctl, health, sessions
+
+
+def test_health_keys_are_declared_queried_and_published():
+    ctl, health, sessions = _control_with_health()
+    health.emit({"schema_version": 1, "status": [], "early": True})   # before the session: nowhere to go
+    assert ctl.advertise()
+    s = sessions[0]
+    assert set(s.queryables) == {KEY, KEY + "/change_state", HKEY}
+    assert [t.key for t in s.tokens] == [KEY, HKEY], "the health token LAST, after its queryable + publisher"
+    pub = s.publishers[HKEY + "/state"]
+    assert pub.puts == [], "nothing is replayed at declare time; the next poll publishes"
+    snap = {"schema_version": 1, "service": "camera-service", "instance": "cam_test",
+            "stamp_unix_ns": 5, "level": 1, "status": [{"level": 1, "name": "cam_test: camera",
+                                                          "message": "hot", "hardware_id": "", "values": {}}]}
+    health.emit(snap)
+    assert pub.puts == [snap]
+    q = _Query("fleet/*/svc/*/health")
+    s.queryables[HKEY][0](q)
+    assert q.replies == [(HKEY, snap)], \
+        "the latest snapshot, on the zenoh thread, under the CONCRETE key even for a wildcard query"
+
+
+def test_health_query_before_the_first_poll_is_an_empty_well_formed_snapshot():
+    ctl, health, sessions = _control_with_health()
+    ctl.advertise()
+    q = _Query(HKEY)
+    sessions[0].queryables[HKEY][0](q)
+    r = q.replies[0][1]
+    assert r["status"] == [] and r["level"] == 0 and r["instance"] == "cam_test" and r["schema_version"] == 1
+
+
+def test_no_health_keys_without_a_monitor_and_close_withdraws_them():
+    ctl, lc, sessions, dispatched, fail = _control()
+    ctl.advertise()
+    assert HKEY not in sessions[0].queryables and HKEY + "/state" not in sessions[0].publishers
+    ctl, health, sessions = _control_with_health()
+    ctl.advertise()
+    s = sessions[0]
+    ctl.close()
+    assert all(t.undeclared == 1 for t in s.tokens) and s.publishers[HKEY + "/state"].undeclared == 1
+    health.emit({"status": []})   # a poll racing the close must not raise
+    assert s.publishers[HKEY + "/state"].puts == []
 
 if __name__ == "__main__":
     _main()

@@ -109,10 +109,12 @@ docker run --rm --network none -v "$PWD/core-driver:/app" "$IMG" bash -c '
   echo "=== the probe LISTENS on the core default endpoint (tcp/localhost:7447), standing in for a router ==="
   # The core connects to it (its connector retries until it does); no zenohd exists in this container.
   python3 tools/lifecycle_probe.py --pattern "$KEY" --listen tcp/127.0.0.1:7447 --timeout 60 \
-      --steps wait-put get:inactive bad activate wait-state:active sleep:5 deactivate wait-state:inactive get:inactive \
+      --steps wait-put get:inactive snapshot bad activate wait-state:active sleep:5 deactivate wait-state:inactive get:inactive \
       >/tmp/probe.log 2>&1 || { echo "FAIL: probe steps"; cat /tmp/probe.log; tail -30 /tmp/core.log; exit 1; }
-  grep -E "EVENT|DESCRIPTOR|REPLY|STATE|STEP|SUMMARY" /tmp/probe.log
+  grep -E "EVENT|DESCRIPTOR|SNAPSHOT|REPLY|STATE|STEP|SUMMARY" /tmp/probe.log
   grep -q "EVENT PUT $KEY" /tmp/probe.log || { echo "FAIL: presence at the wrong key"; exit 1; }
+  grep -q "SNAPSHOT $KEY state=inactive ok" /tmp/probe.log \
+    || { echo "FAIL: the wildcard fleet query was not answered under the concrete key"; exit 1; }
   grep -q "REPLY activate ok=True state=active" /tmp/probe.log || { echo "FAIL: activate reply"; exit 1; }
   grep -q "REPLY reboot ok=False" /tmp/probe.log || { echo "FAIL: a bad transition must be a refusal reply"; exit 1; }
   grep -q "REPLY deactivate ok=True state=inactive" /tmp/probe.log || { echo "FAIL: deactivate reply"; exit 1; }
@@ -138,6 +140,6 @@ EOF
   kill -INT "$CORE"; wait "$CORE"
   wait "$PROBE" || { echo "FAIL: DELETE not observed"; cat /tmp/probe2.log; exit 1; }
   grep -E "EVENT|STEP|SUMMARY" /tmp/probe2.log
-  echo "zenoh control plane: presence, descriptor, change_state, state publications, DELETE on stop -- no router"
+  echo "zenoh control plane: presence, descriptor, fleet snapshot, change_state, state publications, DELETE on stop -- no router"
 '
 echo "PASS: lifecycle_test"
