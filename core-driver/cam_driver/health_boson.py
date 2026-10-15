@@ -44,7 +44,7 @@ BAUD = 921600          # ignored by a USB CDC-ACM port, set anyway (a UART-attac
 # Function ids (FLIR Boson SDK). Payloads are big-endian.
 FN_CAMERA_SN = 0x00050002      # uint32
 FN_PART_NUMBER = 0x00050004    # 20 bytes ASCII, NUL-padded
-FN_FFC_STATE = 0x0005000C      # uint16 enum, FFC_STATES
+FN_FFC_STATE = 0x00050054      # bosonGetFfcStatus: uint32 enum, FFC_STATES
 FN_FPA_TEMP = 0x00050030       # int16, degrees C x 10
 FN_LAST_FFC_FRAME = 0x0005005D  # uint32, frame count at the last FFC
 FN_FRAME_COUNT = 0x00020002    # uint32, frames since power-on
@@ -242,7 +242,7 @@ class BosonProvider:
         values, errors = {}, []
         reads = (
             ("temp.sensor_c", FN_FPA_TEMP, lambda b: _unpack(">h", b) / 10.0),   # FPA = the imager
-            ("ffc.state", FN_FFC_STATE, lambda b: FFC_STATES.get(_unpack(">H", b), "unknown")),
+            ("ffc.state", FN_FFC_STATE, lambda b: FFC_STATES.get(_unpack(">I", b), "unknown")),
             ("frame_count", FN_FRAME_COUNT, lambda b: _unpack(">I", b)),
             ("ffc.last_frame", FN_LAST_FFC_FRAME, lambda b: _unpack(">I", b)),
         )

@@ -170,6 +170,14 @@ in `docker-compose.control.yml`.
 
 A provider that throws retains its last good values with sample identity and age; after `stale_after_s` its components go STALE while the values remain explicitly last-known. `health.last_level` preserves fault severity. Query replies also age cached observations. See [the shared health contract](SERVICE_HEALTH.md) for the metadata and dashboard behavior.
 
+A known GenICam disconnect marks the retained observation STALE immediately, including its last
+fault severity and hardware identity. Failed temperature/PTP status reads retain the last known
+status with `health.metric.<key>.state: unavailable`; only a successful read clears the fault.
+GenICam reads share the camera's device lock with acquisition, configuration and release. Health
+yields between transactions and skips busy control operations; a device change discards the poll.
+Stream control uses a separate lock so disabling callbacks can wait for a callback that reads
+camera metadata without deadlocking.
+
 ### Config
 
 ```yaml
@@ -199,10 +207,12 @@ Unknown providers, bounds and non-numeric thresholds are config errors (exit 2),
   (the default) and are best-effort like the rest of the control plane.
 - **File** — the latest snapshot, replaced atomically every poll, on the per-sensor socket volume
   every bridge already mounts (`/tmp/cam/health.json`). Removed on a clean stop; a file left by a
-  crash is recognizable by its `stamp_unix_ns`.
+  crash is recognizable by its `stamp_unix_ns`. A poll that finishes after cancellation is discarded;
+  the worker also closes its providers and removes the file on exit, even after a join timeout.
 - **Recording sessions** — each session's JSON gets a `health` object: the samples taken while it
   was open, per status the worst level/message seen, and `first`/`last`/`min`/`max` of every numeric
   value (last only, for strings) — the conditions the recording was made in.
+  The initial cached sample is aged when the session opens, using the same rules as query replies.
 - **Log** — one line per status level change (quiet while everything stays OK).
 
 The lifecycle descriptor's `health` field ([LIFECYCLE.md](LIFECYCLE.md)) predates this and still

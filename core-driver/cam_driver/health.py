@@ -64,6 +64,10 @@ class Report:
     values: Dict[str, object] = field(default_factory=dict)
 
 
+class ObservationUnavailable(RuntimeError):
+    """A known disconnect: retain the last observation, but mark it stale immediately."""
+
+
 def _scalar(v):
     """The contract: values are flat scalars. JSON has no NaN/Infinity (a browser's JSON.parse
     rejects the whole message), so a non-finite float becomes null."""
@@ -383,6 +387,7 @@ class HealthMonitor:
         self._sequence = 0
         self._sample_ids: Dict[str, str] = {}
         self._latest_at = None
+        self._cleaned = False
 
     # ---- fan-out -----------------------------------------------------------
     def add_observer(self, fn: Callable[[dict], None]) -> None:
@@ -394,28 +399,33 @@ class HealthMonitor:
         # A late query must not give a frozen observation a new lease of life.
         # Copy the immutable published snapshot and age it using our own clock.
         with self._lock:
-            if self._latest is None:
-                return None
-            elapsed = max(0, self._clock() - self._latest_at)
-            statuses = []
-            for row in self._latest["status"]:
-                values = dict(row["values"])
-                values["health.sample_age_s"] = round(values.get("health.sample_age_s", 0) + elapsed, 3)
-                level = row["level"]
-                if values["health.sample_age_s"] >= self.stale_after_s:
-                    if level != STALE:
-                        values["health.last_level"] = level
-                    level = STALE
-                    values["health.availability"] = "stale"
-                statuses.append({**row, "level": level, "values": values})
-            return {**self._latest, "status": statuses, "level": max((r["level"] for r in statuses), default=OK)}
+            return self._aged_latest()
+
+    def _aged_latest(self) -> Optional[dict]:
+        """Copy and age the last publication; caller holds _lock."""
+        if self._latest is None:
+            return None
+        elapsed = max(0, self._clock() - self._latest_at)
+        statuses = []
+        for row in self._latest["status"]:
+            values = dict(row["values"])
+            values["health.sample_age_s"] = round(values.get("health.sample_age_s", 0) + elapsed, 3)
+            level = row["level"]
+            if values["health.sample_age_s"] >= self.stale_after_s:
+                if level != STALE:
+                    values["health.last_level"] = level
+                level = STALE
+                values["health.availability"] = "stale"
+            statuses.append({**row, "level": level, "values": values})
+        return {**self._latest, "status": statuses, "level": max((r["level"] for r in statuses), default=OK)}
 
     def open_window(self) -> HealthWindow:
         w = HealthWindow()
         with self._lock:
             self._windows.append(w)
-            if self._latest is not None:
-                w.add(self._latest)   # the conditions the session OPENED in
+            snap = self._aged_latest()
+            if snap is not None:
+                w.add(snap)   # the conditions the session OPENED in, including observation age
         return w
 
     def close_window(self, w: Optional[HealthWindow]) -> Optional[dict]:
@@ -427,7 +437,7 @@ class HealthMonitor:
         return w.summary()
 
     # ---- one poll ----------------------------------------------------------
-    def poll_once(self) -> dict:
+    def poll_once(self) -> Optional[dict]:
         now = self._clock()
         if self._started_t is None:
             self._started_t = now
@@ -435,6 +445,8 @@ class HealthMonitor:
         reported_at = []
         self._sequence += 1
         for p in self.providers:
+            if self._stop.is_set():
+                return None
             name = getattr(p, "name", type(p).__name__)
             try:
                 rs = list(p.poll() or [])
@@ -447,7 +459,7 @@ class HealthMonitor:
                 now = self._clock()
                 silent = now - self._last_ok.get(name, self._started_t)
                 previous = self._last_reports.get(name, [])
-                stale = silent >= self.stale_after_s or not previous
+                stale = isinstance(e, ObservationUnavailable) or silent >= self.stale_after_s or not previous
                 age, availability = silent, "stale" if stale else "retrying"
                 rs = [Report(r.component, STALE if stale else r.level,
                              f"no data for {silent:.0f}s: {e}" if stale else r.message,
@@ -480,6 +492,8 @@ class HealthMonitor:
         snap = build_snapshot(self.instance, self._wall_ns(),
                               merge(reports, self.instance, self.limits), self.service)
         with self._lock:
+            if self._stop.is_set():
+                return None   # a device read completed after stop; discard the unfinished poll
             self._latest = snap
             self._latest_at = published_at
             for w in self._windows:
@@ -487,6 +501,8 @@ class HealthMonitor:
         self._log_changes(snap)
         self._write_file(snap)
         for fn in self._observers:
+            if self._stop.is_set():
+                break
             try:
                 fn(snap)
             except Exception as e:   # noqa: BLE001
@@ -512,10 +528,12 @@ class HealthMonitor:
                 log.info(line)
 
     def _write_file(self, snap: dict) -> None:
-        if not self.file_path:
+        if not self.file_path or self._stop.is_set():
             return
         try:
             write_json_atomic(self.file_path, snap)
+            if self._stop.is_set():
+                self._remove_file()   # stop may have arrived while the filesystem write blocked
             self._file_warned = False
         except OSError as e:
             if not self._file_warned:
@@ -524,8 +542,9 @@ class HealthMonitor:
 
     # ---- the thread ----------------------------------------------------------
     def start(self) -> None:
-        if self._thread is not None:
+        if self._thread is not None and self._thread.is_alive():
             return
+        self._cleaned = False
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="health", daemon=True)
         self._thread.start()
@@ -533,13 +552,16 @@ class HealthMonitor:
                  self.interval_s, f" -> {self.file_path}" if self.file_path else "")
 
     def _run(self) -> None:
-        while not self._stop.is_set():
-            t0 = self._clock()
-            try:
-                self.poll_once()
-            except Exception:   # noqa: BLE001 -- the loop must survive anything
-                log.exception("health: poll failed")
-            self._stop.wait(max(0.0, self.interval_s - (self._clock() - t0)))
+        try:
+            while not self._stop.is_set():
+                t0 = self._clock()
+                try:
+                    self.poll_once()
+                except Exception:   # noqa: BLE001 -- the loop must survive anything
+                    log.exception("health: poll failed")
+                self._stop.wait(max(0.0, self.interval_s - (self._clock() - t0)))
+        finally:
+            self._cleanup()   # also runs when a blocked poll outlives stop's join budget
 
     @property
     def stop_event(self) -> threading.Event:
@@ -602,15 +624,27 @@ class HealthMonitor:
         t = self._thread
         if t is not None and t.is_alive() and t is not threading.current_thread():
             t.join(timeout=timeout_s)
-        self._thread = None
-        if t is None or not t.is_alive():   # never close a device a still-running poll is using
-            for p in self.providers:
-                close = getattr(p, "close", None)
-                if close is not None:
-                    try:
-                        close()
-                    except Exception as e:   # noqa: BLE001
-                        log.debug("health: closing provider %s: %s", getattr(p, "name", "?"), e)
+        if t is None or not t.is_alive():
+            self._thread = None
+            self._cleanup()
+        # Keep an unfinished worker registered so start() cannot clear its cancellation event.
+        self._remove_file()
+
+    def _cleanup(self) -> None:
+        """Only after polling has ended (or when no worker was started)."""
+        if self._cleaned:
+            return
+        self._cleaned = True
+        for p in self.providers:
+            close = getattr(p, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception as e:   # noqa: BLE001
+                    log.debug("health: closing provider %s: %s", getattr(p, "name", "?"), e)
+        self._remove_file()
+
+    def _remove_file(self) -> None:
         if self.file_path:
             try:
                 os.unlink(self.file_path)

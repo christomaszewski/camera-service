@@ -413,6 +413,8 @@ class _Stream:
 
 class _Cam:
     def __init__(self, dev, stream=None):
+        self.io_lock = threading.RLock()
+        self.stream_lock = threading.RLock()
         self.device, self.stream = dev, stream
         self.hardware_id = "FLIR Blackfly S sn 123"
         self.control_lost = False
@@ -553,14 +555,14 @@ def test_genicam_read_errors_skip_a_value_and_all_failing_raises():
 
 def test_genicam_does_not_touch_the_device_while_reconnecting_or_disconnected():
     dev = _Device({"DeviceTemperature": "40"})
-    [r] = _genicam(_Cam(dev), busy=lambda: True).poll()
-    assert r.level == STALE and r.message == "camera reconnecting" and dev.reads == []
     cam = _Cam(dev)
     cam.control_lost = True
-    [r] = _genicam(cam).poll()
-    assert r.level == STALE and r.message == "camera not connected" and dev.reads == []
-    [r] = GenicamProvider(lambda: None).poll()
-    assert r.level == STALE
+    for provider, reason in ((_genicam(_Cam(dev), busy=lambda: True), "camera reconnecting"),
+                             (_genicam(cam), "camera not connected"),
+                             (GenicamProvider(lambda: None), "camera not connected")):
+        m = HealthMonitor([provider], instance="c")
+        [r] = m.poll_once()["status"]
+        assert r["level"] == STALE and reason in r["message"] and dev.reads == []
     [cam] = _genicam(_Cam(_Device({}))).poll()
     assert cam.level == OK and cam.message == "no health features on this camera" and cam.values == {}
 
@@ -568,8 +570,150 @@ def test_genicam_does_not_touch_the_device_while_reconnecting_or_disconnected():
 def test_genicam_stops_reading_when_the_monitor_stops():
     stop = threading.Event()
     dev = _Device({"DeviceTemperature": lambda: stop.set() or "40", "DeviceUptime": "1"})
-    [cam] = _genicam(_Cam(dev), stop_event=stop).poll()
+    monitor = HealthMonitor([_genicam(_Cam(dev), stop_event=stop)], instance="c")
+    monitor._stop = stop
+    assert monitor.poll_once() is None
     assert dev.reads == ["DeviceTemperature"], "no further reads after the stop"
+
+
+def test_reconnect_retains_fault_identity_measurements_and_sample_age_until_recovery():
+    clock = Clock()
+    busy = [False]
+    cam = _Cam(_Device({"DeviceTemperature": "90"}))
+    m = HealthMonitor([_genicam(cam, busy=lambda: busy[0])], instance="c", clock=clock,
+                      limits={"temp.device_c": {"error_above": 75}})
+    [initial] = m.poll_once()["status"]
+    assert initial["level"] == ERROR
+    for reconnecting in (True, False):
+        busy[0] = reconnecting
+        cam.control_lost = not reconnecting
+        clock.t += 1
+        [stale] = m.poll_once()["status"]
+        assert stale["level"] == STALE
+        assert stale["hardware_id"] == initial["hardware_id"]
+        v = stale["values"]
+        assert v["temp.device_c"] == 90 and v["health.last_level"] == ERROR
+        assert v["health.sample_id"] == initial["values"]["health.sample_id"]
+        assert v["health.sample_age_s"] == clock.t - 100
+    cam.control_lost = False
+    cam.device.values["DeviceTemperature"] = "40"
+    [recovered] = m.poll_once()["status"]
+    assert recovered["level"] == OK
+    assert recovered["values"]["health.sample_id"] != initial["values"]["health.sample_id"]
+    assert recovered["values"]["health.sample_age_s"] == 0
+
+
+def test_partial_status_failures_preserve_faults_and_clear_only_on_success():
+    for feature, key, bad, good, level in (
+            ("TemperatureState", "temp.state", "Error", "Ok", ERROR),
+            ("PtpStatus", "ptp.state", "Uncalibrated", "Slave", WARN)):
+        dev = _Device({feature: bad, "DeviceUptime": "5"})
+        provider = _genicam(_Cam(dev), ptp_expected=True)
+        assert provider.poll()[0].level == level
+        dev.values[feature] = RuntimeError("timeout")
+        for _ in range(2):
+            report = provider.poll()[0]
+            assert report.level == level and report.values[key] == bad
+            assert report.values[f"health.metric.{key}.state"] == "unavailable"
+        dev.values[feature] = good
+        report = provider.poll()[0]
+        assert report.level == OK and report.values[key] == good
+        assert f"health.metric.{key}.state" not in report.values
+        # No previous status is also unavailable, never an invented healthy verdict.
+        dev.values[feature] = RuntimeError("timeout")
+        report = _genicam(_Cam(dev), ptp_expected=True).poll()[0]
+        assert report.level == WARN and report.values[key] is None
+
+
+def test_failed_ptp_latch_does_not_refresh_cached_status():
+    dev = _Device({"PtpStatus": "Uncalibrated", "PtpDataSetLatch": "", "DeviceUptime": "1"})
+    provider = _genicam(_Cam(dev), ptp_expected=True)
+    provider.poll()
+    def fail(name):
+        raise RuntimeError("latch timeout")
+    dev.execute_command = fail
+    dev.values["PtpStatus"] = "Slave"  # register contents cannot be trusted without a fresh latch
+    report = provider.poll()[0]
+    assert report.level == WARN and report.values["ptp.state"] == "Uncalibrated"
+    assert report.values["health.metric.ptp.state.state"] == "unavailable"
+
+
+def test_short_recording_window_ages_cached_health_without_mutating_publication():
+    clock = Clock()
+    m = HealthMonitor([_Flaky()], instance="c", clock=clock,
+                      limits={"temp.device_c": {"error_above": 40}})
+    published = m.poll_once()
+    clock.t += 30
+    summary = m.close_window(m.open_window())
+    st = summary["status"]["c: camera"]
+    assert summary["samples"] == 1 and st["worst_level"] == STALE
+    assert st["values"]["health.sample_age_s"]["last"] == 30
+    assert st["values"]["health.last_level"]["last"] == ERROR
+    assert published["status"][0]["values"]["health.sample_age_s"] == 0
+    assert published["level"] == ERROR
+
+
+def test_timed_out_stop_discards_poll_and_worker_eventually_cleans_up():
+    entered, release = threading.Event(), threading.Event()
+    class Blocking:
+        name = "blocking"
+        closed = 0
+        def poll(self):
+            entered.set()
+            assert release.wait(3)
+            return [Report("camera")]
+        def close(self):
+            self.closed += 1
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "health.json")
+        with open(path, "w") as f:
+            f.write("previous snapshot")
+        provider = Blocking()
+        m = HealthMonitor([provider], instance="c", file_path=path)
+        seen = []
+        m.add_observer(seen.append)
+        m.start()
+        worker = m._thread
+        try:
+            assert entered.wait(2)
+            m.stop(timeout_s=0.01)
+            assert worker.is_alive() and m._thread is worker
+            assert provider.closed == 0 and not os.path.exists(path)
+            m.start()
+            assert m._thread is worker and m.stop_event.is_set(), "no second worker after timeout"
+        finally:
+            release.set()
+            worker.join(3)
+            m.stop()
+        assert not worker.is_alive() and provider.closed == 1
+        assert seen == [] and m.latest is None and not os.path.exists(path)
+
+
+def test_stop_during_file_write_removes_file_and_skips_observers():
+    import cam_driver.health as health_module
+    entered, release = threading.Event(), threading.Event()
+    original = health_module.write_json_atomic
+    def delayed(path, snap):
+        entered.set()
+        assert release.wait(3)
+        original(path, snap)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "health.json")
+        m = HealthMonitor([_Flaky()], instance="c", file_path=path)
+        seen = []
+        m.add_observer(seen.append)
+        health_module.write_json_atomic = delayed
+        m.start()
+        worker = m._thread
+        try:
+            assert entered.wait(2)
+            m.stop(timeout_s=0.01)
+        finally:
+            release.set()
+            worker.join(3)
+            health_module.write_json_atomic = original
+            m.stop()
+        assert not worker.is_alive() and seen == [] and not os.path.exists(path)
 
 
 # ---- from_config + the config section ---------------------------------------------

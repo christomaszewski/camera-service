@@ -89,7 +89,8 @@ class FakeBoson:
         self._t.start()
 
     def _reply_payload(self, fid):
-        return {FN_FPA_TEMP: struct.pack(">h", self.fpa_dc), FN_FFC_STATE: struct.pack(">H", self.ffc),
+        # Pin the vendor's command and width independently of the implementation constants.
+        return {FN_FPA_TEMP: struct.pack(">h", self.fpa_dc), 0x00050054: struct.pack(">I", self.ffc),
                 FN_FRAME_COUNT: struct.pack(">I", self.frames), FN_LAST_FFC_FRAME: struct.pack(">I", self.last_ffc),
                 FN_CAMERA_SN: struct.pack(">I", 123456),
                 FN_PART_NUMBER: b"20640000A".ljust(20, b"\0")}.get(fid)
@@ -157,6 +158,20 @@ def test_negative_temperatures_and_an_ffc_in_progress():
         assert r.level == OK and r.message == "-5.3 C; FFC in progress", \
             "an FFC is normal operation: said, not alarmed"
     finally:
+        cam.close()
+
+
+def test_ffc_status_uses_the_vendor_command_and_all_four_byte_enum_values():
+    cam = FakeBoson()
+    prov = _provider(cam)
+    try:
+        for code, state in enumerate(("none", "imminent", "in_progress", "complete")):
+            cam.ffc = code
+            assert prov.poll()[0].values["ffc.state"] == state
+        assert cam.requests.count(0x00050054) == 4
+        assert 0x0005000C not in cam.requests, "in-progress is a different command/return type"
+    finally:
+        prov.close()
         cam.close()
 
 

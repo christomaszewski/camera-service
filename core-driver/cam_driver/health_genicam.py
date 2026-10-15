@@ -9,9 +9,10 @@ covered by the config's `features:` map (value name -> feature name), which also
 Reads go through `node.get_value_as_string()` -- one call for every node type (float, integer,
 enumeration, string, boolean) -- then parse. Each read is a GVCP round trip (~ms); a camera that is
 going away can make one block for the GVCP timeout, which is why this runs on the health thread and
-checks the stop event between reads. Nothing is polled while the pipeline is reconnecting: the
-reconnect worker is replacing the device object underneath, and a health read holding a reference to
-the OLD device would delay its control-privilege release (camera.GigECamera._release).
+checks the stop event between reads. Each device transaction shares the camera's io_lock with
+acquisition and configuration; polling yields the lock and drops all Aravis references between
+transactions. A concurrent reconnect invalidates the poll instead of mixing devices or keeping the
+old control privilege alive. Busy control operations are skipped, never waited for by health.
 
 gi-free at import: the device is duck-typed, so the unit tests drive it with a stub.
 """
@@ -22,7 +23,8 @@ import re
 import threading
 from typing import Callable, Dict, List, Optional
 
-from .health import ERROR, OK, STALE, WARN, Report, supply_power, validate_measurements
+from .health import (ERROR, OK, WARN, ObservationUnavailable, Report, supply_power,
+                     validate_measurements)
 
 log = logging.getLogger(__name__)
 
@@ -84,29 +86,54 @@ class GenicamProvider:
         self._selector_cache = (None, None)   # (id(device), [entries]) -- probed once per device
         self._measurements = set()
         self._device_id = None
+        self._status_values = {}
+
+    def _device_call(self, fn, *, reset=False):
+        """One transaction; fn must return only detached values, never Aravis objects."""
+        if self._stop.is_set():
+            raise RuntimeError("health stopped")
+        if self._busy():
+            raise ObservationUnavailable("camera reconnecting")
+        cam = self._target()
+        if cam is None:
+            raise ObservationUnavailable("camera not connected")
+        if not cam.io_lock.acquire(blocking=False):
+            raise RuntimeError("camera control busy")
+        try:
+            if self._busy():
+                raise ObservationUnavailable("camera reconnecting")
+            dev = cam.device
+            if dev is None or cam.control_lost:
+                raise ObservationUnavailable("camera not connected")
+            if self._device_id != id(dev):
+                if not reset:
+                    raise ObservationUnavailable("camera changed during health poll")
+                self._measurements.clear()
+                self._status_values.clear()
+                self._selector_cache = (None, None)
+                self._device_id = id(dev)
+            return fn(dev, cam)
+        finally:
+            # Do not keep the old device alive across a reconnect after releasing the lock.
+            dev = None
+            cam.io_lock.release()
 
     def poll(self) -> List[Report]:
-        if self._busy():
-            return [Report("camera", STALE, "camera reconnecting")]
-        cam = self._target()
-        dev = getattr(cam, "device", None) if cam is not None else None
-        if dev is None or getattr(cam, "control_lost", False):
-            return [Report("camera", STALE, "camera not connected",
-                           hardware_id=getattr(cam, "hardware_id", "") or "")]
-        hw = getattr(cam, "hardware_id", "") or ""
-        if self._device_id != id(dev):
-            self._measurements.clear()
-            self._device_id = id(dev)
+        hw = self._device_call(lambda dev, cam: cam.hardware_id or "", reset=True)
         values, errors, reads = {}, [], 0
 
-        if self._has(dev, PTP_LATCH) and any(self._has(dev, f) for f in ("PtpStatus", "PtpOffsetFromMaster")):
+        latch_failed = False
+        if self._has(PTP_LATCH) and any(self._has(f) for f in ("PtpStatus", "PtpOffsetFromMaster")):
             reads += 1
             try:
-                dev.execute_command(PTP_LATCH)
-            except Exception as e:   # noqa: BLE001 -- GLib.Error; the reads below just see older data
+                self._device_call(lambda dev, cam: dev.execute_command(PTP_LATCH))
+            except ObservationUnavailable:
+                raise
+            except Exception as e:   # noqa: BLE001 -- the latched fields are unavailable this poll
                 errors.append(f"{PTP_LATCH}: {e}")
+                latch_failed = True
 
-        for key, value in self._temperatures(dev, errors):
+        for key, value in self._temperatures(errors):
             reads += 1
             if key is not None:
                 values[key] = value
@@ -114,13 +141,23 @@ class GenicamProvider:
             if self._stop.is_set():
                 break
             for feature, scale in candidates:
-                if not self._has(dev, feature):
+                if not self._has(feature):
                     continue
                 reads += 1
                 try:
-                    values[key] = parse_value(dev.get_feature(feature).get_value_as_string(), scale)
+                    if latch_failed and feature in ("PtpStatus", "PtpOffsetFromMaster"):
+                        raise RuntimeError("PTP latch failed")
+                    values[key] = self._device_call(
+                        lambda dev, cam: parse_value(dev.get_feature(feature).get_value_as_string(), scale))
+                    if key in ("temp.state", "ptp.state"):
+                        self._status_values[key] = values[key]
+                except ObservationUnavailable:
+                    raise
                 except Exception as e:   # noqa: BLE001 -- GLib.Error on a read: skip this value
                     errors.append(f"{feature}: {e}")
+                    if key in ("temp.state", "ptp.state"):
+                        values[key] = self._status_values.get(key)
+                        values[f"health.metric.{key}.state"] = "unavailable"
                 break
         if reads and len(errors) >= reads:
             # Every read failed: the control channel is gone, not a missing feature. Let the monitor
@@ -130,60 +167,64 @@ class GenicamProvider:
                                   or k in ("supply.voltage_v", "supply.current_a", "supply.power_w"))
         for k, candidates in self._features.items():
             metric = k.startswith("temp.") and k.endswith("_c") or k in ("supply.voltage_v", "supply.current_a", "supply.power_w")
-            if metric and any(self._has(dev, feature) for feature, _ in candidates):
+            if metric and any(self._has(feature) for feature, _ in candidates):
                 self._measurements.add(k)
-        if self._has(dev, TEMPERATURE):
-            self._measurements.update(f"temp.{snake(entry)}_c" for entry in self._selector_entries(dev))
-            if not self._selector_entries(dev):
+        if self._has(TEMPERATURE):
+            self._measurements.update(f"temp.{snake(entry)}_c" for entry in self._selector_entries())
+            if not self._selector_entries():
                 self._measurements.add("temp.device_c")
         validate_measurements(values, self._measurements)
         supply_power(values)
         if "supply.power_w" not in values and {"supply.voltage_v", "supply.current_a"} <= self._measurements:
             validate_measurements(values, ["supply.power_w"])
         reports = [self._camera_report(hw, values, errors)]
-        stream = self._stream_stats(cam)
+        stream = self._stream_stats(self._target())
         if stream:
             reports.append(Report("stream", OK, values=stream))
         return reports
 
     # ---- pieces --------------------------------------------------------------
-    @staticmethod
-    def _has(dev, feature: str) -> bool:
-        try:
-            return dev.get_feature(feature) is not None
-        except Exception:   # noqa: BLE001
-            return False
+    def _has(self, feature: str) -> bool:
+        return self._device_call(lambda dev, cam: dev.get_feature(feature) is not None)
 
-    def _selector_entries(self, dev) -> list:
-        key = id(dev)
+    def _selector_entries(self) -> list:
+        key = self._device_id
         if self._selector_cache[0] == key:
             return self._selector_cache[1]
         entries = []
-        if self._has(dev, TEMPERATURE_SELECTOR):
+        if self._has(TEMPERATURE_SELECTOR):
             try:
-                fn = getattr(dev, "dup_available_enumeration_feature_values_as_strings", None) \
-                    or getattr(dev, "get_available_enumeration_feature_values_as_strings")
-                entries = list(fn(TEMPERATURE_SELECTOR) or [])
+                def read(dev, cam):
+                    fn = getattr(dev, "dup_available_enumeration_feature_values_as_strings", None) \
+                        or getattr(dev, "get_available_enumeration_feature_values_as_strings")
+                    return list(fn(TEMPERATURE_SELECTOR) or [])
+                entries = self._device_call(read)
+            except ObservationUnavailable:
+                raise
             except Exception as e:   # noqa: BLE001
                 log.debug("health: %s entries unreadable: %s", TEMPERATURE_SELECTOR, e)
         self._selector_cache = (key, entries)
         return entries
 
-    def _temperatures(self, dev, errors: list):
+    def _temperatures(self, errors: list):
         """(value name, value) per temperature read -- (None, None) for a failed one. With a
         selector: one per entry, temp.<entry>_c (Sensor -> temp.sensor_c, Mainboard ->
         temp.mainboard_c); without one the single reading is temp.device_c."""
-        if not self._has(dev, TEMPERATURE):
+        if not self._has(TEMPERATURE):
             return []
         out = []
-        entries = self._selector_entries(dev)
+        entries = self._selector_entries()
         for entry in entries or [None]:
             if self._stop.is_set():
                 break
             try:
-                if entry is not None and len(entries) > 1:
-                    dev.set_string_feature_value(TEMPERATURE_SELECTOR, entry)
-                v = parse_value(dev.get_feature(TEMPERATURE).get_value_as_string())
+                def read(dev, cam):
+                    if entry is not None and len(entries) > 1:
+                        dev.set_string_feature_value(TEMPERATURE_SELECTOR, entry)
+                    return parse_value(dev.get_feature(TEMPERATURE).get_value_as_string())
+                v = self._device_call(read)
+            except ObservationUnavailable:
+                raise
             except Exception as e:   # noqa: BLE001
                 errors.append(f"{TEMPERATURE}[{entry or ''}]: {e}")
                 out.append((None, None))
@@ -217,7 +258,15 @@ class GenicamProvider:
     def _stream_stats(cam) -> dict:
         """Aravis's host-side stream counters (completed/failed buffers, underruns; a GVSP stream
         adds missing/resent packets), as aravis.<name>. Cumulative, like the drop counters."""
-        stream = getattr(cam, "stream", None)
+        if cam is None or not cam.stream_lock.acquire(blocking=False):
+            return {}
+        try:
+            return GenicamProvider._read_stream_stats(cam.stream)
+        finally:
+            cam.stream_lock.release()
+
+    @staticmethod
+    def _read_stream_stats(stream) -> dict:
         if stream is None:
             return {}
         out = {}

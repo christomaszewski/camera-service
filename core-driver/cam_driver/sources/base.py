@@ -140,7 +140,8 @@ class Source(ABC):
 
     def genicam(self):
         """The GenICam handle the health provider polls (camera.GigECamera: .device, .stream,
-        .hardware_id, .control_lost) for an Aravis-backed source, or None. docs/HEALTH.md."""
+        .hardware_id, .control_lost, .io_lock, .stream_lock) for an Aravis-backed source, or None.
+        The locks serialize health transactions with capture setup/control. docs/HEALTH.md."""
         return None
 
     @property
