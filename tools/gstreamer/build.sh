@@ -21,7 +21,10 @@ mkdir -p /tmp/gstreamer-src
 cd /tmp/gstreamer-src
 for module in gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav gst-rtsp-server; do
   archive="$module-1.28.7.tar.xz"
-  curl --fail --location --retry 3 "https://gstreamer.freedesktop.org/src/$module/$archive" -o "$archive"
+  # The release CDN can interrupt HTTP/2 transfers; retry transport errors as well as HTTP errors.
+  curl --http1.1 --fail --location --retry 5 --retry-all-errors --retry-max-time 300 \
+    --connect-timeout 15 --max-time 120 \
+    "https://gstreamer.freedesktop.org/src/$module/$archive" -o "$archive"
   awk -v file="$archive" '$2 == file' /build-gstreamer/SHA256SUMS | sha256sum --check --strict
   tar -xf "$archive"
   options=()
