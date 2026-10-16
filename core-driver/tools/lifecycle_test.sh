@@ -24,7 +24,7 @@ docker run --rm --network none -v "$PWD/core-driver:/app" "$IMG" bash -c '
   seg_count() { ls "$R"/"$1"-*.mkv 2>/dev/null | wc -l; }
   rows() { echo $(( $(wc -l < "$1") - 1 )); }
   decode_ok() {
-    gst-launch-1.0 filesrc location="$1" ! matroskademux ! avdec_ffv1 ! fakesink >/tmp/decode.log 2>&1 \
+    gst-launch-1.0 filesrc location="$1" ! matroskademux ! avdec_ffv1 thread-type=slice ! fakesink >/tmp/decode.log 2>&1 \
       || { echo "FAIL: $1 decode errored"; tail -5 /tmp/decode.log; exit 1; }
     grep -qi "got eos" /tmp/decode.log || { echo "FAIL: $1 decode never reached EOS"; exit 1; }
   }

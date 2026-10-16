@@ -1,9 +1,10 @@
 # Camera-service tests
 
 CI runs on pull requests, pushes to `main` and `jp6-modern`, and manual dispatch. It builds
-the repository's development image for two native Linux runtimes: Ubuntu 22.04 / GStreamer
-1.20, and Ubuntu 26.04 / pinned GStreamer 1.28.8. Neither requires a camera, GPU, ROS stack,
-external Zenoh router, or saved field recording. Image build caches are separate per runtime.
+the repository's development image for three native Linux runtimes: Ubuntu 22.04 / GStreamer
+1.20, Ubuntu 24.04 / GStreamer 1.24, and Ubuntu 26.04 / pinned GStreamer 1.28.8. None requires
+a camera, GPU, ROS stack, external Zenoh router, or saved field recording. Image build caches
+are separate per runtime.
 
 ## Run the CI checks locally
 
@@ -17,6 +18,11 @@ docker build -f core-driver/Dockerfile.dev --target distro \
   --build-arg BASE=ubuntu:22.04 -t cam-ci:legacy .
 CAM_DEV_IMAGE=cam-ci:legacy CAM_EXPECT_GST=1.20 \
   CAM_TEST_REPORT_DIR=/tmp/cam-ci-legacy bash tools/ci_test.sh
+
+docker build -f core-driver/Dockerfile.dev --target distro \
+  --build-arg BASE=ubuntu:24.04 -t cam-ci:ubuntu24 .
+CAM_DEV_IMAGE=cam-ci:ubuntu24 CAM_EXPECT_GST=1.24 \
+  CAM_TEST_REPORT_DIR=/tmp/cam-ci-ubuntu24 bash tools/ci_test.sh
 
 python3 tools/test_dev_defaults.py
 ```
@@ -45,6 +51,7 @@ renders configuration and captures build commands; it does not launch vehicle se
 
 | Suite | What must remain true |
 |---|---|
+| `test_ffv1_decode.py` | FFV1 EOS preserves every frame, timestamp and pixel for GRAY8, GRAY16_LE, I420 and NV12, including one-frame files and both unsliced and four-slice bitstreams. |
 | `test_replay_recording_changes.py` | Stop/configure/start sessions can change raw recording codecs, quality and Bayer tiling without changing frame IDs, timestamps, gaps, or downstream image correspondence. |
 | `test_replay_integrity.py` | Missing parts, truncated video, mismatched CSV counts and known failed recordings cannot complete as faithful playback or loop forever. Unindexed frames receive no invented timestamps. A damaged replay exits the service nonzero. Legacy summaries that undercounted the last fragment still replay when all data is present. |
 | `test_recording_resilience.py` | Muxer/CSV/header write failures preserve preview and transport; audit-write failures refuse activation; a stalled recorder has bounded queues and accounts for drops; recording can subsequently restart. Two real Zenoh clients cannot overwrite one settings revision or activate under an unreviewed revision. |
@@ -56,7 +63,7 @@ uses real GStreamer recording, preview and shm/unixfd consumer pipelines. Disk f
 injected at the writer or GStreamer bus boundary; the tests never fill the host's disk.
 
 CI additionally runs `replay_test.sh`, `usb_test.sh`, `pcap_test.sh`, `lifecycle_test.sh`,
-`rtsp_test.sh`, and `rtsp_reconnect_test.sh` from `core-driver/tools` against both images.
+`rtsp_test.sh`, and `rtsp_reconnect_test.sh` from `core-driver/tools` against all three images.
 These exercise the actual service process with synthetic USB/RTSP sources and captures,
 including signal shutdown, recording sessions, Zenoh lifecycle calls and network recovery.
 Each script accepts `CAM_DEV_IMAGE` and has a three-minute CI deadline; logs are retained.
@@ -80,7 +87,7 @@ use their distro GStreamer: JP6 core 1.20, Ubuntu 24.04 core/bridge 1.24, and Ub
 core/bridge 1.28. The development core still uses distro Aravis. Updating these pins does not
 replace NVIDIA's plugins or enable H.264 High profile; the bridge retains its baseline fallback.
 
-### Local evidence
+### Initial pin-bump evidence (`f8ba7ad`)
 
 Built and tested natively as Linux/arm64 containers on Docker Desktop on an arm64 Mac.
 Candidate images use separate tags; existing development and vehicle tags were preserved.
@@ -94,7 +101,7 @@ Reports and logs are in the ignored `test-results/gstreamer-1.28.8/` directory.
 | `webrtc-bridge:rs-0.15.4-jp7` (Ubuntu 24.04, no NVIDIA injection) | Built; runtime reports GStreamer 1.24.2 and both Rust plugins at `0.15.4-1afff37`. |
 | Full modern runtime suite | 525 passed, no skips on the completed rerun. The old 1.28.7 image also passed all 525. |
 | Full legacy runtime suite | 525 passed, no skips on GStreamer 1.20.3 after compilation finished. An earlier run during builds had one shm shutdown timeout. |
-| Full Ubuntu 24.04 production suite | 511 passed, 14 failed with Aravis 0.8.36; see the qualification issues below. |
+| Full Ubuntu 24.04 production suite | 511 passed, 14 failed with Aravis 0.8.36; resolved by the subsequent FFV1 decoder fix below. |
 | Configuration/build defaults | 5 tests passed, including vehicle Rust defaults and explicit overrides. |
 | Service smoke tests on 1.28.8 | Replay, USB, PCAP, lifecycle, RTSP and RTSP reconnect all passed. Sources were synthetic. |
 | Modern WebRTC | All 5 applicable headless scenarios passed: raw shm, H.264 baseline, High-profile fallback, raw downscaling and unixfd Bayer downscaling. |
@@ -108,16 +115,43 @@ decoded-frame/CSV counts. Both passed in isolation on old and new images; the fu
 comparison passed, followed by 20 repetitions of each affected test on 1.28.8 (40 cases,
 zero failures). The initial failures remain recorded; their cause was not established.
 
-The Ubuntu 24.04 production image is **not fully qualified**. Its 14 failures involve missing
-decoded frames or mismatched recorded/replayed frame counts. An otherwise equivalent build with
-the previous Aravis 0.8.34 pin (also GStreamer 1.24.2) had 12 failures, eight shared with the
-candidate run. Targeted repetitions reproduced another four candidate failures on 0.8.34.
-The remaining two shutdown cases were intermittent on both images when run with an identical
-repetition harness. Across these runs, **all 14 candidate failing tests also failed with the
-old Aravis pin**. This establishes existing failures on the 1.24 runtime, but does not fix them
-or identify their cause. Keep the reports for follow-up; do not treat the successful
-Aravis capture/reconnect checks as a pass for the complete production suite. The simulated
-`ENOSPC` messages in resilience tests are intentional fault injection.
+### Ubuntu 24.04 FFV1 fix
+
+All 14 original Ubuntu 24.04 failures also reproduced with the old Aravis pin. Investigation
+isolated the loss to `avdec_ffv1`'s automatic frame threading in gst-libav 1.24.2: a minimal
+five-frame file produced all five encoded packets, and all five entered the decoder, but only
+four decoded frames left it. This happened in 50/50 default-decoder runs; selecting slice
+threading preserved all five in 50/50 runs. Upstream lists a related multithreaded I-frame
+decoder fix in [GStreamer 1.24.4](https://gstreamer.freedesktop.org/releases/1.24/).
+
+Replay and recording validators now use `avdec_ffv1 thread-type=slice`, with the same explicit
+setting in command-line checks. Slice threading retains parallel decoding for the recorder's
+four-slice FFV1 files. Legacy unsliced files remain readable but cannot use slice parallelism.
+The recording format, frame-count checks and byte-exact assertions are unchanged. This avoids
+the affected decoder mode while retaining the vehicle's distro GStreamer/NVIDIA stack.
+
+The 24 new pixel/PTS/EOS regression cases produced six failures with the old default decoder
+setting and all passed with the fix. Ubuntu 24.04 is now a permanent CI lane alongside 1.20 and
+1.28.8. New results live in `test-results/replay-1.24-fix/`; the original failing reports remain
+in `test-results/gstreamer-1.28.8/`. The simulated `ENOSPC` messages in resilience tests are
+intentional fault injection, not host disk exhaustion.
+
+Full-suite results after the fix, run sequentially on Linux/arm64 (no skips or failures):
+
+| Runtime | Result |
+|---|---|
+| Production Ubuntu 24.04, Aravis 0.8.36, GStreamer 1.24.2 | 549 passed |
+| New CI Ubuntu 24.04 distro image, GStreamer 1.24.2 | 549 passed |
+| Legacy Ubuntu 22.04, GStreamer 1.20.3 | 549 passed |
+| Modern Ubuntu 26.04, pinned GStreamer 1.28.8 | 549 passed |
+
+All six service smoke tests passed on Ubuntu 24.04: replay, synthetic USB, PCAP, lifecycle,
+RTSP and RTSP reconnect. The complete replay smoke test also passed on legacy and modern
+runtimes, including byte-exact recording/replay and stream-copy checks.
+
+The production core was rebuilt as `cam-core:replay-fix-jp7`; its installed replay/format
+modules match the tested checkout. Candidate image identities are recorded alongside the
+test reports. This branch remains separate pending the Jetson checks below.
 
 ### Jetson promotion gate
 

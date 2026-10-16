@@ -17,6 +17,7 @@ gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 import pytest
 
+from cam_driver.formats import FFV1_DECODER
 from cam_driver.config import parse_config
 from cam_driver.pipeline import CapturePipeline
 from test_recording_h264 import collect
@@ -109,7 +110,7 @@ def _rows(sess):
 def _assert_lossless(sess, result):
     assert result["ok"] and not result["session"]["truncated"], result
     decoded = [frame for part in result["session"]["files"] for frame in collect(
-        f'filesrc location="{part}" ! matroskademux ! avdec_ffv1 ! video/x-raw,format=GRAY8')]
+        f'filesrc location="{part}" ! matroskademux ! {FFV1_DECODER} ! video/x-raw,format=GRAY8')]
     rows = _rows(sess)
     assert len(decoded) == len(rows) == sess.frames > 0
     assert decoded == [(int(row["pts_ns"]), _px(1, int(row["frame_id"]))) for row in rows]

@@ -35,7 +35,7 @@ docker run --rm -v "$REPO/core-driver:/app" -v "$REPO/tools/gvsp-chunk-emitter:/
   echo "-- ptp provenance --"; grep -E "timestamp_source|ptp_synced" /data/recordings/gvsp-*.json
   echo "-- lossless mkv decodes --"
   M=$(ls /data/recordings/gvsp-*-00000.mkv) || { echo "FAIL: no recording segment"; exit 1; }
-  gst-launch-1.0 filesrc location="$M" ! matroskademux ! avdec_ffv1 ! fakesink >/tmp/decode.log 2>&1 \
+  gst-launch-1.0 filesrc location="$M" ! matroskademux ! avdec_ffv1 thread-type=slice ! fakesink >/tmp/decode.log 2>&1 \
     || { echo "FAIL: mkv decode errored"; tail -5 /tmp/decode.log; exit 1; }
   grep -qi "got eos" /tmp/decode.log || { echo "FAIL: decode never reached EOS"; exit 1; }
   echo "decode OK (EOS, no error)"

@@ -153,6 +153,11 @@ Frame IDs and timestamps still come from the matching CSV. Lossy H.264 replays t
 approximate image; it cannot recover pixels discarded during compression. Source pixel format,
 dimensions and Bayer pattern must stay consistent across sessions.
 
+FFV1 replay uses `avdec_ffv1 thread-type=slice`: automatic frame threading in Ubuntu 24.04's
+gst-libav 1.24.2 can discard the final decoded frame even when the file is complete. Slice
+threading preserves the frame count and still parallelizes the recorder's four-slice files;
+older unsliced FFV1 files decode without slice parallelism.
+
 An activate/deactivate that finishes successfully without recording a frame leaves its settings
 snapshot and empty sidecars on disk, but whole-run replay skips it. A run containing only empty
 sessions, or explicitly selecting an empty prefix, reports that there are no recorded frames.

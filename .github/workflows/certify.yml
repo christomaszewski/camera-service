@@ -1,5 +1,5 @@
 name: ci
-# Hardware-free correctness on both supported software runtimes, plus launcher contracts.
+# Hardware-free correctness on legacy, Ubuntu 24.04 and modern runtimes, plus launcher contracts.
 on:
   push:
     branches: [main, jp6-modern]
@@ -26,6 +26,10 @@ jobs:
             target: distro
             base: ubuntu:22.04
             gstreamer: '1.20'
+          - runtime: ubuntu24
+            target: distro
+            base: ubuntu:24.04
+            gstreamer: '1.24'
           - runtime: modern
             target: modern
             base: ubuntu:26.04

@@ -16,7 +16,7 @@ gi.require_version("Gst", "1.0")
 from gi.repository import GLib, Gst
 from cam_driver.bayer_tile import untile_cfa
 from cam_driver.config import parse_config
-from cam_driver.formats import parse_pixel_format
+from cam_driver.formats import FFV1_DECODER, parse_pixel_format
 from cam_driver.gst_frame import GstFrame
 from cam_driver.lifecycle import Lifecycle
 from cam_driver.pipeline import CapturePipeline
@@ -84,7 +84,7 @@ def _record(root, pixel_format, changes, *, count=30, gap_frames=5, empty_betwee
             snapshot = json.loads(Path(sess.settings_path).read_text())
             assert all(snapshot["requested"][key] == value for key, value in settings.items())
             encoder = header["recording_encoder"]
-            decoder = {"x264": "h264parse ! avdec_h264", "ffv1": "avdec_ffv1"}[encoder]
+            decoder = {"x264": "h264parse ! avdec_h264", "ffv1": FFV1_DECODER}[encoder]
             decoded = [data for part in r["session"]["files"]
                        for _, data in collect(f'filesrc location="{part}" ! matroskademux ! {decoder} ! videoconvert ! {caps}')]
             tile = header["cfa_tile_mode"]
@@ -281,7 +281,7 @@ def test_mixed_replay_streams_previews_and_rerecords_every_frame():
             assert load_stamps(sess.path_base + ".csv") == [st for st, _ in expected]
             caps = f"video/x-raw,format=NV12,width={W},height={H},framerate=25/1"
             decoded = [data for part in r["session"]["files"] for _, data in collect(
-                f'filesrc location="{part}" ! matroskademux ! avdec_ffv1 ! videoconvert ! {caps}')]
+                f'filesrc location="{part}" ! matroskademux ! {FFV1_DECODER} ! videoconvert ! {caps}')]
             assert decoded == [data for _, data in expected]
             assert pipe.drops.frames_missing == pipe.drops.enqueue_failures == 0
         finally:

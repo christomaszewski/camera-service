@@ -35,9 +35,9 @@ docker run --rm -v "$PWD/core-driver:/app" "$IMG" bash -c '
   echo "CSV identical ($ROWS rows)"
 
   echo "=== 4. decoded frames must be BIT-IDENTICAL (ffv1 lossless roundtrip) ==="
-  gst-launch-1.0 filesrc location="$ORIG_MKV" ! matroskademux ! avdec_ffv1 ! \
+  gst-launch-1.0 filesrc location="$ORIG_MKV" ! matroskademux ! avdec_ffv1 thread-type=slice ! \
     filesink location=/tmp/a.raw >/dev/null 2>&1
-  gst-launch-1.0 filesrc location="$RE_MKV" ! matroskademux ! avdec_ffv1 ! \
+  gst-launch-1.0 filesrc location="$RE_MKV" ! matroskademux ! avdec_ffv1 thread-type=slice ! \
     filesink location=/tmp/b.raw >/dev/null 2>&1
   [ -s /tmp/a.raw ] || { echo "FAIL: original decode produced nothing"; exit 1; }
   cmp /tmp/a.raw /tmp/b.raw || { echo "FAIL: replayed frames are not bit-identical"; exit 1; }
@@ -110,10 +110,10 @@ print("provenance ok: replay_of lists both sessions in order; frames_missing=0 a
 PYCHECK
 
   echo "=== 4. decoded frames must be A frames then B frames, bit-identical ==="
-  gst-launch-1.0 filesrc location="${A_CSV%.csv}-00000.mkv" ! matroskademux ! avdec_ffv1 ! filesink location=/tmp/a2.raw >/dev/null 2>&1
-  gst-launch-1.0 filesrc location="${B_CSV%.csv}-00000.mkv" ! matroskademux ! avdec_ffv1 ! filesink location=/tmp/b2.raw >/dev/null 2>&1
+  gst-launch-1.0 filesrc location="${A_CSV%.csv}-00000.mkv" ! matroskademux ! avdec_ffv1 thread-type=slice ! filesink location=/tmp/a2.raw >/dev/null 2>&1
+  gst-launch-1.0 filesrc location="${B_CSV%.csv}-00000.mkv" ! matroskademux ! avdec_ffv1 thread-type=slice ! filesink location=/tmp/b2.raw >/dev/null 2>&1
   cat /tmp/a2.raw /tmp/b2.raw > /tmp/ab.raw
-  gst-launch-1.0 filesrc location="$RE_MKV" ! matroskademux ! avdec_ffv1 ! filesink location=/tmp/re.raw >/dev/null 2>&1
+  gst-launch-1.0 filesrc location="$RE_MKV" ! matroskademux ! avdec_ffv1 thread-type=slice ! filesink location=/tmp/re.raw >/dev/null 2>&1
   [ -s /tmp/ab.raw ] || { echo "FAIL: original decode produced nothing"; exit 1; }
   cmp /tmp/ab.raw /tmp/re.raw || { echo "FAIL: replayed frames are not A+B bit-identical"; exit 1; }
   echo "frames bit-identical across the session boundary ($(stat -c %s /tmp/ab.raw) bytes)"
@@ -134,9 +134,9 @@ docker run --rm -v "$PWD/core-driver:/app" "$IMG" bash -c '
     || { echo "FAIL: replay run exited non-zero"; tail -30 /tmp/replay.log; exit 1; }
   RE_CSV=$(ls /data/recordings/rerec-*.csv); RE_MKV=$(ls /data/recordings/rerec-*-00000.mkv)
   diff "$ORIG_CSV" "$RE_CSV" || { echo "FAIL: replay CSV differs"; exit 1; }
-  gst-launch-1.0 filesrc location="$ORIG_MKV" ! matroskademux ! avdec_ffv1 ! \
+  gst-launch-1.0 filesrc location="$ORIG_MKV" ! matroskademux ! avdec_ffv1 thread-type=slice ! \
     filesink location=/tmp/a.raw >/dev/null 2>&1
-  gst-launch-1.0 filesrc location="$RE_MKV" ! matroskademux ! avdec_ffv1 ! \
+  gst-launch-1.0 filesrc location="$RE_MKV" ! matroskademux ! avdec_ffv1 thread-type=slice ! \
     filesink location=/tmp/b.raw >/dev/null 2>&1
   [ -s /tmp/a.raw ] && cmp /tmp/a.raw /tmp/b.raw \
     || { echo "FAIL: 16-bit replay not bit-identical"; exit 1; }

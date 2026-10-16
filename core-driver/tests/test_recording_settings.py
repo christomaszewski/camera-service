@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst
+from cam_driver.formats import FFV1_DECODER
 from cam_driver.config import RecordingConfig, parse_config
 from cam_driver.control_zenoh import ZenohControl
 from cam_driver.lifecycle import Lifecycle
@@ -139,7 +140,7 @@ def test_control_round_trip_and_sessions_keep_pixels_and_frozen_settings():
                 header = json.loads(Path(sess.path_base + ".json").read_text())
                 assert header["recording_settings_file"] == str(path)
                 assert header["recording_encoder"] == encoder
-                decoder = "h264parse ! avdec_h264" if encoder == "x264" else "avdec_ffv1"
+                decoder = "h264parse ! avdec_h264" if encoder == "x264" else FFV1_DECODER
                 decoded = [item for part in result["session"]["files"]
                            for item in collect(f'filesrc location="{part}" ! matroskademux ! {decoder} ! videoconvert ! {caps}')]
                 rows = list(csv.DictReader(Path(sess.path_base + ".csv").open()))

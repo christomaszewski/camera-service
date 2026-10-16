@@ -43,7 +43,7 @@ PY
 
   echo "=== 4. FFV1 recording decodes BIT-EXACT to the capture frames ==="
   M=$(ls /data/recordings/pcaptest-*-00000.mkv) || { echo "FAIL: no recording"; exit 1; }
-  gst-launch-1.0 filesrc location="$M" ! matroskademux ! avdec_ffv1 ! \
+  gst-launch-1.0 filesrc location="$M" ! matroskademux ! avdec_ffv1 thread-type=slice ! \
     filesink location=/tmp/got.raw >/dev/null 2>&1
   cmp /tmp/got.raw /tmp/expected.raw \
     || { echo "FAIL: recorded frames are not bit-exact to the capture"; exit 1; }

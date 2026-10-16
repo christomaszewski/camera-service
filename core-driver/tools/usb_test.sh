@@ -22,7 +22,7 @@ docker run --rm -v "$PWD/core-driver:/app" "$IMG" bash -c '
   ls -la /data/recordings/
   echo "=== decode FFV1 mkv (must reach EOS, no error) ==="
   M=$(ls /data/recordings/usbfake-*-00000.mkv) || { echo "FAIL: no recording segment"; exit 1; }
-  gst-launch-1.0 filesrc location="$M" ! matroskademux ! avdec_ffv1 ! fakesink >/tmp/decode.log 2>&1 \
+  gst-launch-1.0 filesrc location="$M" ! matroskademux ! avdec_ffv1 thread-type=slice ! fakesink >/tmp/decode.log 2>&1 \
     || { echo "FAIL: mkv decode errored"; tail -5 /tmp/decode.log; exit 1; }
   grep -qi "got eos" /tmp/decode.log || { echo "FAIL: decode never reached EOS"; exit 1; }
   echo "decode OK (EOS, no error)"
@@ -63,7 +63,7 @@ docker run --rm -v "$PWD/core-driver:/app" "$IMG" bash -c '
   grep -q "recorder: encoder=ffv1" /tmp/c.log || { echo "FAIL: auto did not pick ffv1 for a color source"; exit 1; }
   echo "=== recording stores I420 natively (NOT NV24/GRAY8 => no resample) + decodes ==="
   M=$(ls /data/recordings/usbcolor-*-00000.mkv) || { echo "FAIL: no recording segment"; exit 1; }
-  gst-launch-1.0 -v filesrc location="$M" ! matroskademux ! avdec_ffv1 ! fakesink >/tmp/decode.log 2>&1 \
+  gst-launch-1.0 -v filesrc location="$M" ! matroskademux ! avdec_ffv1 thread-type=slice ! fakesink >/tmp/decode.log 2>&1 \
     || { echo "FAIL: mkv decode errored"; tail -5 /tmp/decode.log; exit 1; }
   grep -oE "format=\(string\)[A-Za-z0-9_]+|Got EOS" /tmp/decode.log | sort -u | head
   grep -q "format=(string)I420" /tmp/decode.log || { echo "FAIL: recording is not native I420"; exit 1; }

@@ -72,7 +72,7 @@ docker run --rm -v "$PWD/core-driver:/app" "$IMG" bash -c '
   echo "sidecar rows: $ROWS"
   echo "=== decode FFV1 mkv (must reach EOS, no error) ==="
   M=$(ls /data/recordings/fake-*-00000.mkv) || { echo "FAIL: no recording segment"; exit 1; }
-  gst-launch-1.0 filesrc location="$M" ! matroskademux ! avdec_ffv1 ! fakesink >/tmp/decode.log 2>&1 \
+  gst-launch-1.0 filesrc location="$M" ! matroskademux ! avdec_ffv1 thread-type=slice ! fakesink >/tmp/decode.log 2>&1 \
     || { echo "FAIL: mkv decode errored"; tail -5 /tmp/decode.log; exit 1; }
   grep -qi "got eos" /tmp/decode.log || { echo "FAIL: decode never reached EOS"; exit 1; }
   echo "decode OK (EOS, no error)"

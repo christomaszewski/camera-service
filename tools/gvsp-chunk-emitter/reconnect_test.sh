@@ -55,7 +55,7 @@ docker run --rm -v "$REPO/core-driver:/app" cam-chunks bash -c '
   M=$(ls /data/recordings/gvspr-*-00000.mkv 2>/dev/null | head -1)
   if [ -n "$M" ]; then
     ls -l "$M"
-    if gst-launch-1.0 filesrc location="$M" ! matroskademux ! avdec_ffv1 ! fakesink >/tmp/decode.log 2>&1 \
+    if gst-launch-1.0 filesrc location="$M" ! matroskademux ! avdec_ffv1 thread-type=slice ! fakesink >/tmp/decode.log 2>&1 \
        && grep -qi "got eos" /tmp/decode.log; then
       echo "decode OK (EOS, no error)"
     else

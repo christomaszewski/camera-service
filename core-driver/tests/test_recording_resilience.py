@@ -22,6 +22,7 @@ from gi.repository import GLib, Gst
 import pytest
 import zenoh
 
+from cam_driver.formats import FFV1_DECODER
 from cam_driver.config import parse_config
 from cam_driver.control_zenoh import ZenohControl
 from cam_driver.lifecycle import Lifecycle
@@ -120,7 +121,7 @@ def _healthy_session(live):
     result = live.lc.request("deactivate")
     assert result["ok"] and not result["session"]["truncated"], result
     frames = [data for part in result["session"]["files"] for _, data in collect(
-        f'filesrc location="{part}" ! matroskademux ! avdec_ffv1 ! video/x-raw,format=GRAY8')]
+        f'filesrc location="{part}" ! matroskademux ! {FFV1_DECODER} ! video/x-raw,format=GRAY8')]
     assert len(frames) == sess.frames
     return sess
 
@@ -239,7 +240,7 @@ def test_stalled_recorder_has_bounded_backpressure_and_live_output_continues(liv
     result = live.lc.request("deactivate")
     assert result["ok"] and not result["session"]["truncated"], result
     decoded = [data for part in result["session"]["files"] for _, data in collect(
-        f'filesrc location="{part}" ! matroskademux ! avdec_ffv1 ! video/x-raw,format=GRAY8')]
+        f'filesrc location="{part}" ! matroskademux ! {FFV1_DECODER} ! video/x-raw,format=GRAY8')]
     assert len(decoded) == sess.frames
     _healthy_session(live)
 

@@ -52,7 +52,7 @@ from gi.repository import GLib, Gst
 
 from .. import playback
 from ..bayer_tile import normalize_mode, untile_cfa
-from ..formats import encoded_info, select_decoder
+from ..formats import FFV1_DECODER, encoded_info, select_decoder
 from ..gst_frame import GstFrame
 from ..timestamps import FrameStamp, TimestampSource
 from .gstbase import GstPipelineSource
@@ -62,7 +62,7 @@ log = logging.getLogger(__name__)
 # mkv track caps -> the software decode chain for the RAW path. Preserve every stored frame
 # and its decoded pixels (lossless recordings must remain bit-exact).
 _RAW_DECODE = {
-    "video/x-ffv": "avdec_ffv1",   # FFV1: the caps NAME is x-ffv (version rides `ffvversion`)
+    "video/x-ffv": FFV1_DECODER,   # FFV1: the caps NAME is x-ffv (version rides `ffvversion`)
     "video/x-h265": "h265parse ! avdec_h265",
     "video/x-h264": "h264parse ! avdec_h264",
     "image/jpeg": "jpegdec",

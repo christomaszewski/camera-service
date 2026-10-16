@@ -112,7 +112,7 @@ def main() -> int:
         print("FAIL: no recording produced"); return 1
     decoded_out = "/tmp/decoded.raw"
     subprocess.run(["gst-launch-1.0", "-q", "filesrc", f"location={mkvs[0]}", "!",
-                    "matroskademux", "!", "avdec_ffv1", "!", "videoconvert", "!",
+                    "matroskademux", "!", "avdec_ffv1", "thread-type=slice", "!", "videoconvert", "!",
                     "video/x-raw,format=GRAY8", "!", "filesink", f"location={decoded_out}"], check=True)
 
     csvs = glob.glob(f"{RECDIR}/rt-*.csv")   # prefix is run-stamped (rt-<UTC>.csv)

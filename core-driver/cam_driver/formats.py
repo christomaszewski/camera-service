@@ -31,6 +31,12 @@ VALID_ENCODERS = ("auto", "hw-hevc-lossless", "ffv1", "x265-lossless", "stream-c
 
 VALID_DECODERS = ("auto", "software")
 
+# gst-libav 1.24.2 can discard the final FFV1 frame with auto/frame threading at EOS.
+# Slice threading preserves every frame and still parallelizes our four-slice recordings.
+# Share this policy with recording validators; bare avdec_ffv1 can misreport a complete file
+# as truncated. Legacy unsliced FFV1 also works, with no slice-level parallelism available.
+FFV1_DECODER = "avdec_ffv1 thread-type=slice"
+
 # Encoded delivery (already-compressed sources: MJPEG USB, H.264/H.265 RTSP). Per codec:
 #   src_caps -- caps the source tags the encoded buffers with (= the recorder appsrc caps)
 #   parser   -- the recorder stream-copies through this into the muxer (no re-encode)
