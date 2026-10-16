@@ -28,6 +28,8 @@ platform:                                # JP6 vs JP7 is a HOST fact; cam-up aut
   #                                      auto-detected -- a host must ask for it.
 
 images:                                  # pull-based deploy: cam-up points images at a registry (docs/deploy-without-rig.md)
+  override_env: {cam-core: CAM_CORE_IMAGE, cam-dev: CAM_DEV_IMAGE, ros2-bridge: CAM_ROS2_IMAGE,
+                 ros1-bridge: CAM_ROS1_IMAGE, webrtc-bridge: CAM_WEBRTC_IMAGE}
   registry_env: CAM_REGISTRY            #   set -> <registry>/<name>:<platform> for every image; then `pull` + `up`
   rig_registry_env: RIG_IMAGE_REGISTRY   #   rig's fleet registry; cam-up honors it (applies the platform tag)
   rig_tag_env: RIG_IMAGE_TAG             #   rig's fleet image tag (= vehicle.yaml images.tag). A VERSION tag
@@ -42,12 +44,16 @@ images:                                  # pull-based deploy: cam-up points imag
 build:                                   # rig's BUILD phase: how to (re)build + push this stack's images to the
                                          # fleet registry. See docs/fleet-build-contract.md for the rig loop.
   command: tools/build-images.sh         #   builds + pushes; reads $RIG_IMAGE_REGISTRY (or arg $1); tag = arg $2
-  arch: arm64                            #   build NATIVELY on an arm64 host (Aravis + colcon compiles; no qemu)
-  platforms: [jp7, jp6, jp6m, dev]       #   platform tags this stack publishes -- rig builds the ones the fleet uses
+  platforms: [jp7, jp6, jp6m, dev]       # rig builds every declared runtime by default
                                          #   (jp6m = a JP6 host on the 26.04 userspace: docs/jp6-modern-userspace.md)
-                                         #   (`dev` only gets built when a target actually declares it,
-                                         #    so listing it here costs a normal fleet build nothing)
   images: [cam-core, cam-dev, ros2-bridge, ros1-bridge, webrtc-bridge]   # produced as <registry>/<image>:<platform>
+  architectures: [arm64, amd64]
+  capabilities: {no_cache: true, platforms: true}
+  variants:
+    jp6: {architectures: [arm64], images: [cam-core, ros2-bridge, ros1-bridge, webrtc-bridge]}
+    jp6m: {architectures: [arm64], images: [cam-core, ros2-bridge, webrtc-bridge]}
+    jp7: {architectures: [arm64], images: [cam-core, ros2-bridge, webrtc-bridge]}
+    dev: {architectures: [arm64, amd64], images: [cam-dev, ros2-bridge, webrtc-bridge]}
                                          #   (ros1-bridge is Noetic / jp6-class; built into the jp6 set.
                                          #    cam-dev is the `dev` set's core, replacing cam-core there)
 
@@ -70,6 +76,7 @@ launch_surface:                          # the files rig copies to the vehicle (
   - tools/sensor_env.py
   - docker-compose.yml
   - docker-compose.dev.yml
+  - docker-compose.source.yml            # opt-in --source; requires a full checkout
   - docker-compose.external-config.yml
   - docker-compose.jp7.yml                # the JP7 (runc + CDI NVENC) overlay; cam-up applies it per host
   - docker-compose.jp6.yml                # the JP6 overlay: the v4l2 codec device nodes the r36 runtime's
@@ -93,6 +100,7 @@ external_volumes:                        # rig removes these only on FINAL teard
   - "cam_{name}_sock"                   #   never on a restart; {name} is the instance name
 
 replay:                                  # `rig replay <run>`: this service can replay ITS OWN recordings
+  platform: dev                          # portable software runtime on replay hosts
   #                                        (docs/PLAYBACK.md "Timeline"; rig-sensor-replay-plan). rig finds
   #                                        an instance's recordings under `data` in the source run and renders
   #                                        the instance's config with `overrides` on top for the session --

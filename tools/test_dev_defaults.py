@@ -6,6 +6,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import shutil
+import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -104,6 +106,32 @@ class DevDefaults(unittest.TestCase):
         svc = json.loads(result.stdout)['services']
         self.assert_dev(svc)
         self.assertEqual(svc['ros2-source']['image'], 'ros2-bridge:dev')
+
+    def test_vendored_dev_uses_image_code(self):
+        staging = Path(self.tmp.name) / 'vendored'
+        descriptor = yaml.safe_load((REPO / 'rigging.yaml').read_text())
+        for rel in descriptor['launch_surface'] + descriptor['examples']:
+            dest = staging / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(REPO / rel, dest)
+        result = subprocess.run([str(staging / 'cam-up'), '--dev', str(self.config),
+                                 'config', '--format', 'json'], env=clean_env(),
+                                capture_output=True, text=True, check=True)
+        core = json.loads(result.stdout)['services']['core-driver']
+        self.assertEqual(core['command'], ['supervisor.py'])
+        self.assertFalse(any(v['target'] == '/app' for v in core.get('volumes', [])))
+        result = subprocess.run([str(staging / 'cam-up'), '--dev', '--source',
+                                 str(self.config), 'config'], env=clean_env(),
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('full source checkout', result.stderr)
+
+    def test_explicit_source_mount(self):
+        result = subprocess.run([str(REPO / 'cam-up'), '--dev', '--source',
+                                 str(self.config), 'config', '--format', 'json'],
+                                env=clean_env(), capture_output=True, text=True, check=True)
+        core = json.loads(result.stdout)['services']['core-driver']
+        self.assertTrue(any(v['target'] == '/app' for v in core['volumes']))
 
     def test_build_matrix(self):
         # Capture build commands at the CLI boundary; no builds, pushes, or registry access.

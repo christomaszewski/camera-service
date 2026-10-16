@@ -1,0 +1,5 @@
+# Explicit checkout-only development overlay. Normal dev deployments use code in the image.
+services:
+  core-driver:
+    volumes:
+      - ./core-driver:/app

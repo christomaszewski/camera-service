@@ -16,21 +16,29 @@ concurrency:
 jobs:
   unit:
     name: tests (${{ matrix.runtime }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
           - runtime: legacy
+            runner: ubuntu-latest
             target: distro
             base: ubuntu:22.04
             gstreamer: '1.20'
           - runtime: ubuntu24
+            runner: ubuntu-latest
             target: distro
             base: ubuntu:24.04
             gstreamer: '1.24'
           - runtime: modern
+            runner: ubuntu-latest
+            target: modern
+            base: ubuntu:26.04
+            gstreamer: '1.28.8'
+          - runtime: modern-arm64
+            runner: ubuntu-24.04-arm
             target: modern
             base: ubuntu:26.04
             gstreamer: '1.28.8'
@@ -48,6 +56,8 @@ jobs:
           load: true
           cache-from: type=gha,scope=cam-ci-${{ matrix.runtime }}
           cache-to: type=gha,mode=max,scope=cam-ci-${{ matrix.runtime }}
+      - name: image-backed runtime contains supervisor
+        run: docker run --rm --network none --entrypoint test cam-ci:${{ matrix.runtime }} -r /app/supervisor.py
       - name: tests and branch coverage (no skips)
         env:
           CAM_DEV_IMAGE: cam-ci:${{ matrix.runtime }}
@@ -95,9 +105,10 @@ jobs:
           repository: christomaszewski/rig
           path: .rig
       - run: python3 -m pip install --user pyyaml
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap libseccomp2
       # Certify against both real sensor shapes (usb exercises the device overlay, rtsp the probe-less
       # path). Warnings don't fail the job; contract errors do.
       - name: certify (usb config)
-        run: ./.rig/rig certify --repo . --config core-driver/config/sensors/cam_usb.yaml
+        run: ./.rig/rig certify --require-build-check --repo . --config core-driver/config/sensors/cam_usb.yaml
       - name: certify (rtsp config)
-        run: ./.rig/rig certify --repo . --config core-driver/config/sensors/cam_rtsp.yaml
+        run: ./.rig/rig certify --require-build-check --repo . --config core-driver/config/sensors/cam_rtsp.yaml

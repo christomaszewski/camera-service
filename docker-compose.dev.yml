@@ -1,7 +1,7 @@
 # The `dev` PLATFORM overlay (no Jetson) — applied by `cam-up --dev`, and equally by
 # CAM_PLATFORM=dev / RIG_TARGET_PLATFORM=dev / RIG_IMAGE_TAG=dev, so a bench box is selected the
 # same way a vehicle is. Runs the core from the cam-dev image (Ubuntu + GStreamer + Aravis, NO
-# NVIDIA stack) instead of the l4t image, with the source mounted for live iteration. The
+# NVIDIA stack) instead of the l4t image. Code comes from the image; --source enables live edits. The
 # core and WebRTC bridge share pinned GStreamer 1.28.8 and unixfd transport; ROS keeps its distro
 # packages. WebRTC uses runc (no NVENC off-Jetson — webrtcsink falls back to x264enc). cam-up
 # also sets CAM_NETWORK=bridge whenever the resolved platform is dev.
@@ -57,5 +57,3 @@ services:
     runtime: runc                       # no nvidia runtime on a laptop / CI
     entrypoint: ["python3"]             # cam-dev's default CMD is main.py; force the supervisor
     command: ["supervisor.py"]
-    volumes:
-      - ./core-driver:/app              # cam-dev expects the code mounted (live edits, no rebuild)

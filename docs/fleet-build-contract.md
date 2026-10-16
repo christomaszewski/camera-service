@@ -1,79 +1,50 @@
-# Fleet image build + publish — the rig contract (proposal)
+# Fleet image build contract
 
-How the fleet's images get from N stack repos into a registry that `rig` deploys from. This is a
-**cross-repo proposal** drafted from cam (one stack); it's for `bringup` (rig) + the `boilerplate`
-template to implement, and for the other stacks (the nav drivers) to back-fill. cam already implements
-its side.
+Rig builds all declared runtime variants and CPU architectures by default. The deployment's
+`platform` still selects what runs; use `rig build --platform dev --arch amd64 --tag bench-1`
+for a targeted iteration. Use the same tag in the deployment when launching that iteration.
 
-## Model: build once on an arm64 host, pull many
+| Runtime | Architectures | Images |
+| --- | --- | --- |
+| jp6 | arm64 | cam-core, ros2-bridge, ros1-bridge, webrtc-bridge |
+| jp6m, jp7 | arm64 | cam-core, ros2-bridge, webrtc-bridge |
+| dev | arm64, amd64 | cam-dev, ros2-bridge, webrtc-bridge |
 
-```
-arm64 build host (has the stack repos)                 each vehicle (Orin)
-  rig build ──► for each stack: <build.command> ──push──►  registry  ──pull──►  rig up ──► cam-up/... deploy
-                (RIG_IMAGE_REGISTRY set, per platform)      (RIG_IMAGE_REGISTRY)
-```
+Runtime tags are distinct (`v1-jp6m`, `v1-dev`); multiarch indexes choose a CPU within a runtime.
+The dev core and WebRTC bridge use pinned GStreamer on Ubuntu 26.04 with software codecs, runc,
+and unixfd transport. There is no additional amd64-specific runtime name.
 
-- **One registry var, two phases.** rig reads `images.registry` from `vehicle.yaml` and exports
-  **`RIG_IMAGE_REGISTRY`** for BOTH the build phase (where the build script pushes to it) and the deploy
-  phase (where the launcher pulls from it). No second variable.
-- **Native arm64 build.** Jetsons are arm64; cam compiles Aravis + colcon, so cross-building from x86
-  under qemu is slow. rig builds on an arm64 host (an Orin is fine) declared by `build.arch`.
-- **Build only what's deployed.** rig iterates the stacks in the vehicle/fleet deployment (its
-  `services.yaml` ∩ the vehicle config), not every repo.
+`tools/build-images.sh REGISTRY TAG` takes its runtime from `RIG_TARGET_PLATFORM`, otherwise from
+the tag suffix. Rig supplies `RIG_BUILD_PLATFORMS` (comma-separated Docker platforms) and
+`RIG_BUILD_RESULT` (JSONL output path for published digests). The shared helper in `tools/rig-build.sh`
+uses Buildx publication and provenance for these builds. `RIG_BUILD_NO_CACHE=1` forwards
+`--no-cache --pull` to every image build. Standalone calls without `RIG_BUILD_PLATFORMS` retain
+host-native Docker builds and the existing `PLATFORM_FLAG` override.
 
-## Per-stack contract — `rigging.yaml: build:`
-
-Each stack declares how to build + publish its images:
-
-```yaml
-build:
-  command: tools/build-images.sh   # builds + pushes; reads $RIG_IMAGE_REGISTRY (or arg $1); tag = arg $2
-  arch: arm64                      # build host arch (native; no qemu)
-  platforms: [jp7, jp6]            # platform tags this stack publishes; [default] / omit for single-arch stacks
-  images: [cam-core, ros2-bridge, webrtc-bridge]   # produced as <registry>/<image>:<platform>
+```sh
+# Standalone native dev build; full default image set, no publication.
+PUSH=0 RIG_TARGET_PLATFORM=dev tools/build-images.sh registry.lan:5000 bench-dev
+# Standalone publication of both CPU members.
+RIG_BUILD_PLATFORMS=linux/arm64,linux/amd64 RIG_TARGET_PLATFORM=dev tools/build-images.sh registry.lan:5000 v1-dev
+# No image build or registry access: command-contract certification.
+rig certify --repo . --require-build-check
 ```
 
-Contract for `build.command`:
-- Reads the target registry from **`$RIG_IMAGE_REGISTRY`** (or positional `$1`).
-- Takes the tag as `$2` and pushes `<registry>/<image>:<tag>` **verbatim** for every image in `images`.
-  Two tag shapes: a bare **platform tag** (`jp7` — legacy) or a composed **`<version>-<platform>`**
-  (`v1.4.0-jp7` — the versioned matrix; rig invokes once per platform in `platforms`). The jp6/jp7
-  build variant comes from **`$RIG_TARGET_PLATFORM`** when rig sets it, else is derived from the tag
-  (bare value or `-jp6`/`-jp7` suffix). `PUSH=0` builds without pushing (CI/dry-run).
-- Exits non-zero on failure; safe to re-run (idempotent push).
+A Buildx builder must advertise the requested architectures and be able to reach the registry.
+Native builder nodes avoid expensive emulation. `PUSH=0` under Buildx permits a single CPU member;
+multiarch output must be pushed. `IMAGES` remains a standalone subset override; portable release
+builds must produce the complete declared set or Rig rejects their result report.
 
-Single-platform stacks (the nav drivers) set `platforms: [default]` (or omit) and push `…/<image>:latest`.
+Rig carries the full companion image catalog into baked artifacts and run captures. Reconstruction
+chooses the replay host's provisioned runtime, otherwise this descriptor's `replay.platform: dev`.
+Use `rig reconstruct RUN --platform recorded` for deliberate Jetson replay. Missing companion images
+or CPU members fail before replay starts infrastructure.
 
-## rig build loop (pseudocode for `bringup`)
+Dev launch surfaces run the code in the image. Live source editing is explicit:
+`cam-up --dev --source CONFIG up -d`. The source option requires a full checkout containing
+`core-driver/supervisor.py`; a vendored launch surface cannot hide the image's `/app`.
 
-```python
-reg = vehicle.images.registry                      # e.g. devbox:5000
-for stack in deployed_stacks:                       # services.yaml ∩ vehicle config
-    d = load(stack.repo / "rigging.yaml")           # falls back to the legacy deploy.yaml
-    if not d.build: continue                        # stack with no build entrypoint (CI-published) -> skip
-    tags = d.build.platforms or ["default"]
-    tags = [t for t in tags if t in fleet_target_platforms]   # build only what's needed
-    for tag in tags:
-        run([d.build.command, "", tag],             # registry via env (one source of truth)
-            cwd=stack.repo, env={**base_env, "RIG_IMAGE_REGISTRY": reg},
-            host=arm64_builder(d.build.arch))
-# then, per vehicle:  rig up  ->  RIG_IMAGE_REGISTRY=reg <launcher> <config> up -d   (pulls from reg)
-```
-
-## The platform-tag gotcha (why cam needed `cam-up` wiring)
-
-The compose prefix alone — `${RIG_IMAGE_REGISTRY}/cam-core` — resolves to `:latest`, but cam publishes
-per-platform tags. So cam's launcher maps `RIG_IMAGE_REGISTRY` into its registry logic and composes the
-pull ref via the per-image override that wins in compose: with a **version-valued** `images.tag`
-(`v1.4.0`) it appends the resolved platform (`…/cam-core:v1.4.0-jp7`, matching what `build.command`
-pushed); a legacy **platform-valued** tag (`jp7`) or a bare-platform standalone deploy passes through as
-`…/cam-core:jp7`. The platform itself resolves `CAM_PLATFORM` > `RIG_TARGET_PLATFORM` (vehicle.yaml
-`platform:`) > legacy platform-valued tag > host detection. Single-`:latest` stacks don't hit this; any
-multi-platform stack must do the same.
-
-## Prereqs / open items
-- **Registry reachable from both** the arm64 build host and every vehicle (the `docker-registry` repo;
-  insecure-registry trust or TLS).
-- **Auth**, if the registry is private (build host pushes, vehicles pull).
-- **Nav drivers** publish a CI image today + a manual runtime `docker build/push`; to be `rig build`-able
-  uniformly they need a `build.command` like cam's (best put in the `boilerplate` template).
+Existing artifacts need updated descriptors/launchers and rebuilt images. An uncached build does not
+advance Rig's pinned source revision. The isolated certification check needs Bubblewrap (Linux) or
+sandbox-exec (macOS); CI requires it to complete. Native CI uses both CPU architectures, but actual
+Jetson capture and software replay of Jetson-produced recordings still require hardware acceptance.

@@ -3,7 +3,7 @@
 # instead of building per-vehicle. Jetsons are arm64, so run this on an arm64 host (an Orin is
 # perfect) for a native build, or cross-build from x86 with PLATFORM_FLAG (slow; needs qemu binfmt).
 #
-# The `dev` variant is the same mechanism pointed at a NON-Jetson arm64 box (a bench machine, an
+# The `dev` variant is the same mechanism pointed at a non-Jetson arm64/amd64 box (a bench machine, an
 # arm64 Mac, CI): it builds cam-dev (core-driver/Dockerfile.dev -- GStreamer 1.28.8, no NVIDIA
 # stack) instead of cam-core, so a bench box PULLS the same image the vehicles' tag matrix was cut
 # from instead of rebuilding it locally. Dev uses Ubuntu 26.04, unixfd transport and the same
@@ -39,11 +39,12 @@
 #     tools/build-images.sh registry.lan:5000 jp6                  # JP6 -> auto slim l4t-base, tag jp6
 #     tools/build-images.sh registry.lan:5000 v1.4.0-jp6           # fleet matrix tag (variant from suffix)
 #     RIG_TARGET_PLATFORM=jp6 tools/build-images.sh reg v1.4.0-jp6 # what `rig build` invokes per platform
-#     PUSH=0 IMAGES=cam-dev tools/build-images.sh reg dev          # local arm64 bench image, no push
+#     PUSH=0 IMAGES=cam-dev tools/build-images.sh reg dev          # local bench image, no push
 #     tools/build-images.sh registry.lan:5000 v1.4.0-dev           # bench image on the fleet matrix tag
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
+. "$REPO/tools/rig-build.sh"
 
 # Registry from $1, else rig's RIG_IMAGE_REGISTRY (one var for build + deploy). PUSH=0 skips the push.
 REGISTRY="${1:-${RIG_IMAGE_REGISTRY:-}}"
@@ -51,7 +52,7 @@ REGISTRY="${1:-${RIG_IMAGE_REGISTRY:-}}"
 TAG="${2:-${RIG_TARGET_PLATFORM:-jp7}}"
 # Build VARIANT (jp6 | jp7 | dev) selects the core base + the default image set: jp6 -> slim l4t-base +
 # the Noetic ros1-bridge (ROS 1 is jp6-class); jp7 -> ubuntu:24.04, no ros1-bridge; dev -> cam-dev on
-# ubuntu:26.04 + GStreamer 1.28.8 for a non-Jetson arm64 bench box. RIG_TARGET_PLATFORM
+# ubuntu:26.04 + GStreamer 1.28.8 for a non-Jetson arm64/amd64 bench box. RIG_TARGET_PLATFORM
 # (rig's standard per-target platform var) wins; else derive from the tag -- a bare platform (legacy)
 # or a composed <version>-<platform> suffix. The TAG is pushed verbatim either way. Override
 # BASE_IMAGE / IMAGES individually as before.
@@ -99,6 +100,7 @@ L4T_MULTIMEDIA="${L4T_MULTIMEDIA:-}"
 L4T_VERSION="${L4T_VERSION:-}"
 PUSH="${PUSH:-1}"
 PLATFORM_FLAG="${PLATFORM_FLAG:-}"
+if [ -n "${RIG_BUILD_PLATFORMS:-}" ]; then PLATFORM_FLAG=""; fi
 
 REFS=()
 build_one() {                      # build_one <image-name> <dockerfile> [extra docker build args...]
@@ -109,9 +111,8 @@ build_one() {                      # build_one <image-name> <dockerfile> [extra 
   # RIG_BUILD_NO_CACHE=1 and scripts opt in. --pull rides along because a deliberate refresh must
   # re-pull the shared ros:<distro>-ros-base parent too, or "fresh" builds keep inheriting the
   # stale local copy. Unquoted on purpose: each expands to one word or none (safe under set -u).
-  docker build ${PLATFORM_FLAG:+$PLATFORM_FLAG} ${RIG_BUILD_NO_CACHE:+--no-cache} ${RIG_BUILD_NO_CACHE:+--pull} \
-    -f "$dockerfile" -t "$ref" "$@" .   # context = repo root
-  if [ "$PUSH" = 1 ]; then echo "==> pushing  $ref" >&2; docker push "$ref"; fi
+  rig_build "$ref" ${PLATFORM_FLAG:+$PLATFORM_FLAG} \
+    -f "$dockerfile" "$@" .   # context = repo root
   REFS+=("$ref")
 }
 
@@ -134,7 +135,7 @@ echo "built$([ "$PUSH" = 1 ] && echo ' + pushed') ${#REFS[@]} image(s):"
 printf '  %s\n' "${REFS[@]}"
 echo
 case "$VARIANT" in
-  dev) echo "On an arm64 bench box (no Jetson; after cloning the repo there):"
+  dev) echo "On an arm64/amd64 bench box (no Jetson; after cloning the repo there):"
        echo "  export CAM_REGISTRY=$REGISTRY"
        echo "  ./cam-up --dev config/sensors/<sensor>.yaml pull"
        echo "  ./cam-up --dev config/sensors/<sensor>.yaml up -d" ;;

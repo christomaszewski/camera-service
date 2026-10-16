@@ -468,3 +468,11 @@ chunk-parse path** via a patched chunk-emitting GV camera:
 ## License
 
 [Apache-2.0](LICENSE).
+
+## Portable builds and reconstructed replay
+
+The dev runtime uses code baked into the image. For live source editing from a full checkout, use
+`./cam-up --dev --source CONFIG up -d`; `--source` is refused when `core-driver/supervisor.py` is absent.
+This keeps a vendored/reconstructed launch surface from hiding `/app` and breaking supervisor startup.
+The `dev` image supports Linux arm64 and amd64. Rig builds both CPU members and every declared Jetson
+runtime by default; see [the build contract](docs/fleet-build-contract.md).
