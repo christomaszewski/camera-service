@@ -29,7 +29,7 @@ MODE="${JP6M_MODE:-csv}"
 TAG="${JP6M_TAG:-jp6m}"
 export CAM_CORE_BASE="${CAM_CORE_BASE:-ubuntu:26.04}"
 export CAM_WEBRTC_BASE="${CAM_WEBRTC_BASE:-ubuntu:26.04}"
-export CAM_GST_RS_TAG="${CAM_GST_RS_TAG:-0.15.3}"
+export CAM_GST_RS_TAG="${CAM_GST_RS_TAG:-0.15.4}"
 if [ -n "${CAM_REGISTRY:-${RIG_IMAGE_REGISTRY:-}}" ]; then
   export CAM_IMAGE_TAG="${CAM_IMAGE_TAG:-$TAG}"
 else

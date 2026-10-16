@@ -2,7 +2,7 @@
 
 CI runs on pull requests, pushes to `main` and `jp6-modern`, and manual dispatch. It builds
 the repository's development image for two native Linux runtimes: Ubuntu 22.04 / GStreamer
-1.20, and Ubuntu 26.04 / pinned GStreamer 1.28.7. Neither requires a camera, GPU, ROS stack,
+1.20, and Ubuntu 26.04 / pinned GStreamer 1.28.8. Neither requires a camera, GPU, ROS stack,
 external Zenoh router, or saved field recording. Image build caches are separate per runtime.
 
 ## Run the CI checks locally
@@ -11,7 +11,7 @@ From the repository root, with Docker running:
 
 ```sh
 docker build -f core-driver/Dockerfile.dev -t cam-dev:dev .
-CAM_DEV_IMAGE=cam-dev:dev CAM_EXPECT_GST=1.28.7 bash tools/ci_test.sh
+CAM_DEV_IMAGE=cam-dev:dev CAM_EXPECT_GST=1.28.8 bash tools/ci_test.sh
 
 docker build -f core-driver/Dockerfile.dev --target distro \
   --build-arg BASE=ubuntu:22.04 -t cam-ci:legacy .
@@ -67,3 +67,79 @@ Real GigE/USB devices, NVENC/NVDEC, Orin/Thor compatibility, ROS/WebRTC browser 
 behavior, and representative multi-camera CPU/latency measurements still need their separate
 hardware or full-stack checks. In particular, `nvenc_lossless_test.py` uses software decoding;
 its stricter frame-count check does not qualify hardware decoding.
+
+## Media dependency update: 2026-10-16
+
+Candidate branch: `codex/gstreamer-1.28.8`. Keep this branch separate until the intended
+Jetson platforms pass the hardware checks below. The pins are GStreamer **1.28.8** (all seven
+source archives, with updated SHA-256 checksums), gst-plugins-rs **0.15.4** (WebRTC, RTP and
+the signalling server), and source-built Aravis **0.8.36**.
+
+The GStreamer source overlay applies to the modern development images. Vehicle images still
+use their distro GStreamer: JP6 core 1.20, Ubuntu 24.04 core/bridge 1.24, and Ubuntu 26.04
+core/bridge 1.28. The development core still uses distro Aravis. Updating these pins does not
+replace NVIDIA's plugins or enable H.264 High profile; the bridge retains its baseline fallback.
+
+### Local evidence
+
+Built and tested natively as Linux/arm64 containers on Docker Desktop on an arm64 Mac.
+Candidate images use separate tags; existing development and vehicle tags were preserved.
+Reports and logs are in the ignored `test-results/gstreamer-1.28.8/` directory.
+
+| Check | Result |
+|---|---|
+| `cam-dev:gst-1.28.8` | Built all seven GStreamer source modules; plugin and Python typelib checks passed. |
+| `webrtc-bridge:gst-1.28.8` | Built; runtime reports GStreamer 1.28.8 and both Rust plugins at `0.15.4-1afff37`. |
+| `cam-core:aravis-0.8.36-jp7` (Ubuntu 24.04, no NVIDIA injection) | Built; Aravis typelib imports and `aravissrc` reports 0.8.36. Distro GStreamer is 1.24.2. |
+| `webrtc-bridge:rs-0.15.4-jp7` (Ubuntu 24.04, no NVIDIA injection) | Built; runtime reports GStreamer 1.24.2 and both Rust plugins at `0.15.4-1afff37`. |
+| Full modern runtime suite | 525 passed, no skips on the completed rerun. The old 1.28.7 image also passed all 525. |
+| Full legacy runtime suite | 525 passed, no skips on GStreamer 1.20.3 after compilation finished. An earlier run during builds had one shm shutdown timeout. |
+| Full Ubuntu 24.04 production suite | 511 passed, 14 failed with Aravis 0.8.36; see the qualification issues below. |
+| Configuration/build defaults | 5 tests passed, including vehicle Rust defaults and explicit overrides. |
+| Service smoke tests on 1.28.8 | Replay, USB, PCAP, lifecycle, RTSP and RTSP reconnect all passed. Sources were synthetic. |
+| Modern WebRTC | All 5 applicable headless scenarios passed: raw shm, H.264 baseline, High-profile fallback, raw downscaling and unixfd Bayer downscaling. |
+| Production WebRTC | All 5 applicable scenarios passed with the new Ubuntu 24.04 core and bridge together. |
+| Legacy-core WebRTC interoperability | All 6 applicable scenarios passed with the GStreamer 1.20 core and new Ubuntu 24.04 bridge, including self-describing mono/Bayer headered shm, latency overlay and downscaling. Across the three combinations, all 16 headless scenarios passed. |
+| ROS 2 interoperability | Existing `ros2-bridge:dev` consumed the new core's unixfd stream; frame count, encoding and capture timestamps passed. |
+| Production Aravis | Fake-camera capture, stale socket recovery, FFV1 fallback/recording and EOS decode passed. Killing/restarting the GVSP emitter triggered reconnection, resumed capture and a decodable recording. |
+
+The first modern suite run had two failures in `test_replay_recording_changes.py` involving
+decoded-frame/CSV counts. Both passed in isolation on old and new images; the full old/new
+comparison passed, followed by 20 repetitions of each affected test on 1.28.8 (40 cases,
+zero failures). The initial failures remain recorded; their cause was not established.
+
+The Ubuntu 24.04 production image is **not fully qualified**. Its 14 failures involve missing
+decoded frames or mismatched recorded/replayed frame counts. An otherwise equivalent build with
+the previous Aravis 0.8.34 pin (also GStreamer 1.24.2) had 12 failures, eight shared with the
+candidate run. Targeted repetitions reproduced another four candidate failures on 0.8.34.
+The remaining two shutdown cases were intermittent on both images when run with an identical
+repetition harness. Across these runs, **all 14 candidate failing tests also failed with the
+old Aravis pin**. This establishes existing failures on the 1.24 runtime, but does not fix them
+or identify their cause. Keep the reports for follow-up; do not treat the successful
+Aravis capture/reconnect checks as a pass for the complete production suite. The simulated
+`ENOSPC` messages in resilience tests are intentional fault injection.
+
+### Jetson promotion gate
+
+Use the candidate branch and distinct candidate image tags/digests for every deployed platform.
+Follow [the hardware procedure](hardware-test-procedure.md),
+[JP6 modern-userspace probes](jp6-modern-userspace.md) and
+[JP7 bring-up](jetpack7-bringup.md), recording the actual image digests and JetPack/L4T versions.
+
+1. Build the exact vehicle variants, including the matching L4T multimedia layer where used.
+   Check plugin loading under CSV/CDI and inspect `aravissrc`, `webrtcsink`, `rtpgccbwe`,
+   `nvvidconv`, `nvv4l2h264enc` and `nvv4l2h265enc`. Confirm the intended encoder is selected.
+2. Exercise the real GigE and USB cameras at deployed formats/rates: discovery, chunk selectors,
+   ChunkTimestamp/FrameID, PTP lock and timestamp provenance, packet loss and unplug/reconnect.
+   Check recorded pixels, frame counts and sidecar alignment, including 16-bit/Bayer paths.
+3. Run `tools/nvenc_lossless_test.py --frames 60` inside the candidate core with the platform's
+   NVIDIA runtime/device arguments. Require all frames and bit-exact pixels. Separately validate
+   NVDEC, NVMM conversion and recordings at actual camera dimensions/rates.
+4. Test the dashboard in the browsers used on the vehicle, with real NVIDIA H.264 encoding,
+   multiple viewers, reconnects and constrained network bandwidth. Verify congestion control
+   changes bitrate and latency recovers. Exercise H.265 setup/bitrate handling if enabling that
+   new upstream capability; the existing default H.264 tests do not qualify it.
+5. Check JP6 headered shm and modern unixfd consumers, ROS timestamps/rates, fleet discovery,
+   recording stop/configure/start, replay and clean shutdown in the complete rig deployment.
+   Run a representative multi-camera soak and compare CPU, memory, drops, disk rate and p95
+   latency with the existing deployment before promoting the branch.

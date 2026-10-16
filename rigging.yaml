@@ -24,7 +24,7 @@ platform:                                # JP6 vs JP7 is a HOST fact; cam-up aut
   #                                         vehicle.yaml `platform:`; CAM_PLATFORM wins when both are set)
   #                                      `dev` is a NON-vehicle target: an arm64/x86 bench box with no
   #                                      Jetson (bench rig, CI, laptop). It selects cam-dev + runc +
-  #                                      bridge net, pinned GStreamer 1.28.7 and unixfd transport. Never
+  #                                      bridge net, pinned GStreamer 1.28.8 and unixfd transport. Never
   #                                      auto-detected -- a host must ask for it.
 
 images:                                  # pull-based deploy: cam-up points images at a registry (docs/deploy-without-rig.md)

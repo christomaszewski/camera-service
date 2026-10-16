@@ -202,13 +202,13 @@ reprocess). `restart` mid-session records the data again from its start into the
 re-recorded replay's sidecar header carries `replay_of` (the session prefixes it was played from)
 and `replay_epoch_unix_ns`, so the new run links back to its origin.
 
-### Pinned GStreamer 1.28.7 on a development machine
+### Pinned GStreamer 1.28.8 on a development machine
 
-The `dev` platform defaults to Ubuntu 26.04 with GStreamer 1.28.7 in both the core and WebRTC
+The `dev` platform defaults to Ubuntu 26.04 with GStreamer 1.28.8 in both the core and WebRTC
 images. Matching core, base/good/bad/ugly plugins, libav and RTSP server are built from checksummed
 upstream tarballs into `/opt/gstreamer`; media elements and Python typelibs are verified during
-build. Aravis, libnice and gst-plugins-rs 0.15.3 remain available. Both bridges default to unixfd.
-ROS packages and Jetson platform defaults are unchanged.
+build. Aravis, libnice and gst-plugins-rs 0.15.4 remain available. Both bridges default to unixfd.
+ROS packages and Jetson distro GStreamer versions are unchanged.
 
 Build locally from the repo root (this builds every dev image, including ROS topic input):
 

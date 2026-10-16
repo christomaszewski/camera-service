@@ -25,7 +25,7 @@
 # per host (env), never per sensor.
 #
 # `dev` is a THIRD platform, not a side channel: a non-Jetson arm64/x86 bench box (a laptop, CI, a
-# bench Orin running plain Ubuntu). It selects cam-dev (GStreamer 1.28.7, no NVIDIA stack) + runc +
+# bench Orin running plain Ubuntu). It selects cam-dev (GStreamer 1.28.8, no NVIDIA stack) + runc +
 # bridge networking and unixfd transport. --dev is sugar for it; rig selects it the same
 # way it selects a vehicle -- RIG_TARGET_PLATFORM=dev or RIG_IMAGE_TAG=dev -- which is what lets a
 # bench box PULL tools/build-images.sh's `dev` image set instead of rebuilding it locally.
@@ -174,7 +174,7 @@ elif [ "$DEV" = 0 ] && { [ "$PLATFORM" = jp6 ] || [ "$PLATFORM" = jp6m ]; }; the
     # bridges read CAM_PLATFORM=jp6m as "the core publishes unixfd" (a 1.28 core does).
     export CAM_CORE_BASE="${CAM_CORE_BASE:-ubuntu:26.04}"
     export CAM_WEBRTC_BASE="${CAM_WEBRTC_BASE:-ubuntu:26.04}"
-    export CAM_GST_RS_TAG="${CAM_GST_RS_TAG:-0.15.3}"
+    export CAM_GST_RS_TAG="${CAM_GST_RS_TAG:-0.15.4}"
   fi
 fi
 # USB source: map the v4l2 device into the core container (gige/rtsp need no device). sensor_env exports

@@ -1,7 +1,7 @@
-787329b2c5758e228a71d926a6dcf960bceaacca3cadd63874ba665dfcda013e  gstreamer-1.28.7.tar.xz
-ed6e5410f496d171818763af2265e7977154bc7f9b827e98acf8c5bed21dd5a7  gst-plugins-base-1.28.7.tar.xz
-87256969c82cf3bc8574301f3e7044a90de0ac500a5a27d8ba38c4dde894dd8b  gst-plugins-good-1.28.7.tar.xz
-dc525383c18b2c265bbe6a43d498656cd918aaa130aa4e3abeabcdaa741c3ffe  gst-plugins-bad-1.28.7.tar.xz
-2b681170ddc22b6b283cafeed48f427c30a17056974a6a9ed137c354e0f7730c  gst-plugins-ugly-1.28.7.tar.xz
-58da51dd39ecf1cf6faade34cc6412001be2e2e145bca8ae0f45336f60a36ab2  gst-libav-1.28.7.tar.xz
-de43a59a0c89a14eb1c14ae8e81e5b45c4e9d7b1f930b0ebaad360f9b5e0b5c4  gst-rtsp-server-1.28.7.tar.xz
+baa8e86985ad6417cc0ad6e7b79ff2884c6779c8b1c7a6240e7121822c86e524  gstreamer-1.28.8.tar.xz
+ade70e3381fcbb024f1f20aa9ede9b5654aeed39d5bd70b1a98f53015e501117  gst-plugins-base-1.28.8.tar.xz
+a7670ed900d3d03be744d25c1873b239896e9a82ce6d17f8febc6fffbaee9521  gst-plugins-good-1.28.8.tar.xz
+670d888bde8242579b0d8e91f60cf337aa7be20ca7c315ebfbdd6e5a9218d104  gst-plugins-bad-1.28.8.tar.xz
+51ae53002e3bbe9ed0f2215020c5a248bf0ed41b9d9a2a4e102b8583fedab61c  gst-plugins-ugly-1.28.8.tar.xz
+98ad3d7f8932c495e268708903f1c3388d5f26a0db34727a9f861ee23b724177  gst-libav-1.28.8.tar.xz
+59181ed21a5bc0533fb4f77cb7bc6005d89365e834b0c1294afb9ab5f7d96fe0  gst-rtsp-server-1.28.8.tar.xz

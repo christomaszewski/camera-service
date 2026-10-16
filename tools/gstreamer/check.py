@@ -6,7 +6,7 @@ for namespace in ("Gst", "GstApp", "GstVideo", "GstAllocators", "GstRtspServer")
 from gi.repository import Gst, GstApp, GstVideo, GstAllocators, GstRtspServer
 
 Gst.init(None)
-assert Gst.version()[:3] == (1, 28, 7), Gst.version_string()
+assert Gst.version()[:3] == (1, 28, 8), Gst.version_string()
 assert hasattr(GstApp.AppSink, "set_simple_callbacks")
 assert hasattr(GstAllocators, "ShmAllocator")
 for name in ("appsrc", "appsink", "videoconvert", "videotestsrc", "matroskademux",
@@ -17,8 +17,8 @@ for name in ("appsrc", "appsink", "videoconvert", "videotestsrc", "matroskademux
     factory = Gst.ElementFactory.find(name)
     assert factory is not None, f"missing element: {name}"
     plugin = factory.get_plugin()
-    assert plugin.get_version() == "1.28.7", (name, plugin.get_version(), plugin.get_filename())
+    assert plugin.get_version() == "1.28.8", (name, plugin.get_version(), plugin.get_filename())
 if Gst.ElementFactory.find("webrtcsink") is not None:
     for name in ("webrtcsrc", "nicesrc", "nicesink", "rtpgccbwe"):
         assert Gst.ElementFactory.make(name) is not None, f"missing bridge dependency: {name}"
-print("GStreamer 1.28.7: media plugins and Python typelibs verified")
+print("GStreamer 1.28.8: media plugins and Python typelibs verified")

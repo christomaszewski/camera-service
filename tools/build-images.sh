@@ -4,7 +4,7 @@
 # perfect) for a native build, or cross-build from x86 with PLATFORM_FLAG (slow; needs qemu binfmt).
 #
 # The `dev` variant is the same mechanism pointed at a NON-Jetson arm64 box (a bench machine, an
-# arm64 Mac, CI): it builds cam-dev (core-driver/Dockerfile.dev -- GStreamer 1.28.7, no NVIDIA
+# arm64 Mac, CI): it builds cam-dev (core-driver/Dockerfile.dev -- GStreamer 1.28.8, no NVIDIA
 # stack) instead of cam-core, so a bench box PULLS the same image the vehicles' tag matrix was cut
 # from instead of rebuilding it locally. Dev uses Ubuntu 26.04, unixfd transport and the same
 # pinned GStreamer build in the core and WebRTC bridge.
@@ -51,7 +51,7 @@ REGISTRY="${1:-${RIG_IMAGE_REGISTRY:-}}"
 TAG="${2:-${RIG_TARGET_PLATFORM:-jp7}}"
 # Build VARIANT (jp6 | jp7 | dev) selects the core base + the default image set: jp6 -> slim l4t-base +
 # the Noetic ros1-bridge (ROS 1 is jp6-class); jp7 -> ubuntu:24.04, no ros1-bridge; dev -> cam-dev on
-# ubuntu:26.04 + GStreamer 1.28.7 for a non-Jetson arm64 bench box. RIG_TARGET_PLATFORM
+# ubuntu:26.04 + GStreamer 1.28.8 for a non-Jetson arm64 bench box. RIG_TARGET_PLATFORM
 # (rig's standard per-target platform var) wins; else derive from the tag -- a bare platform (legacy)
 # or a composed <version>-<platform> suffix. The TAG is pushed verbatim either way. Override
 # BASE_IMAGE / IMAGES individually as before.
@@ -80,7 +80,7 @@ case "$VARIANT" in
   # Dev core and WebRTC use the same pinned GStreamer; ROS keeps its distro packages.
   dev) BASE_IMAGE="${BASE_IMAGE:-${CAM_DEV_BASE:-ubuntu:26.04}}"
        WEBRTC_BASE="${WEBRTC_BASE:-${CAM_WEBRTC_BASE:-ubuntu:26.04}}"
-       GST_RS_TAG="${GST_RS_TAG:-${CAM_GST_RS_TAG:-0.15.3}}"
+       GST_RS_TAG="${GST_RS_TAG:-${CAM_GST_RS_TAG:-0.15.4}}"
        DEV_TARGET="${CAM_DEV_TARGET:-modern}"
        WEBRTC_TARGET="${CAM_WEBRTC_TARGET:-modern}"
        IMAGES="${IMAGES:-cam-dev ros2-bridge webrtc-bridge}" ;;
@@ -89,7 +89,7 @@ case "$VARIANT" in
   # cam-dev rides along (apt-packaged Aravis 0.8.34 on 26.04): the bench row of the experiment.
   jp6m) BASE_IMAGE="${BASE_IMAGE:-ubuntu:26.04}"
         WEBRTC_BASE="${WEBRTC_BASE:-ubuntu:26.04}"
-        GST_RS_TAG="${GST_RS_TAG:-0.15.3}"
+        GST_RS_TAG="${GST_RS_TAG:-0.15.4}"
         IMAGES="${IMAGES:-cam-core ros2-bridge webrtc-bridge}" ;;   # cam-dev:jp6m (the bench row) on request: IMAGES=cam-dev
   *)   BASE_IMAGE="${BASE_IMAGE:-ubuntu:24.04}"
        IMAGES="${IMAGES:-cam-core ros2-bridge webrtc-bridge}" ;;

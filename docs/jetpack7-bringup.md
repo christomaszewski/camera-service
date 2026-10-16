@@ -44,7 +44,7 @@ Green here = capture/timestamp/record(FFV1)/transport all work on the Orin. (Ara
 may be older than 0.8.32, so chunk/PTP needs the core image in L2 — that's fine, L1 is just a smoke test.)
 
 ## L2 — Real camera + the PTP experiment (software FFV1, still no NVENC dependency)
-Build the **core** image — it builds Aravis 0.8.34 from source (full extended-chunk support). Builds on any
+Build the **core** image — it builds Aravis 0.8.36 from source (full extended-chunk support). Builds on any
 24.04 base; the build does **not** need `nvv4l2` (that's runtime-only):
 ```bash
 # A plain 24.04 base is enough -- NVENC goes through the v4l2/CDI path, not CUDA (confirmed on JP7.2).

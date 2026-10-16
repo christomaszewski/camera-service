@@ -1,7 +1,7 @@
 # Opt-in development upgrade. Keep Jetson images and the distro compatibility images intact.
 # Build once per consumer, reusing the same cached GStreamer stage:
-#   docker build -f tools/gstreamer/Dockerfile --build-arg BASE_IMAGE=cam-dev:jp6m -t cam-dev:gst1.28.7 .
-#   docker build -f tools/gstreamer/Dockerfile --build-arg BASE_IMAGE=webrtc-bridge:jp6m -t webrtc-bridge:gst1.28.7 .
+#   docker build -f tools/gstreamer/Dockerfile --build-arg BASE_IMAGE=cam-dev:jp6m -t cam-dev:gst1.28.8 .
+#   docker build -f tools/gstreamer/Dockerfile --build-arg BASE_IMAGE=webrtc-bridge:jp6m -t webrtc-bridge:gst1.28.8 .
 ARG BASE_IMAGE=cam-dev:jp6m
 FROM ubuntu:26.04 AS gstreamer
 COPY tools/gstreamer/build.sh tools/gstreamer/SHA256SUMS /build-gstreamer/

@@ -12,10 +12,10 @@ services:
       context: ../..
       dockerfile: plugins/webrtc-bridge/Dockerfile
       args:
-        # 24.04 = GStreamer 1.24 <-> gst-plugins-rs 0.13 (default); the jp6m experiment builds
-        # 26.04 = 1.28 <-> 0.15 (tools/jp6-modern/cam-up-jp6m exports both).
+        # 24.04 = GStreamer 1.24 (default); jp6m uses 26.04 = 1.28.
+        # Both build gst-plugins-rs 0.15.4 (requires GStreamer >= 1.22).
         BASE_IMAGE: ${CAM_WEBRTC_BASE:-ubuntu:24.04}
-        GST_RS_TAG: ${CAM_GST_RS_TAG:-0.13.7}
+        GST_RS_TAG: ${CAM_GST_RS_TAG:-0.15.4}
         L4T_MULTIMEDIA: ${CAM_L4T_MULTIMEDIA:-}
         L4T_VERSION: ${CAM_L4T_VERSION:-}
     init: true

@@ -200,7 +200,7 @@ cd $ART
 ~/camera-service/tools/jp6-modern/stack-check.sh config/sensors/<cam>.yaml --project <cam>-vehicle-<id>
 ```
 `stack-check.sh` prints the verdicts: core `healthy` on GStreamer 1.28, `recorder: encoder=hw-hevc-lossless`,
-`plugin transport endpoint (unixfd)`, no ERROR lines; webrtc-bridge on 1.28 with `webrtcsink 0.15.3`
+`plugin transport endpoint (unixfd)`, no ERROR lines; webrtc-bridge on 1.28 with `webrtcsink 0.15.4`
 and `nvv4l2h264enc=rank …` in its inventory (add `GST_PLUGIN_FEATURE_RANK: nvv4l2h264enc:MAX` to the
 webrtc-bridge params in the sensor config to make it the pick, then `./rig down/up <cam>`);
 ros2-bridge with `CamUnixfdBridge`.

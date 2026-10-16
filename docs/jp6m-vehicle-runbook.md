@@ -48,7 +48,7 @@ cat jp6m-results/summary.txt                           # nvvidconv yes, NVENC fp
 Want: core `healthy` on `1.28.x`; `recorder: encoder=hw-hevc-lossless` (Mono8 / Bayer8; `ffv1` for
 16-bit); `plugin transport endpoint (unixfd)`; no ERROR lines; `chunk mode enabled`,
 `GevIEEE1588Status=Slave`, `Active timestamp source = ptp_chunk` — the same lines the jp6 baseline gave;
-`health: frames=N, no drops` climbing; webrtc-bridge `webrtcsink 0.15.3` with `nvv4l2h264enc=rank …`
+`health: frames=N, no drops` climbing; webrtc-bridge `webrtcsink 0.15.4` with `nvv4l2h264enc=rank …`
 (`GST_PLUGIN_FEATURE_RANK: nvv4l2h264enc:MAX` in its params makes it the pick); ros2-bridge
 `CamUnixfdBridge` and `ros2 topic hz --no-daemon /<cam>/image_raw` at the camera's rate.
 

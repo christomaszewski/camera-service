@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # A single, isolated prefix shared by the dev core and WebRTC images. System plugins (Aravis,
-# libnice and gst-plugins-rs) remain available; the media path's C libraries/plugins are 1.28.7.
+# libnice and gst-plugins-rs) remain available; the media path's C libraries/plugins are 1.28.8.
 # No distro packages are overwritten, and no NVIDIA/ROS packages are upgraded.
 set -euo pipefail
 
@@ -37,12 +37,12 @@ export GI_TYPELIB_PATH=/opt/gstreamer/lib/girepository-1.0
 mkdir -p /tmp/gstreamer-src
 cd /tmp/gstreamer-src
 for module in gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav gst-rtsp-server; do
-  archive="$module-1.28.7.tar.xz"
+  archive="$module-1.28.8.tar.xz"
   if ! download_archive "https://gstreamer.freedesktop.org/src/$module/$archive" "$archive" 30; then
     # Debian mirrors the unchanged upstream release archives. Never splice bytes from two hosts;
     # the same pinned upstream SHA-256 below must pass before either download is extracted.
     rm -f "$archive"
-    download_archive "https://deb.debian.org/debian/pool/main/g/${module}1.0/${module}1.0_1.28.7.orig.tar.xz" "$archive"
+    download_archive "https://deb.debian.org/debian/pool/main/g/${module}1.0/${module}1.0_1.28.8.orig.tar.xz" "$archive"
   fi
   awk -v file="$archive" '$2 == file' /build-gstreamer/SHA256SUMS | sha256sum --check --strict
   tar -xf "$archive"
@@ -57,7 +57,7 @@ for module in gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-pl
     gst-rtsp-server) features="introspection rtspclientsink" ;;
   esac
   for feature in $features; do options+=("-D$feature=enabled"); done
-  meson setup "$module-build" "$module-1.28.7" --prefix=/opt/gstreamer --libdir=lib \
+  meson setup "$module-build" "$module-1.28.8" --prefix=/opt/gstreamer --libdir=lib \
     --buildtype=release --wrap-mode=nofallback -Dauto_features=disabled "${options[@]}"
   meson compile -C "$module-build" -j "${GST_BUILD_JOBS:-4}"
   meson install -C "$module-build" --no-rebuild --strip

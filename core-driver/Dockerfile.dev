@@ -1,4 +1,4 @@
-# Software development image: GStreamer 1.28.7 on Ubuntu 26.04 (no NVIDIA stack).
+# Software development image: GStreamer 1.28.8 on Ubuntu 26.04 (no NVIDIA stack).
 # Default: docker build -f core-driver/Dockerfile.dev -t cam-dev:dev .
 # Distro compatibility: add --target distro --build-arg BASE=ubuntu:22.04 (or 24.04).
 ARG BASE=ubuntu:26.04

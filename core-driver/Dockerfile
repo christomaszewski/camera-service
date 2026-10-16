@@ -14,7 +14,7 @@
 # needs neither. Verify on the Jetson: `gst-inspect-1.0 aravissrc` and
 # `python3 -c "import gi; gi.require_version('Aravis','0.8')"`.
 ARG BASE_IMAGE=nvcr.io/nvidia/l4t-base:r36.2.0
-ARG ARAVIS_VERSION=0.8.34
+ARG ARAVIS_VERSION=0.8.36
 ARG L4T_MULTIMEDIA=
 ARG L4T_VERSION=
 

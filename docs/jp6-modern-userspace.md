@@ -29,9 +29,9 @@ linker — the `jp6m` images do).
 | Piece | Change |
 |---|---|
 | `core-driver/Dockerfile` | `BASE_IMAGE=ubuntu:26.04` builds; the tegra dirs are on the linker path (`/etc/ld.so.conf.d/nvidia-tegra.conf` + `LD_LIBRARY_PATH`) so mounted `libgstnv*.so` resolve `libnvbufsurface` & co. |
-| `plugins/webrtc-bridge/Dockerfile` | `BASE_IMAGE` + `GST_RS_TAG` build args (24.04 / 0.13.7 default; 26.04 / 0.15.3 for jp6m); same tegra linker path |
+| `plugins/webrtc-bridge/Dockerfile` | `BASE_IMAGE` + `GST_RS_TAG` build args (24.04 default; 26.04 for jp6m; gst-plugins-rs 0.15.4 on both, pending renewed Jetson validation); same tegra linker path |
 | `plugins/webrtc-bridge/compose.yml` | the two build args are wired (`CAM_WEBRTC_BASE`, `CAM_GST_RS_TAG`) |
-| `tools/build-images.sh` | a `jp6m` variant (`RIG_TARGET_PLATFORM=jp6m`, or a `jp6m` / `*-jp6m` tag): 26.04 base, gst-plugins-rs 0.15.3, images cam-core + ros2-bridge + webrtc-bridge |
+| `tools/build-images.sh` | a `jp6m` variant (`RIG_TARGET_PLATFORM=jp6m`, or a `jp6m` / `*-jp6m` tag): 26.04 base, gst-plugins-rs 0.15.4, images cam-core + ros2-bridge + webrtc-bridge |
 | `tools/jp6-modern/probe.sh` | the on-host probe: injection mode × image → plugin load, elements, encode throughput, decode round trip, bit-exact NVENC |
 | `tools/jp6-modern/cam-up-jp6m` | `cam-up` with the jp6m images in `csv`, `cdi` or `dev` mode |
 | `core-driver/Dockerfile.dev` | the `distro` target builds on `BASE=ubuntu:26.04` (26.04 packages Aravis 0.8.34), giving `cam-dev:jp6m` for the bench row |

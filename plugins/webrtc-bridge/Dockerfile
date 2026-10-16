@@ -2,14 +2,14 @@
 # webrtcsink (gst-plugins-rs, built from source). Multistage: the builder carries the whole Rust
 # toolchain + cargo-c to compile the plugin; the runtime stage keeps ONLY the built plugin + the
 # signalling binary + runtime GStreamer -- dropping ~1.5 GB of Rust/-dev. Ubuntu 24.04 = GStreamer
-# 1.24, matched to gst-plugins-rs 0.13.x.
+# 1.24; gst-plugins-rs 0.15.4 requires GStreamer >= 1.22.
 #
 # Build (from repo root):  docker build -f plugins/webrtc-bridge/Dockerfile -t webrtc-bridge .
-# The GStreamer <-> gst-plugins-rs pairing follows the base: ubuntu:24.04 = GStreamer 1.24 <-> 0.13.x
-# (the default, validated on JP7); ubuntu:26.04 = GStreamer 1.28 <-> 0.15.x (the jp6m experiment,
-# docs/jp6-modern-userspace.md: `--build-arg BASE_IMAGE=ubuntu:26.04 --build-arg GST_RS_TAG=0.15.3`).
+# Both Ubuntu 24.04 (GStreamer 1.24) and 26.04 (GStreamer 1.28) build gst-plugins-rs 0.15.4.
+# The dev target overlays pinned GStreamer; vehicle targets retain distro GStreamer.
+# Revalidate the new Rust plugins on Jetson before promoting this pin to vehicle deployments.
 ARG BASE_IMAGE=ubuntu:24.04
-ARG GST_RS_TAG=0.13.7
+ARG GST_RS_TAG=0.15.4
 # JP6 hosts: bake the multimedia + nv GStreamer plugin layer (see core-driver/Dockerfile's l4t stage --
 # the same one, so webrtcsink can rank nvv4l2h264enc in this container too).
 ARG L4T_MULTIMEDIA=
@@ -21,9 +21,8 @@ ARG L4T_VERSION=
 # cargo-credential ("conflicting implementations of trait `From<...HourBase>`") -- while hosts with
 # cached builder layers kept working on the frozen old toolchain. --locked builds cargo-c with the
 # dep set it shipped with; the pins make the layer deterministic. Bump the PAIR together, deliberately.
-# (Verified on arm64: rustc 1.96.0 + cargo-c 0.10.23 --locked build clean; gst-plugin-webrtc 0.13.7's
-# MSRV is 1.71, so the toolchain pin has wide headroom. gst-plugins-rs itself ships a Cargo.lock, so
-# its dep set was already reproducible -- the install steps here were the only float.)
+# gst-plugins-rs 0.15.4 declares Rust >= 1.92; keep the existing Rust 1.96.0 + cargo-c 0.10.23
+# pair. cargo-c's own install remains locked to its published dependency set.
 ARG RUST_TOOLCHAIN=1.96.0
 ARG CARGO_C_VER=0.10.23
 
@@ -131,7 +130,7 @@ WORKDIR /app
 COPY plugins/webrtc-bridge/ /app/
 CMD ["bash", "run.sh"]
 
-# Dev selects this target with BASE_IMAGE=ubuntu:26.04 and GST_RS_TAG=0.15.3.
+# Dev selects this target with BASE_IMAGE=ubuntu:26.04 and GST_RS_TAG=0.15.4.
 FROM distro AS modern
 # The overlay is compiled against 26.04. Fail instead of loading it into an older userspace.
 RUN . /etc/os-release && test "$ID:$VERSION_ID" = ubuntu:26.04 \
