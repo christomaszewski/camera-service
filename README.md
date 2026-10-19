@@ -252,8 +252,10 @@ CAM_DEV_IMAGE=cam-dev:dev ./core-driver/tools/dev_test.sh
 ```
 
 `CAM_PLATFORM=dev`, `RIG_TARGET_PLATFORM=dev` and `RIG_IMAGE_TAG=dev` select the same defaults.
-No per-image or transport overrides are required. On Docker Desktop, retain `CAM_NETWORK=host`
-when WebRTC or a host ROS router needs it. See [PLAYBACK.md](docs/PLAYBACK.md#pinned-gstreamer-1288-on-a-development-machine)
+No per-image or transport overrides are required. Dev defaults to host networking so camera
+replay shares the host ROS/Zenoh graph and WebRTC media can reach viewers. Set `CAM_NETWORK=bridge`
+explicitly to use bridge networking; configure reachable router endpoints and WebRTC media routing
+for that mode. See [PLAYBACK.md](docs/PLAYBACK.md#pinned-gstreamer-1288-on-a-development-machine)
 for builds and compatibility options.
 
 For iteration, mount the code live so edits need no rebuild:

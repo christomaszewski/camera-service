@@ -7,7 +7,7 @@
 # It SELECTS + PARAMETERIZES — it never generates a compose file.
 #
 #   cam-up config/sensors/cam_a.yaml             # prod: auto-detects the JP6/JP7 host, host net (foreground up)
-#   cam-up --dev config/sensors/cam_a.yaml       # dev/bench (no Jetson): cam-dev core, bridge net
+#   cam-up --dev config/sensors/cam_a.yaml       # dev/bench (no Jetson): cam-dev core, host net
 #   cam-up --jp7 config/sensors/cam_a.yaml up -d # force JetPack 7 (Orin): runc + CDI NVENC device
 #   cam-up --jp6 config/sensors/cam_a.yaml up -d # force JetPack 6: l4t base + nvidia runtime (CSV)
 #   cam-up --dev config/sensors/cam_a.yaml up -d # detached
@@ -26,20 +26,20 @@
 #
 # `dev` is a THIRD platform, not a side channel: a non-Jetson arm64/x86 bench box (a laptop, CI, a
 # bench Orin running plain Ubuntu). It selects cam-dev (GStreamer 1.28.8, no NVIDIA stack) + runc +
-# bridge networking and unixfd transport. --dev is sugar for it; rig selects it the same
+# host networking and unixfd transport. --dev is sugar for it; rig selects it the same
 # way it selects a vehicle -- RIG_TARGET_PLATFORM=dev or RIG_IMAGE_TAG=dev -- which is what lets a
 # bench box PULL tools/build-images.sh's `dev` image set instead of rebuilding it locally.
 #
-# CAM_NETWORK={host,bridge} overrides the networking half of that. Bridge is only the dev DEFAULT:
-# on a Docker Desktop VM (macOS/Windows) the bridge subnet is unreachable from the host, so a bench
-# box there sets CAM_NETWORK=host and gets the vehicle's shape -- see the note at the assignment.
+# All platforms default to host networking so replay joins the host ROS/Zenoh graph and WebRTC
+# media is reachable. CAM_NETWORK=bridge explicitly opts into an isolated network namespace;
+# configure reachable router endpoints and WebRTC media routing when using it.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")" && pwd)"
 PYTHON="${CAM_PYTHON:-python3}"
 
 DEV=0; ZENOHD=0; ROSCORE=0; SOURCE=0; PLATFORM="${CAM_PLATFORM:-auto}"   # auto -> detect; jp6|jp7|dev to pin
 while :; do case "${1:-}" in
-  --dev) PLATFORM=dev; shift;;   # non-Jetson bench box: cam-dev + runc + bridge net (DEV is derived below)
+  --dev) PLATFORM=dev; shift;;   # non-Jetson bench box: cam-dev + runc + host net (DEV is derived below)
   --source) SOURCE=1; shift;;    # explicitly mount a full checkout for live code edits
   --jp7) PLATFORM=jp7; shift;;   # force JetPack 7 (Orin): runc + the CDI NVENC device overlay
   --jp6) PLATFORM=jp6; shift;;   # force JetPack 6: l4t base + nvidia runtime (CSV mounts)
@@ -80,10 +80,8 @@ eval "$("$PYTHON" "$REPO/tools/sensor_env.py" "$CONFIG" | sed 's/^/export /')"
 # baked /app/config still serves a bare `docker compose up` with the default CAM_CONFIG.
 export CAM_CONFIG_HOST="$CONFIG_ABS"
 export CAM_CONFIG="/run/cam-sensor.yaml"   # absolute in-container path, outside the /app tree
-# Was CAM_NETWORK asked for EXPLICITLY? The dev platform defaults it to bridge below, and that
-# default has to be overridable -- so record the distinction before the fallback erases it.
-CAM_NETWORK_EXPLICIT="${CAM_NETWORK:+1}"
-export CAM_NETWORK="${CAM_NETWORK:-host}"   # dev -> bridge by default, applied once the platform resolves below
+# Share the host graph on every platform; an explicit bridge override remains supported.
+export CAM_NETWORK="${CAM_NETWORK:-host}"
 # ROS 2 middleware: rmw_zenoh_cpp is the default across the stack (discovers via a shared host
 # `rmw_zenohd` router; see --zenohd / tools/zenohd.sh). FastDDS stays selectable via RMW_IMPLEMENTATION.
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
@@ -143,16 +141,9 @@ if [ "$PLATFORM" = auto ]; then
 fi
 # An unresolved platform retains the conservative JP6 default.
 [ "$PLATFORM" = auto ] && PLATFORM=jp6
-# ONE fact, two consequences: whichever way `dev` arrived (--dev, CAM_PLATFORM, RIG_TARGET_PLATFORM,
-# a -dev tag), it drives the dev overlay AND bridge networking. Deriving DEV here instead of setting
-# it in the flag parser is what makes rig's platform tag reach the bench box.
+# Whichever way dev arrived (--dev, CAM_PLATFORM, RIG_TARGET_PLATFORM, or a legacy dev tag),
+# apply the same runtime overlay. Network selection is independent of the runtime.
 [ "$PLATFORM" = dev ] && DEV=1
-# ...but bridge is only the dev DEFAULT. An explicit CAM_NETWORK wins: on a Docker Desktop VM
-# (macOS/Windows) the bridge subnet is unreachable from the host, which cuts the bridges off
-# from BOTH ends of the mesh -- the vehicle's zenoh router at localhost:7447, and the browser
-# that has to reach WebRTC media on ephemeral ICE/UDP ports nothing publishes. There,
-# CAM_NETWORK=host is the working shape (Docker Desktop forwards the VM's ports to the Mac).
-[ "$DEV" = 1 ] && [ -z "$CAM_NETWORK_EXPLICIT" ] && export CAM_NETWORK=bridge
 # Export explicitly for older bridge images too; an explicit compatibility override still wins.
 [ "$DEV" = 1 ] && export CAM_TRANSPORT="${CAM_TRANSPORT:-unixfd}"
 export CAM_PLATFORM="$PLATFORM"

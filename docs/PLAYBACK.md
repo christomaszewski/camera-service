@@ -227,7 +227,10 @@ For a registry deployment, `tools/build-images.sh registry.lan:5000 dev` builds 
 the same defaults. Versioned tags such as `v1.4.0-dev` work through the usual rig build matrix.
 `--dev`, `CAM_PLATFORM=dev` and rig's `platform: dev` all select this stack; remove old
 `CAM_DEV_IMAGE`, `CAM_WEBRTC_IMAGE`, `CAM_ROS2_IMAGE` and `CAM_TRANSPORT` overrides to use it.
-On Docker Desktop, keep `CAM_NETWORK=host` if required for WebRTC media and the host ROS router.
+Dev defaults to host networking, matching the bag player and host ROS/Zenoh router.
+`CAM_NETWORK=bridge` remains an explicit override; it needs reachable router endpoints and
+WebRTC media routing because `localhost` then refers to each container. With rig, set this
+under `env:` in the replay workspace's `vehicle.local.yaml` when bridge mode is intentional.
 Rebuild/pull and recreate the containers to apply the new images to an existing deployment.
 
 Compatibility builds remain available: core `--target distro --build-arg BASE=ubuntu:22.04`

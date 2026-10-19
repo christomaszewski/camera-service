@@ -45,6 +45,7 @@ class DevDefaults(unittest.TestCase):
         for name, image in (('core-driver', 'cam-dev'), ('webrtc-bridge', 'webrtc-bridge'),
                             ('ros2-bridge', 'ros2-bridge')):
             self.assertEqual(services[name]['image'], f'{prefix}{image}:{tag}')
+            self.assertEqual(services[name]['network_mode'], 'host')
         for name in ('core-driver', 'webrtc-bridge'):
             self.assertEqual(services[name]['runtime'], 'runc')
             self.assertEqual(services[name]['build']['target'], 'modern')
@@ -68,6 +69,26 @@ class DevDefaults(unittest.TestCase):
         for flag, env, tag, prefix in cases:
             with self.subTest(flag=flag, env=env):
                 self.assert_dev(self.render(flag, **env), tag, prefix)
+
+    def test_dev_replay_network_defaults_and_overrides(self):
+        config = json.loads(self.config.read_text())
+        config['camera'] = {'type': 'replay'}
+        config['replay'] = {'path': self.tmp.name}
+        self.config.write_text(json.dumps(config))
+        selectors = [('--dev', {}),
+                     (None, {'CAM_PLATFORM': 'dev'}),
+                     (None, {'RIG_TARGET_PLATFORM': 'dev'}),
+                     (None, {'RIG_IMAGE_TAG': 'dev'})]
+        for flag, selector in selectors:
+            for network, expected in ((None, 'host'), ('', 'host'),
+                                      ('host', 'host'), ('bridge', 'bridge')):
+                with self.subTest(flag=flag, selector=selector, network=network):
+                    env = dict(selector)
+                    if network is not None:
+                        env['CAM_NETWORK'] = network
+                    services = self.render(flag, **env)
+                    for name in ('core-driver', 'ros2-bridge', 'webrtc-bridge'):
+                        self.assertEqual(services[name]['network_mode'], expected, name)
 
     def test_explicit_compatibility_overrides(self):
         svc = self.render('--dev', CAM_DEV_IMAGE='cam-dev:legacy',
