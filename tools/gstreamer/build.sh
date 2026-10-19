@@ -20,6 +20,13 @@ download_archive() {
   done
 }
 
+extract_archive() {
+  # GNU tar in Ubuntu 26.04 requires openat2 during extraction; some CPU emulators
+  # do not implement it. Python's data filter supports those builders and rejects
+  # archive paths/links outside the extraction directory. Checksums are verified first.
+  python3 -m tarfile --filter data -e "$1"
+}
+
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
@@ -45,7 +52,7 @@ for module in gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-pl
     download_archive "https://deb.debian.org/debian/pool/main/g/${module}1.0/${module}1.0_1.28.8.orig.tar.xz" "$archive"
   fi
   awk -v file="$archive" '$2 == file' /build-gstreamer/SHA256SUMS | sha256sum --check --strict
-  tar -xf "$archive"
+  extract_archive "$archive"
   options=()
   case "$module" in
     gstreamer) features="introspection tools coretracers libunwind libdw" ;;
