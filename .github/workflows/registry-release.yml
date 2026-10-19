@@ -102,7 +102,7 @@ jobs:
           kind: service
           name: ${NAME}
           version: ${VERSION}
-          platforms: [linux/arm64]
+          platforms: [linux/amd64, linux/arm64]
           ros_distro: lyrical
           instantiable: true            # template service — a profile (or hand-authored config) instantiates it
           source:
