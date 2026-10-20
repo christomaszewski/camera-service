@@ -33,7 +33,8 @@ def _env(cfg, **environ):
     Drives the real CLI contract -- a YAML file in, shell-quoted KEY=value lines out -- rather than
     an internal function, because those lines are what cam-up `eval`s. Parsed back with shlex so
     the quoting is exercised too."""
-    saved = {k: os.environ.get(k) for k in ("CAM_INPUT_DIR", "RIG_DATA_DIR", "COMPOSE_PROJECT_NAME")}
+    saved = {k: os.environ.get(k) for k in ("CAM_INPUT_DIR", "RIG_DATA_DIR", "COMPOSE_PROJECT_NAME",
+                                         "RIG_REPLAY_SOURCE")}
     tmp = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
     try:
         yaml.safe_dump(cfg, tmp)
@@ -71,6 +72,16 @@ def _pcap(path):
 
 def _replay(path):
     return {"name": "cam", "camera": {"type": "replay"}, "replay": {"path": path}}
+
+
+def test_prepared_replay_mounts_readonly_input_outside_and_inside_data_root():
+    for path in ("/deployment/var/replay/demo/source/recordings/cam",
+                 "/data/runs/old/recordings/cam"):
+        e = _env(_replay(path), RIG_DATA_DIR="/data", RIG_REPLAY_SOURCE=path.rsplit("/recordings", 1)[0])
+        assert e["CAM_INPUT_SRC"] == path
+        assert e["CAM_INPUT_DST"] == path
+    e = _env(_replay("/data"), RIG_DATA_DIR="/data", RIG_REPLAY_SOURCE="/data")
+    assert not e.get("CAM_INPUT_SRC")  # Never mask the output mount root.
 
 
 def test_bare_pcap_name_mounts_the_input_folder():

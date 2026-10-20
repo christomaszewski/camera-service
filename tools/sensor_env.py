@@ -268,7 +268,9 @@ def main() -> int:
             # replay that re-records) and swap its host side to a path that need not exist. Emit
             # nothing and let the existing mount serve it.
             droot = (os.environ.get("RIG_DATA_DIR") or "/data/recordings").strip().rstrip("/")
-            if ipath == droot or ipath.startswith(droot + "/"):
+            # Rig replay input is an immutable subdirectory: mask just that input read-only,
+            # including when the writable output data mount contains it.
+            if ipath == droot or (ipath.startswith(droot + "/") and not os.environ.get("RIG_REPLAY_SOURCE")):
                 pass
             else:
                 # Self-pinned: no input ROOT is exported, because none is consulted -- an absolute
