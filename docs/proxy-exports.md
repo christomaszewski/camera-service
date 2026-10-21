@@ -41,6 +41,10 @@ timestamp, session boundary and recorded gap. Capture identity/timing metadata a
 CSV fields remain intact. Pixel and storage metadata describe the converted
 output, which is decoded again to verify frame count and correspondence with the
 sidecar timeline.
+Split recording files are decoded individually so genuine gaps between parts and
+their stored timestamps survive validation. A timestamp mismatch reports the
+frame index, decoded and CSV timestamps, fixed offset, and difference; the one
+millisecond Matroska tolerance and exact frame-count checks still apply.
 
 Eight-bit mono, Bayer and supported RGB/YUV formats are accepted, with unchanged
 conversion behavior from revision 1. Lossless CFA storage tiling is undone before
@@ -88,13 +92,27 @@ The result lists portable relative files, geometry, frame counts, capture time
 ranges, validation results, and producer identity. Rig computes the final artifact
 inventory and commits the validated staging directory atomically.
 
+Preflight also reports `missing_dependencies` for human-readable failures and
+`missing_images` for images that Docker explicitly reports are absent locally.
+Each missing image names the exact resolved tag or digest and the native platform,
+for example `{"image": "registry/cam-dev@sha256:...", "platform": "linux/arm64"}`.
+Daemon/permission failures, invalid inspection results, unsupported hosts and
+images with the wrong architecture are not reported as pullable dependencies.
+
 The helper uses only the Python standard library on the host. It runs the converter
 from a local native ARM64/AMD64 `cam-dev` image with inputs mounted read-only, an
 isolated writable staging directory, and networking disabled. It does not invoke
 `cam-up`, Compose, ROS, Zenoh, camera discovery or shared socket volumes. `CAM_DEV_IMAGE`
 pins an image; otherwise the existing registry/tag environment selects the `dev`
-variant. The image must be explicitly built or pulled first, and must contain the
-same profile definition. Old images fail rather than running an outdated converter.
+variant. When an actual export needs conversion, Rig automatically pulls a missing
+selected image for the native platform and repeats preflight before converting.
+`--dry-run` and reuse of an existing valid export do not pull images. The helper
+itself never pulls; it runs the inspected image ID with `--pull=never`. Rig does not
+build or rebuild images automatically. The image must contain the same profile
+definition; old images fail rather than running an outdated converter.
+Automatic pulling requires an updated Rig with `missing_images` support. Older
+Rig versions still report the missing dependency and require an explicit
+`docker pull` before export.
 Replay also requires an updated camera image. Both camera runtime builds declare
 `io.rig.camera.replay-bindings=1`; Rig inspects the selected image before reporting
 replay ready or starting it. An old image lacking that capability fails with an

@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import subprocess
 import sys
 import tempfile
@@ -44,24 +45,36 @@ def runtime():
     architecture = {"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64", "AMD64": "amd64"}.get(platform.machine())
     producer = {"image": image, "architecture": architecture}
     missing = []
+    missing_images = []
     if architecture is None:
         missing.append(f"unsupported native architecture {platform.machine()}")
+        return producer, missing, missing_images
     try:
         proc = subprocess.run(["docker", "image", "inspect", image], capture_output=True, text=True, timeout=15)
         if proc.returncode:
             diagnostic = " ".join(proc.stderr.split())[:400]
-            if "No such image" in proc.stderr or "No such object" in proc.stderr:
-                missing.append(f"native image {image} unavailable; build/pull camera-service's dev image explicitly")
+            spellings = [image]
+            if "@" not in image and ":" not in image.rsplit("/", 1)[-1]:
+                spellings.append(image + ":latest")
+            if re.fullmatch(r"(?:Error response from daemon:\s*|Error:\s*)?No such (?:image|object):\s*" +
+                            "(?:" + "|".join(map(re.escape, spellings)) + ")", proc.stderr.strip()):
+                missing.append(f"native image {image} unavailable; it must be pulled or built before conversion")
+                missing_images.append({"image": image, "platform": "linux/" + architecture})
             else:
                 missing.append(f"cannot inspect Docker image {image}: {diagnostic or 'Docker image inspection failed'}")
         else:
-            info = json.loads(proc.stdout)[0]
+            records = json.loads(proc.stdout)
+            if not isinstance(records, list) or len(records) != 1 or not isinstance(records[0], dict):
+                raise ValueError("Docker image inspect must return exactly one image object")
+            info = records[0]
+            if any(not isinstance(info.get(key), str) or not info[key] for key in ("Id", "Architecture", "Os")):
+                raise ValueError("Docker image inspect returned incomplete image metadata")
             producer["image_id"] = info["Id"]
             if info.get("Architecture") != architecture or info.get("Os") != "linux":
                 missing.append(f"{image} is {info.get('Os')}/{info.get('Architecture')}; need linux/{architecture}")
     except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
         missing.append(f"Docker image inspection unavailable: {exc}")
-    return producer, missing
+    return producer, missing, missing_images
 
 
 def implementation_hash():
@@ -84,10 +97,11 @@ def main(argv=None):
     try:
         request = json.loads(Path(args.request).read_text())
         result = preflight(request, ROOT / "export-profiles")
-        producer, missing = runtime()
+        producer, missing, missing_images = runtime()
         producer["implementation_sha256"] = implementation_hash()
         result["producer"].update(producer)
         result["missing_dependencies"] = missing
+        result["missing_images"] = missing_images
         if not args.preflight:
             if missing:
                 raise ValueError("; ".join(missing))

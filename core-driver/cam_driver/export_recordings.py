@@ -180,35 +180,56 @@ def _gst():
 
 
 def _decode(run):
-    """Blocking raw samples, including stream-copy inputs: no best-effort decode drops."""
+    """Decode each part in order, preserving its stored PTS and every frame.
+
+    splitmuxsrc joins parts using their estimated durations. That removes real gaps
+    at a boundary and can accumulate rounding drift, so its reconstructed timeline
+    cannot validate the original CSV. The Matroska parts retain continuous PTS.
+    """
     from .sources.replay import _check_glob_hazards, _probe_mkv, _RAW_DECODE
     Gst = _gst()
     _check_glob_hazards(run)
-    codec = _probe_mkv(run.mkv_paths[0])
-    if codec not in _RAW_DECODE:
-        raise ValueError(f"unsupported/unreadable recording codec {codec}: {run.base}")
     fmt = parse_pixel_format(run.header["pixel_format"])[0]
-    pipeline = Gst.parse_launch(
-        f'splitmuxsrc location="{run.mkv_glob}" ! {_RAW_DECODE[codec]} ! videoconvert n-threads=2 ! '
-        f'video/x-raw,format={fmt},width={int(run.header["width"])},height={int(run.header["height"])} ! '
-        'appsink name=sink sync=false max-buffers=4 drop=false')
-    sink, bus = pipeline.get_by_name("sink"), pipeline.get_bus()
-    pipeline.set_state(Gst.State.PLAYING)
-    try:
-        while True:
-            sample = sink.emit("try-pull-sample", 30 * Gst.SECOND)
-            if sample is not None:
-                yield sample
-                continue
-            msg = bus.timed_pop_filtered(Gst.SECOND, Gst.MessageType.ERROR | Gst.MessageType.EOS)
-            if msg is not None and msg.type == Gst.MessageType.EOS:
-                return
-            if msg is not None:
-                error, debug = msg.parse_error()
-                raise ValueError(f"recording decode failed: {error}: {debug}")
-            raise ValueError(f"recording decode timed out: {run.base}")
-    finally:
-        pipeline.set_state(Gst.State.NULL)
+    for part in run.mkv_paths:
+        codec = _probe_mkv(part)
+        if codec not in _RAW_DECODE:
+            raise ValueError(f"unsupported/unreadable recording codec {codec}: {part}")
+        pipeline = Gst.parse_launch(
+            f'filesrc location="{part}" ! matroskademux ! {_RAW_DECODE[codec]} ! videoconvert n-threads=2 ! '
+            f'video/x-raw,format={fmt},width={int(run.header["width"])},height={int(run.header["height"])} ! '
+            'appsink name=sink sync=false max-buffers=4 drop=false')
+        sink, bus = pipeline.get_by_name("sink"), pipeline.get_bus()
+        pipeline.set_state(Gst.State.PLAYING)
+        try:
+            while True:
+                sample = sink.emit("try-pull-sample", 30 * Gst.SECOND)
+                if sample is not None:
+                    yield sample
+                    continue
+                msg = bus.timed_pop_filtered(Gst.SECOND, Gst.MessageType.ERROR | Gst.MessageType.EOS)
+                if msg is not None and msg.type == Gst.MessageType.EOS:
+                    break
+                if msg is not None:
+                    error, debug = msg.parse_error()
+                    raise ValueError(f"recording decode failed for {part}: {error}: {debug}")
+                raise ValueError(f"recording decode timed out: {part}")
+        finally:
+            pipeline.set_state(Gst.State.NULL)
+
+
+def _check_frame_pts(sample, expected, offset, context):
+    """Allow one fixed muxer offset and millisecond quantization, never frame drift."""
+    actual = int(sample.get_buffer().pts)
+    if actual == (1 << 64) - 1:  # Gst.CLOCK_TIME_NONE; no repeated GStreamer initialization.
+        raise ValueError(f"{context}: decoded frame has no PTS; CSV PTS={expected} ns")
+    if offset is None:
+        offset = actual - expected
+    delta = actual - offset - expected
+    if abs(delta) > 1_000_000:
+        raise ValueError(f"{context} does not align with its CSV PTS: "
+                         f"decoded PTS={actual} ns, CSV PTS={expected} ns, "
+                         f"offset={offset} ns, delta={delta:+d} ns (tolerance=1000000 ns)")
+    return offset
 
 
 def _untile_buffer(sample, header):
@@ -314,10 +335,9 @@ def _encode(run, target, definition, rows, stamps):
         for sample in _decode(run):
             if count >= len(rows):
                 raise ValueError(f"{run.base}: decoded more frames than the CSV contains")
-            if not count:
-                decode_pts_offset = int(sample.get_buffer().pts) - int(rows[0]["pts_ns"])
-            if abs(int(sample.get_buffer().pts) - decode_pts_offset - int(rows[count]["pts_ns"])) > 1_000_000:
-                raise ValueError(f"{run.base}: source frame {count} does not align with its CSV PTS")
+            decode_pts_offset = _check_frame_pts(
+                sample, int(rows[count]["pts_ns"]), decode_pts_offset,
+                f"{run.base}: source frame {count}")
             if stretch is not None:
                 buf, caps = _normalize_gray16(sample, stretch)
             else:
@@ -357,7 +377,7 @@ def convert(request, profile_root):
         raise ValueError("converter destination must be an empty staging directory")
     # Require all encoders before writing even the first session.
     Gst = _gst()
-    for plugin in ("x264enc", "h264parse", "avdec_h264", "splitmuxsrc", "splitmuxsink", "matroskamux"):
+    for plugin in ("x264enc", "h264parse", "avdec_h264", "matroskademux", "splitmuxsink", "matroskamux"):
         if Gst.ElementFactory.find(plugin) is None:
             raise ValueError(f"cam-dev image is missing required GStreamer element {plugin}")
     result["producer"]["gstreamer"] = Gst.version_string()
@@ -412,15 +432,11 @@ def convert(request, profile_root):
             for sample in _decode(output):
                 if decoded >= len(rows):
                     raise ValueError(f"{prefix}: proxy decoded more frames than the input")
-                # splitmuxsrc rebases its timeline (currently starting at 1000 seconds).
-                # Validate every relative PTS within Matroska's millisecond precision;
-                # absolute capture nanoseconds stay unchanged in CSV.
-                actual_pts = int(sample.get_buffer().pts)
-                if pts_offset is None:
-                    pts_offset = actual_pts - int(rows[0]["pts_ns"])
-                if abs(actual_pts - pts_offset - int(rows[decoded]["pts_ns"])) > 1_000_000:
-                    raise ValueError(f"{prefix}: proxy frame {decoded} PTS {sample.get_buffer().pts} "
-                                     f"does not match its CSV PTS {rows[decoded]['pts_ns']}")
+                # Validate stored PTS across every part with one fixed offset and
+                # Matroska's millisecond precision. Capture nanoseconds stay in CSV.
+                pts_offset = _check_frame_pts(
+                    sample, int(rows[decoded]["pts_ns"]), pts_offset,
+                    f"{prefix}: proxy frame {decoded}")
                 decoded += 1
             if decoded != len(rows) or output_rows != rows or output_stamps != stamps:
                 raise ValueError(f"{prefix}: proxy frame count/stamp validation failed")

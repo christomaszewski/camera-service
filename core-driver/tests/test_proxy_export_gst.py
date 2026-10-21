@@ -8,10 +8,110 @@ import tempfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cam_driver.config import parse_config
-from cam_driver.export_recordings import convert, file_hash
+from cam_driver.export_recordings import _decode, _gst, canonical_hash, convert, file_hash
+from cam_driver.playback import discover_sessions
 from cam_driver.sources.replay import ReplaySource
 from test_proxy_export import request, PROFILES, raises
 from test_replay_source import _write_session, T0, IV, _Consumer, _pump
+
+
+def _write_segmented_session(camera, pixel_format):
+    """Real writer with jitter, a late session start and a gap at an FFV1 GOP boundary."""
+    Gst = _gst()
+    base = camera / "segmented"
+    points = [12_345_678_900 + i * IV + (i % 7) * 240_000
+              + (2_230_000_000 if i >= 36 else 0) for i in range(100)]
+    pipeline = Gst.parse_launch(
+        f'appsrc name=src is-live=false format=time caps="video/x-raw,format={pixel_format},'
+        'width=16,height=16,framerate=25/1" ! videoconvert ! '
+        'avenc_ffv1 coder=1 context=1 threads=0 slices=4 slicecrc=1 ! '
+        'splitmuxsink send-keyframe-requests=true muxer=matroskamux max-size-time=250000000 '
+        f'location="{base}-%05d.mkv"')
+    src = pipeline.get_by_name("src")
+    pipeline.set_state(Gst.State.PLAYING)
+    try:
+        for i, pts in enumerate(points):
+            size = 512 if pixel_format == "GRAY16_LE" else 256
+            buf = Gst.Buffer.new_wrapped(bytes([(i * 20) % 256]) * size)
+            buf.pts = pts
+            assert src.emit("push-buffer", buf) == Gst.FlowReturn.OK
+        src.emit("end-of-stream")
+        msg = pipeline.get_bus().timed_pop_filtered(
+            20 * Gst.SECOND, Gst.MessageType.EOS | Gst.MessageType.ERROR)
+        assert msg is not None and msg.type == Gst.MessageType.EOS, msg
+    finally:
+        pipeline.set_state(Gst.State.NULL)
+    assert len(list(camera.glob("segmented-*.mkv"))) > 2
+    base.with_suffix(".json").write_text(json.dumps({
+        "pixel_format": pixel_format, "width": 16, "height": 16,
+        "bits_per_pixel": 16 if pixel_format == "GRAY16_LE" else 8,
+        "first_timestamp_ns": T0 + points[0], "first_pts_ns": points[0],
+        "base_timestamp_ns": T0, "timestamp_source": "system", "cfa_tile_mode": "off",
+        "session": {"frames_recorded": len(points), "truncated": False, "error": None}}))
+    with base.with_suffix(".csv").open("w", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["frame_id", "pts_ns", "timestamp_ns", "source", "chunk_ns", "camera_ns", "system_ns"])
+        for i, pts in enumerate(points):
+            timestamp = T0 + pts
+            writer.writerow([90 + i, pts, timestamp, "system", "", timestamp, timestamp])
+    return base, points
+
+
+def test_multipart_proxy_preserves_boundary_gaps_and_fractional_frame_timing():
+    for pixel_format in ("GRAY8", "GRAY16_LE"):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "source"
+            camera = root / "recordings" / "camera"
+            camera.mkdir(parents=True)
+            base, points = _write_segmented_session(camera, pixel_format)
+            original = {p: file_hash(p) for p in camera.iterdir()}
+            output = Path(temporary) / "output"
+            output.mkdir()
+            req = request(root)
+            # Exercise output validation across H.264 part boundaries as well.
+            profiles = Path(temporary) / "profiles"
+            profiles.mkdir()
+            definition = req["profile"]["definition"]
+            definition["encoding"]["segment_seconds"] = 0.25
+            (profiles / "h264.yaml").write_text(json.dumps(definition))
+            req["profile"]["sha256"] = canonical_hash(definition)
+            req["destination"] = str(output)
+            result = convert(req, profiles)
+            assert result["recordings"][0]["sessions"][0]["validation"]["decoded_frames"] == len(points)
+            assert all(file_hash(p) == digest for p, digest in original.items())
+            proxy = discover_sessions(str(output / "recordings" / "camera"))[0]
+            assert len(proxy.mkv_paths) > 1
+            with open(proxy.csv_path) as stream, base.with_suffix(".csv").open() as source:
+                assert list(csv.DictReader(stream)) == list(csv.DictReader(source))
+            actual = [int(sample.get_buffer().pts) for sample in _decode(proxy)]
+            assert len(actual) == len(points)
+            offset = actual[0] - points[0]
+            assert all(abs(got - offset - expected) <= 1_000_000
+                       for got, expected in zip(actual, points))
+            assert actual[36] - actual[35] > 2_000_000_000
+
+
+def test_multipart_source_mismatch_at_boundary_is_still_rejected():
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "source"
+        camera = root / "recordings" / "camera"
+        camera.mkdir(parents=True)
+        base, points = _write_segmented_session(camera, "GRAY8")
+        path = base.with_suffix(".csv")
+        path.write_text(path.read_text().replace(f"126,{points[36]},", f"126,{points[36] + 5_000_000},"))
+        output = Path(temporary) / "output"
+        output.mkdir()
+        req = request(root)
+        req["destination"] = str(output)
+        try:
+            convert(req, PROFILES)
+        except ValueError as exc:
+            message = str(exc)
+            assert "source frame 36 does not align with its CSV PTS" in message, message
+            assert all(label in message for label in ("decoded PTS=", "CSV PTS=", "offset=", "delta=")), message
+        else:
+            raise AssertionError("timestamp corruption at a part boundary was accepted")
+        assert not (output / "recordings/camera/segmented.json").exists()
 
 
 def test_multi_session_proxy_preserves_stamps_geometry_selection_and_source_bytes():

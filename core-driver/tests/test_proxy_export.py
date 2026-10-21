@@ -2,8 +2,10 @@
 import json
 from pathlib import Path
 import runpy
+import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cam_driver.config import parse_config
@@ -141,6 +143,108 @@ def test_export_helper_selects_native_dev_image_and_honors_explicit_pins():
     assert image({"RIG_IMAGE_TAG": "v1.2-jp6m"}) == "cam-dev:v1.2-dev"
     assert image({"CAM_IMAGE_TAG": "special"}) == "cam-dev:special"
     assert image({"CAM_DEV_IMAGE": "my-image@sha256:abc"}) == "my-image@sha256:abc"
+
+
+def inspect_runtime(image, stdout="", stderr="", returncode=0, architecture="arm64"):
+    helper = runpy.run_path(str(ROOT / "tools/export-recordings"))
+    proc = subprocess.CompletedProcess([], returncode, stdout, stderr)
+    with patch.dict("os.environ", {"CAM_DEV_IMAGE": image}, clear=True), \
+            patch("platform.machine", return_value=architecture), \
+            patch("subprocess.run", return_value=proc) as run:
+        result = helper["runtime"]()
+        if architecture in ("arm64", "aarch64", "x86_64", "AMD64"):
+            run.assert_called_once_with(["docker", "image", "inspect", image],
+                                        capture_output=True, text=True, timeout=15)
+        else:
+            run.assert_not_called()
+        return result
+
+
+def test_missing_native_digest_reports_exact_pull_requirement_without_pulling():
+    image = "registry:5000/cam-dev@sha256:" + "a" * 64
+    for architecture, expected in (("arm64", "arm64"), ("x86_64", "amd64")):
+        producer, missing, images = inspect_runtime(
+            image, stdout="[]", stderr=f"Error response from daemon: No such image: {image}\n",
+            returncode=1, architecture=architecture)
+        assert producer == {"image": image, "architecture": expected}
+        assert len(missing) == 1 and "native image" in missing[0]
+        assert images == [{"image": image, "platform": "linux/" + expected}]
+    _, missing, images = inspect_runtime(
+        image, stderr=f"Error: No such object: {image}\n", returncode=1)
+    assert missing and images == [{"image": image, "platform": "linux/arm64"}]
+
+
+def test_existing_native_image_is_pinned_without_pull_requirement():
+    image = "registry:5000/cam-dev:dev"
+    image_id = "sha256:" + "b" * 64
+    producer, missing, images = inspect_runtime(
+        image, stdout=json.dumps([{"Id": image_id, "Architecture": "arm64", "Os": "linux"}]))
+    assert producer["image_id"] == image_id
+    assert missing == images == []
+
+
+def test_untagged_missing_image_accepts_implicit_latest_without_changing_pull_ref():
+    image = "registry:5000/cam-dev"
+    producer, missing, images = inspect_runtime(
+        image, stderr=f"Error: No such image: {image}:latest\n", returncode=1)
+    assert producer["image"] == image and missing
+    assert images == [{"image": image, "platform": "linux/arm64"}]
+
+
+def test_wrong_architecture_and_unsupported_hosts_are_not_pullable():
+    image = "registry:5000/cam-dev:dev"
+    _, missing, images = inspect_runtime(
+        image, stdout=json.dumps([{"Id": "sha256:existing", "Architecture": "amd64", "Os": "linux"}]))
+    assert "need linux/arm64" in missing[0] and images == []
+    _, missing, images = inspect_runtime(image, architecture="riscv64")
+    assert missing == ["unsupported native architecture riscv64"] and images == []
+
+
+def test_docker_daemon_permission_and_unrelated_errors_are_not_pullable():
+    image = "registry:5000/cam-dev:dev"
+    for diagnostic in ("Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+                       "permission denied while trying to connect to the Docker daemon socket",
+                       "Error response from daemon: No such image: some-other-image:dev",
+                       f"Error response from daemon: No such image: {image}\nCannot connect to the Docker daemon",
+                       f"Cannot connect to Docker socket /tmp/No such image: {image}"):
+        _, missing, images = inspect_runtime(image, stderr=diagnostic, returncode=1)
+        assert missing[0].startswith("cannot inspect Docker image") and images == []
+
+
+def test_malformed_image_inspection_is_a_dependency_failure_not_a_pull_requirement():
+    image = "registry:5000/cam-dev:dev"
+    for output in ("not json", "[]", "{}", "[null]", '["image"]',
+                   '[{"Id": "sha256:existing"}]',
+                   '[{"Id": null, "Architecture": "arm64", "Os": "linux"}]'):
+        _, missing, images = inspect_runtime(image, stdout=output)
+        assert missing[0].startswith("Docker image inspection unavailable:") and images == []
+
+
+def test_helper_preflight_exposes_pull_requirement_without_modifying_run():
+    helper = runpy.run_path(str(ROOT / "tools/export-recordings"))
+    image = "registry:5000/cam-dev@sha256:" + "c" * 64
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        source = root / "run"
+        session(source)
+        original_files = {str(path.relative_to(source)): path.read_bytes()
+                          for path in source.rglob("*") if path.is_file()}
+        request_path, result_path = root / "request.json", root / "result.json"
+        request_path.write_text(json.dumps(request(source)))
+        proc = subprocess.CompletedProcess([], 1, "[]", f"Error: No such object: {image}\n")
+        with patch.dict("os.environ", {"CAM_DEV_IMAGE": image}, clear=True), \
+                patch("platform.machine", return_value="arm64"), \
+                patch("subprocess.run", return_value=proc) as run:
+            assert helper["main"](["--request", str(request_path), "--result", str(result_path), "--preflight"]) == 0
+            run.assert_called_once_with(["docker", "image", "inspect", image],
+                                        capture_output=True, text=True, timeout=15)
+        result = json.loads(result_path.read_text())
+        assert result["missing_images"] == [{"image": image, "platform": "linux/arm64"}]
+        assert "native image" in result["missing_dependencies"][0]
+        assert result["producer"]["image"] == image
+        assert {str(path.relative_to(source)): path.read_bytes()
+                for path in source.rglob("*") if path.is_file()} == original_files
+        assert not (source / "exports").exists()
 
 
 if __name__ == "__main__":
