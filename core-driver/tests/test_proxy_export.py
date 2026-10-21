@@ -58,12 +58,36 @@ def test_preflight_uses_portable_paths_and_keeps_unknown_recorded_names():
 def test_preflight_rejects_all_unsupported_inputs_together():
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
-        session(root, "thermal", pixel_format="Mono16")
+        session(root, "thermal", pixel_format="BayerRG16")
         session(root, "alpha", pixel_format="RGBA")
         session(root, "odd", width=15)
         req = request(root, ["thermal", "alpha", "odd"])
         for text in ("thermal/capture", "alpha/capture", "odd/capture"):
             raises(lambda: preflight(req, PROFILES), text)
+
+
+def test_preflight_declares_normalized_mono8_output_and_preserves_source_format():
+    for fmt in ("GRAY16_LE", "GRAY16_BE", "Mono16"):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session(root, pixel_format=fmt, bits_per_pixel=16)
+            item = preflight(request(root), PROFILES)["recordings"][0]["sessions"][0]
+            assert item["pixel_format"] == "GRAY8" and item["bits_per_pixel"] == 8
+            assert item["source_pixel_format"] == fmt and item["source_bits_per_pixel"] == 16
+            assert item["normalization"] == {
+                "method": "percentile-stretch", "percentiles": [1.0, 99.0],
+                "smoothing": 0.9, "output_pixel_format": "GRAY8", "reset": "session"}
+            assert item["lossy"] is True
+
+
+def test_preflight_rejects_packed_bayer_and_mislabeled_high_depth():
+    for fmt, bits, bayer in (("Mono12p", 16, None), ("BayerRG16", 16, "rggb"),
+                             ("GRAY16_LE", 16, "rggb"), ("GRAY16_BE", 32, None),
+                             ("Mono8", 16, None)):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session(root, pixel_format=fmt, bits_per_pixel=bits, bayer_pattern=bayer)
+            raises(lambda: preflight(request(root), PROFILES), "unsupported or incomplete recordings")
 
 
 def test_profile_hash_and_capture_timeline_validation():

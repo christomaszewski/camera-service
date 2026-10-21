@@ -92,6 +92,133 @@ def test_tiled_bayer_proxy_is_untiled_before_lossy_encoding():
             src.stop()
 
 
+def test_gray16_proxies_match_webrtc_auto_and_reset_between_sessions():
+    import numpy as np
+    from cam_driver.thermal_preview import PercentileStretch
+
+    for pixel_format, gst_format, dtype in (("GRAY16_LE", "GRAY16_LE", "<u2"),
+                                           ("GRAY16_BE", "GRAY16_BE", ">u2"),
+                                           ("Mono16", "GRAY16_LE", "<u2")):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "source"
+            camera = root / "recordings" / "camera"
+            camera.mkdir(parents=True)
+            expected, ids, timestamps = [], [], []
+            for number, (prefix, baseline) in enumerate((("early", 1000), ("late", 50000))):
+                # A narrow range within the 16-bit container: top-byte truncation would
+                # erase almost all detail. The changing histogram also exercises EMA state.
+                pixels = [baseline + np.arange(256, dtype=np.uint16).reshape(16, 16) * 2 + i * 80
+                          for i in range(4)]
+                first_timestamp = T0 + number * 3_000_000_000
+                first_id = 10 + number * 100
+                base = _write_session(camera, prefix, number, first_timestamp, len(pixels),
+                                      frame_id0=first_id, pixel_format=gst_format,
+                                      pixels=lambda i: pixels[i].astype(dtype).tobytes())
+                header = json.loads(base.with_suffix(".json").read_text())
+                header.update(pixel_format=pixel_format, bits_per_pixel=16)
+                base.with_suffix(".json").write_text(json.dumps(header))
+                # Each session starts a fresh window; the very different second baseline
+                # would render white if normalization state leaked across sessions.
+                stretch = PercentileStretch()
+                expected.extend(stretch(frame) for frame in pixels)
+                ids.extend(first_id + i for i in range(len(pixels)))
+                timestamps.extend(first_timestamp + i * IV for i in range(len(pixels)))
+            original = {p: file_hash(p) for p in camera.iterdir()}
+            output = Path(temporary) / "output"
+            output.mkdir()
+            req = request(root)
+            req["destination"] = str(output)
+            result = convert(req, PROFILES)
+            assert all(file_hash(p) == digest for p, digest in original.items())
+            normalization = req["profile"]["definition"]["gray16_normalization"]
+            for session in result["recordings"][0]["sessions"]:
+                assert session["pixel_format"] == "GRAY8" and session["bits_per_pixel"] == 8
+                assert session["source_pixel_format"] == pixel_format
+                assert session["source_bits_per_pixel"] == 16
+                assert session["normalization"] == normalization
+                assert session["validation"] == {"ok": True, "decoded_frames": 4, "stamps_preserved": True}
+                prefix = session["id"]
+                path = output / "recordings" / "camera" / prefix
+                header = json.loads(path.with_suffix(".json").read_text())
+                assert header["pixel_format"] == "GRAY8" and header["bits_per_pixel"] == 8
+                assert header["width"] == 16 and header["height"] == 16
+                assert header["bayer_pattern"] is None
+                proxy = header["proxy"]
+                assert proxy["profile_revision"] == 2 and proxy["lossy"] is True
+                assert proxy["source_pixel_format"] == pixel_format and proxy["source_bits_per_pixel"] == 16
+                assert proxy["normalization"] == normalization
+                assert "gray16-percentile-stretch" in proxy["transformations"]
+                assert proxy["source_files"] == session["source_files"]
+                assert all(file_hash(root / relative) == digest for relative, digest in proxy["source_files"].items())
+                with path.with_suffix(".csv").open() as stream, (camera / (prefix + ".csv")).open() as original_csv:
+                    assert list(csv.DictReader(stream)) == list(csv.DictReader(original_csv))
+            cfg = parse_config({"camera": {"type": "replay"}, "replay": {
+                "path": str(output / "recordings" / "camera"), "speed": 0}, "control": {"enabled": False}})
+            src = ReplaySource(cfg.replay, cfg.playback)
+            try:
+                src.open()
+                src.configure()
+                # GRAY8 is the actual delivered format: ROS publishes mono8 and the
+                # WebRTC normalization pump passes it through instead of stretching twice.
+                assert src.pixel_format() == "GRAY8"
+                consumer = _Consumer()
+                src.start(consumer.on_frame)
+                _pump(lambda: src.finished)
+                assert not src.finished_error
+                assert consumer.ids() == ids and consumer.stamps() == timestamps
+                assert len(consumer.frames) == len(expected)
+                for (_, data, _), normalized in zip(consumer.frames, expected):
+                    assert len(data) == 16 * 16
+                    actual = np.frombuffer(data, dtype=np.uint8).reshape(16, 16)
+                    error = np.abs(actual.astype(np.int16) - normalized.astype(np.int16))
+                    assert error.mean() < 8, (pixel_format, error.mean(), error.max())
+                for index in (0, 4):
+                    frame = np.frombuffer(consumer.frames[index][1], dtype=np.uint8)
+                    assert int(frame.max()) - int(frame.min()) > 200
+            finally:
+                src.stop()
+
+
+def test_gray16_normalization_honors_video_meta_and_output_padding():
+    import gi
+    import numpy as np
+    gi.require_version("GstVideo", "1.0")
+    from gi.repository import Gst, GstVideo
+    from cam_driver.export_recordings import _normalize_gray16
+    from cam_driver.thermal_preview import PercentileStretch
+
+    width, height, offset, stride = 18, 4, 8, 40
+    frame = np.arange(width * height, dtype=np.uint16).reshape(height, width) + 20000
+    expected = PercentileStretch()(frame)
+    for fmt, dtype in (("GRAY16_LE", "<u2"), ("GRAY16_BE", ">u2")):
+        caps = Gst.Caps.from_string(f"video/x-raw,format={fmt},width={width},height={height},framerate=25/1")
+        raw = bytearray([255] * (offset + height * stride))
+        view = np.ndarray(frame.shape, dtype=dtype, buffer=raw, offset=offset, strides=(stride, 2))
+        view[:] = frame
+
+        def sample(data):
+            buffer = Gst.Buffer.new_wrapped(bytes(data))
+            meta = GstVideo.buffer_add_video_meta_full(
+                buffer, GstVideo.VideoFrameFlags.NONE, GstVideo.VideoFormat.from_string(fmt),
+                width, height, 1, [offset, 0, 0, 0], [stride, 0, 0, 0])
+            assert meta is not None
+            return Gst.Sample.new(buffer, caps, None, None)
+
+        output, output_caps = _normalize_gray16(sample(raw), PercentileStretch())
+        info = GstVideo.VideoInfo.new_from_caps(output_caps)
+        assert output_caps.get_structure(0).get_string("format") == "GRAY8"
+        assert info.stride[0] == 20 and output.get_size() == info.size
+        data = output.extract_dup(0, output.get_size())
+        actual = np.ndarray(frame.shape, dtype=np.uint8, buffer=data,
+                            offset=info.offset[0], strides=(info.stride[0], 1))
+        assert np.array_equal(actual, expected)
+        for row in range(height):
+            padding = info.offset[0] + row * info.stride[0] + width
+            assert data[padding:padding + 2] == b"\0\0"
+        short = raw[:offset + (height - 1) * stride + width * 2 - 1]
+        raises(lambda: _normalize_gray16(sample(short), PercentileStretch()), "short frame")
+
+
 def test_missing_video_frames_are_never_published_as_complete():
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary) / "source"

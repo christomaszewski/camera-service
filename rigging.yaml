@@ -77,6 +77,7 @@ launch_surface:                          # the files rig copies to the vehicle (
   - export-profiles/h264.yaml
   - core-driver/cam_driver/__init__.py
   - core-driver/cam_driver/export_recordings.py
+  - core-driver/cam_driver/thermal_preview.py
   - core-driver/cam_driver/playback.py
   - core-driver/cam_driver/timestamps.py
   - core-driver/cam_driver/formats.py

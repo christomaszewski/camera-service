@@ -235,7 +235,10 @@ counts from), `from_s`/`to_s` (a window) — see [docs/PLAYBACK.md](docs/PLAYBAC
 
 For lower decode cost, `rig run export RUN --service camera-service` generates this
 service's default H.264 proxies under the original run. Replay selects them only
-with `--use-proxies`; original recordings stay untouched. See
+with `--use-proxies`; original recordings stay untouched. The profile also converts
+16-bit mono recordings using WebRTC's auto contrast normalization. Those proxies
+replay as 8-bit visual intensities, so use originals when consumers need radiometric
+counts or 16-bit data. See
 [offline proxy exports](docs/proxy-exports.md) for formats, reuse, native image
 requirements, exact session bindings and provenance.
 "Timeline". A playback source feeds the recording through *blocking* appsrcs, so `speed: 0`

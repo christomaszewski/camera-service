@@ -34,23 +34,43 @@ instance names. `--force` creates another generation without replacing old ones.
 
 ## The h264 profile
 
-Revision 1 uses software x264, CRF 23, `veryfast`, constrained baseline, no CABAC or
+Revision 2 uses software x264, CRF 23, `veryfast`, constrained baseline, no CABAC or
 B-frames, one reference frame, approximately one-second keyframe spacing, and
 60-second MKV segments. It preserves every frame, resolution, frame ID, capture
-timestamp, session boundary and recorded gap. Existing capture metadata and CSV
-fields remain intact. Storage metadata is regenerated and the result is decoded
-again to verify frame count and correspondence with the sidecar timeline.
+timestamp, session boundary and recorded gap. Capture identity/timing metadata and
+CSV fields remain intact. Pixel and storage metadata describe the converted
+output, which is decoded again to verify frame count and correspondence with the
+sidecar timeline.
 
-Eight-bit mono, Bayer and supported RGB/YUV formats are accepted. Lossless CFA
-storage tiling is undone before conversion; replay still delivers the Bayer mosaic
+Eight-bit mono, Bayer and supported RGB/YUV formats are accepted, with unchanged
+conversion behavior from revision 1. Lossless CFA storage tiling is undone before
+conversion; replay still delivers the Bayer mosaic
 and its original pattern, with approximate pixels. Storage is I420, so color data
 also incurs chroma subsampling. No scaling or frame-rate reduction occurs.
 
-High-bit-depth/thermal data, alpha-bearing RGBA/BGRA, unknown formats, invalid/odd
-dimensions, incomplete segments and invalid sidecars are rejected before conversion.
+`GRAY16_LE`, `GRAY16_BE` and `Mono16` recordings use the same `PercentileStretch`
+conversion as WebRTC's `CAM_WEBRTC_NORMALIZE: auto` preview: the 1st and 99th
+percentiles set the contrast range, with exponential smoothing that gives the
+previous range a weight of 0.9. Smoothing resets at each recording session and
+continues across its segments. The normalized output is 8-bit grayscale, described
+as `GRAY8` in the proxy header and stored as I420 H.264. It preserves every frame,
+capture stamp and the original geometry, but its pixels are visual intensities,
+not the original thermal/radiometric counts. Proxy provenance retains the original
+pixel format and bit depth. Use originals for measurements or consumers that need
+16-bit data; the source files are never modified.
+
+Packed and high-bit-depth Bayer, other unsupported high-bit-depth formats,
+alpha-bearing RGBA/BGRA, unknown formats, invalid/odd dimensions, incomplete
+segments and invalid sidecars are rejected before conversion.
 There is no fallback to FFV1 masquerading as an h264 proxy. Limit export selection by
 recorded instance name and use a recipe `proxies.instances.<name>.use: original`
 preference for unsupported replay instances.
+
+To generate revision 2 proxies, update the installed camera-service checkout or
+bundle and rebuild or pull its native images together, then run the same
+`rig run export RUN --service camera-service` command. The new profile hash selects
+a new export identity, so `--force` is unnecessary. Previous revision 1 exports are
+retained and can still be selected with an explicit recipe generation pin.
 
 The profile targets lower software decode cost; it does not bypass the current raw-frame
 transport or WebRTC re-encoding. It does not enable Apple VideoToolbox/NVIDIA codecs.
@@ -98,8 +118,9 @@ or proxy directory through `replay_input_path` and an exact selection through
 bag data into a synthesized run tree.
 
 Each proxy header contains a `proxy` record with profile identity, lossiness,
-transformations and original relative file hashes. Playback diagnostics expose it,
-and re-recorded replay sidecars preserve it in `replay_proxies`, including Rig's
+transformations, original pixel format/bit depth and original relative file hashes.
+Playback diagnostics expose it, and re-recorded replay sidecars preserve it in
+`replay_proxies`, including Rig's
 resolved export identity when supplied through `replay.proxy`. Original recordings
 that happened to use x264 are not classified as derived proxies.
 
@@ -107,8 +128,9 @@ that happened to use x264 are not classified as derived proxies.
 
 Run `python3 core-driver/tests/test_proxy_export.py` for host-only contract tests.
 Inside a native dev image, run `core-driver/tests/test_proxy_export_gst.py` for real
-FFV1-to-H264, Bayer, incomplete-input and replay stamp tests. Both are collected by
-the existing CI matrix. `core-driver/tools/replay_buffer_benchmark.py` compares
+FFV1-to-H264, normalized 16-bit mono, Bayer, incomplete-input and replay stamp tests.
+Both are collected by the existing CI matrix.
+`core-driver/tools/replay_buffer_benchmark.py` compares
 original/proxy CPU with recording disabled and an attached transport consumer; use
 the same image, playback window, pacing and frame count for both inputs.
 

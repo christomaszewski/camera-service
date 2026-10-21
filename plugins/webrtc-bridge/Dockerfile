@@ -128,6 +128,8 @@ ENV GST_PLUGIN_PATH=/usr/local/lib/gstreamer-1.0 \
 
 WORKDIR /app
 COPY plugins/webrtc-bridge/ /app/
+# The bridge and offline proxy exporter use one canonical normalization algorithm.
+COPY core-driver/cam_driver/thermal_preview.py /app/tools/_thermal_preview.py
 CMD ["bash", "run.sh"]
 
 # Dev selects this target with BASE_IMAGE=ubuntu:26.04 and GST_RS_TAG=0.15.4.

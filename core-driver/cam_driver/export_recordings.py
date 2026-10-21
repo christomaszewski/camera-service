@@ -21,6 +21,7 @@ from .formats import parse_pixel_format
 
 CONTRACT_VERSION = 1
 FORMAT = "camera-recording-proxy/v1"
+GRAY16_FORMATS = ("Mono16", "GRAY16_LE", "GRAY16_BE")
 
 
 def canonical_hash(value):
@@ -125,10 +126,14 @@ def preflight(request, profile_root):
                 hdr = run.header
                 pf = hdr["pixel_format"]
                 fmt, bits, bayer, packed, _ = parse_pixel_format(pf)
-                if pf not in definition["supported_pixel_formats"] or bits > 8 or packed:
+                gray16 = pf in GRAY16_FORMATS
+                if pf not in definition["supported_pixel_formats"] or (bits > 8 and not gray16) or packed:
                     raise ValueError(f"h264 profile does not support {pf}; keep this instance on originals")
-                if int(hdr.get("bits_per_pixel", bits)) > 8:
+                source_bits = int(hdr.get("bits_per_pixel", bits))
+                if source_bits > (16 if gray16 else 8):
                     raise ValueError("h264 profile cannot truncate high-bit-depth recording data")
+                if gray16 and hdr.get("bayer_pattern"):
+                    raise ValueError("h264 gray16 normalization supports monochrome recordings, not Bayer")
                 w, h = int(hdr["width"]), int(hdr["height"])
                 if w <= 0 or h <= 0 or w % 2 or h % 2:
                     raise ValueError("h264 profile requires positive even width and height")
@@ -146,11 +151,15 @@ def preflight(request, profile_root):
                     if not checked.is_file():
                         raise ValueError(f"missing input file {rel}")
                     paths.append(rel)
-                selected.append({"id": ident, "files": paths, "frame_count": len(rows),
-                                 "start_ns": stamps[0].timestamp_ns, "end_ns": stamps[-1].timestamp_ns,
-                                 "width": w, "height": h, "pixel_format": pf,
-                                 "bayer_pattern": hdr.get("bayer_pattern"), "storage_format": "I420",
-                                 "lossy": True, "format": FORMAT})
+                session = {"id": ident, "files": paths, "frame_count": len(rows),
+                           "start_ns": stamps[0].timestamp_ns, "end_ns": stamps[-1].timestamp_ns,
+                           "width": w, "height": h, "pixel_format": "GRAY8" if gray16 else pf,
+                           "bayer_pattern": hdr.get("bayer_pattern"), "storage_format": "I420",
+                           "lossy": True, "format": FORMAT}
+                if gray16:
+                    session.update(source_pixel_format=pf, source_bits_per_pixel=source_bits,
+                                   bits_per_pixel=8, normalization=definition["gray16_normalization"])
+                selected.append(session)
             except (ValueError, OSError, KeyError, TypeError) as exc:
                 errors.append(f"{name}/{ident}: {exc}")
         result.append({"name": name, "relative": relative, "sessions": selected})
@@ -227,11 +236,50 @@ def _untile_buffer(sample, header):
     return Gst.Buffer.new_wrapped(bytes(data))
 
 
+def _normalize_gray16(sample, stretch):
+    """Use the WebRTC preview stretch, honoring input/output video row padding."""
+    import numpy as np
+    import gi
+    gi.require_version("GstVideo", "1.0")
+    from gi.repository import GstVideo
+    Gst = _gst()
+    caps = sample.get_caps()
+    info = GstVideo.VideoInfo.new_from_caps(caps)
+    fmt = caps.get_structure(0).get_string("format")
+    if fmt not in ("GRAY16_LE", "GRAY16_BE"):
+        raise ValueError(f"gray16 normalization received {fmt}")
+    buf = sample.get_buffer()
+    meta = GstVideo.buffer_get_video_meta(buf)
+    stride, offset = (meta.stride[0], meta.offset[0]) if meta is not None else (info.stride[0], info.offset[0])
+    if stride < info.width * 2 or offset < 0:
+        raise ValueError("gray16 normalization received an invalid frame layout")
+    raw = buf.extract_dup(0, buf.get_size())
+    if len(raw) < offset + (info.height - 1) * stride + info.width * 2:
+        raise ValueError("gray16 normalization received a short frame")
+    frame = np.ndarray((info.height, info.width), dtype="<u2" if fmt == "GRAY16_LE" else ">u2",
+                       buffer=raw, offset=offset, strides=(stride, 2))
+    normalized = stretch(frame)
+    output_caps = caps.copy()
+    output_caps.set_value("format", "GRAY8")
+    output_info = GstVideo.VideoInfo.new_from_caps(output_caps)
+    data = bytearray(output_info.size)
+    view = np.ndarray((info.height, info.width), dtype=np.uint8, buffer=data,
+                      offset=output_info.offset[0], strides=(output_info.stride[0], 1))
+    view[:] = normalized
+    return Gst.Buffer.new_wrapped(bytes(data)), output_caps
+
+
 def _encode(run, target, definition, rows, stamps):
     if any(c in str(target) for c in '*?[]"\\\n\r'):
         raise ValueError("export destination contains characters unsupported by GStreamer")
     Gst = _gst()
     settings = definition["encoding"]
+    stretch = None
+    if run.header["pixel_format"] in GRAY16_FORMATS:
+        # Match CAM_WEBRTC_NORMALIZE=auto; keep state within one recording session.
+        from .thermal_preview import PercentileStretch
+        normalization = definition["gray16_normalization"]
+        stretch = PercentileStretch(*normalization["percentiles"], smooth=normalization["smoothing"])
     interval = playback.median_interval_ns([stamp.timestamp_ns for stamp in stamps])
     fps = 1e9 / interval
     keyframes = max(1, int(round(fps * settings["keyframe_interval_s"])))
@@ -267,11 +315,15 @@ def _encode(run, target, definition, rows, stamps):
             if count >= len(rows):
                 raise ValueError(f"{run.base}: decoded more frames than the CSV contains")
             if not count:
-                src.set_property("caps", sample.get_caps())
                 decode_pts_offset = int(sample.get_buffer().pts) - int(rows[0]["pts_ns"])
             if abs(int(sample.get_buffer().pts) - decode_pts_offset - int(rows[count]["pts_ns"])) > 1_000_000:
                 raise ValueError(f"{run.base}: source frame {count} does not align with its CSV PTS")
-            buf = _untile_buffer(sample, run.header)
+            if stretch is not None:
+                buf, caps = _normalize_gray16(sample, stretch)
+            else:
+                buf, caps = _untile_buffer(sample, run.header), sample.get_caps()
+            if not count:
+                src.set_property("caps", caps)
             # Capture stamps are unchanged. The original sidecar PTS is the authoritative
             # muxing timeline; decode PTS may include container offsets/rounding.
             buf.pts = int(rows[count]["pts_ns"])
@@ -335,9 +387,19 @@ def convert(request, profile_root):
                                      "profile_revision": definition["revision"],
                                      "profile_sha256": result["profile_sha256"], "lossy": True,
                                      "recorded_as": recording["name"], "session": prefix,
+                                     "source_pixel_format": run.header["pixel_format"],
+                                     "source_bits_per_pixel": int(run.header.get("bits_per_pixel",
+                                         parse_pixel_format(run.header["pixel_format"])[1])),
                                      "source_files": source_hashes,
                                      "source_session": run.header.get("session"),
                                      "transformations": ["decode", "undo-cfa-tiling", "convert-to-i420", "lossy-h264"]}})
+            if run.header["pixel_format"] in GRAY16_FORMATS:
+                # These are display intensities, not radiometric counts. Advertise the actual
+                # output format so replay/ROS deliver mono8 and WebRTC does not stretch twice.
+                header.update(pixel_format="GRAY8", bits_per_pixel=8, bayer_pattern=None)
+                header["proxy"].update(
+                    normalization=definition["gray16_normalization"],
+                    transformations=["decode", "gray16-percentile-stretch", "convert-to-i420", "lossy-h264"])
             Path(str(target) + ".json").write_text(json.dumps(header, indent=2, sort_keys=True) + "\n")
             with open(str(target) + ".csv", "w", newline="") as stream:
                 writer = csv.DictWriter(stream, fields)

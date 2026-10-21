@@ -2,7 +2,12 @@
 
 Run: python3 plugins/webrtc-bridge/tools/test_thermal_preview.py   (or pytest)
 """
+import importlib
+from pathlib import Path
+import shutil
+import subprocess
 import sys
+import tempfile
 
 import numpy as np
 
@@ -64,6 +69,32 @@ def test_parse_window():
             pass
         else:
             raise AssertionError(f"expected ValueError for {bad!r}")
+
+
+def test_bridge_imports_the_shared_implementation():
+    assert PercentileStretch.__module__ in ("cam_driver.thermal_preview", "_thermal_preview")
+    implementation = importlib.import_module(PercentileStretch.__module__)
+    assert PercentileStretch is implementation.PercentileStretch
+    assert parse_window is implementation.parse_window
+    assert DEFAULT_WINDOW == implementation.DEFAULT_WINDOW
+
+
+def test_bundled_bridge_import_works_without_the_core_package():
+    implementation = importlib.import_module(PercentileStretch.__module__)
+    frame = np.arange(256, dtype=np.uint16).reshape(16, 16) + 20000
+    expected = PercentileStretch()(frame).tobytes().hex()
+    with tempfile.TemporaryDirectory() as directory:
+        shutil.copyfile(Path(__file__).with_name("thermal_preview.py"),
+                        Path(directory) / "thermal_preview.py")
+        shutil.copyfile(implementation.__file__, Path(directory) / "_thermal_preview.py")
+        result = subprocess.run([sys.executable, "-c", """
+import numpy as np
+from thermal_preview import PercentileStretch
+assert PercentileStretch.__module__ == '_thermal_preview'
+frame = np.arange(256, dtype=np.uint16).reshape(16, 16) + 20000
+print(PercentileStretch()(frame).tobytes().hex())
+"""], cwd=directory, check=True, capture_output=True, text=True)
+        assert result.stdout.strip() == expected
 
 
 def _main():
