@@ -64,6 +64,7 @@ class SidecarHeader:
     # (None) for a live capture.
     replay_of: Optional[list] = None
     replay_epoch_unix_ns: Optional[int] = None
+    replay_proxies: Optional[list] = None  # portable source/profile lineage when replay used proxies
     # Resolved recorder, after depth/availability fallbacks. None on older recordings.
     recording_encoder: Optional[str] = None
     # Loss introduced by THIS encode; not a claim about original sensor/source fidelity.

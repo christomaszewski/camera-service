@@ -65,6 +65,7 @@ RUN cd /tmp \
 
 # ---- runtime: base + runtime deps + the Aravis install (no build toolchain) ----
 FROM ${BASE_IMAGE}
+LABEL io.rig.camera.replay-bindings="1"
 ARG L4T_MULTIMEDIA
 ENV DEBIAN_FRONTEND=noninteractive
 # kmod: libnvtvmr runs `lsmod` during NVENC init, else nvv4l2h26{4,5}enc aborts. Runtime libs only.

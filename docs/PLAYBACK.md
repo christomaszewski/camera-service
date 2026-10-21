@@ -146,6 +146,13 @@ A camera-service `replay` plays **every session** the run holds for the instance
 order, with the recorded gaps between them honoured as silence (`session`/`sessions`/`source_path`
 in the descriptor say where it is). `restart` goes back to the first session inside the window.
 
+Set `replay.sessions: [session-a, session-c]` to bind an exact subset without copying
+recordings. This list must be nonempty, unique, and mutually exclusive with
+`replay.run`; all selected prefixes must exist in the input directory. Rig's direct
+bindings use it for aliases and opt-in [H.264 proxy exports](proxy-exports.md).
+Proxy playback exposes profile/lossiness and original-file lineage in the playback
+descriptor's `proxy` field; re-recorded sidecars retain it as `replay_proxies`.
+
 Raw-frame recordings can change encoder (for example FFV1 → H.264 → FFV1), quality, preset,
 keyframe interval, segment duration, and Bayer tiling between sessions. Replay probes each session's
 MKV codec and uses that session's sidecar to restore the consumer format and undo its tiling.

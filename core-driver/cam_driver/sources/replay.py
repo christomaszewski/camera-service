@@ -39,7 +39,6 @@ branch's stamp correlation may briefly cross cycles; the recording branch is in-
 """
 from __future__ import annotations
 
-import fnmatch
 import logging
 import os
 import threading
@@ -113,16 +112,7 @@ def _check_glob_hazards(run: playback.RunInfo) -> None:
     """splitmuxsrc matches parts with a simple `*` glob (GPatternSpec: no escapes, no character
     classes) -- refuse the shapes it would silently mis-match rather than deliver a sibling
     run's frames under this run's stamps."""
-    if any(ch in run.base for ch in "*?[]"):
-        raise ValueError(f"replay: run path {run.base!r} contains glob characters "
-                         f"splitmuxsrc cannot handle -- rename/move the run")
-    run_dir = os.path.dirname(run.base)
-    over = sorted(set(fnmatch.filter(os.listdir(run_dir), os.path.basename(run.base) + "-*.mkv"))
-                  - {os.path.basename(p) for p in run.mkv_paths})
-    if over:
-        raise ValueError(
-            f"replay: {run.mkv_glob} would also match other files ({over[0]}, ...) -- "
-            f"another run's prefix extends this one; move the runs into separate directories")
+    playback.check_glob_hazards(run)
 
 
 class ReplaySource(GstPipelineSource):
@@ -175,7 +165,8 @@ class ReplaySource(GstPipelineSource):
     # ---- lifecycle ---------------------------------------------------------
     def open(self) -> None:
         super().open()
-        self._sessions = playback.discover_sessions(self.cfg.path, getattr(self.cfg, "run", ""))
+        self._sessions = playback.discover_sessions(self.cfg.path, getattr(self.cfg, "run", ""),
+                                                   getattr(self.cfg, "sessions", None))
         self._session_stamps = []
         for run in self._sessions:
             stamps = playback.load_stamps(run.csv_path)
@@ -305,6 +296,8 @@ class ReplaySource(GstPipelineSource):
         self._csv_stamps = self._session_stamps[idx]
         self._idx = 0
         self._playback.source_path = self._run.base
+        self._playback.proxy = ({**hdr["proxy"], **(getattr(self.cfg, "proxy", None) or {})}
+                                if hdr.get("proxy") else None)
         self._playback.session = idx
 
     def configure(self) -> None:
@@ -629,7 +622,11 @@ class ReplaySource(GstPipelineSource):
         return self._playback
 
     def provenance(self) -> dict:
-        return {"replay_of": [r.base for r in self._sessions], "replay_epoch_unix_ns": self._epoch_ns}
+        result = {"replay_of": [r.base for r in self._sessions], "replay_epoch_unix_ns": self._epoch_ns}
+        proxies = [r.header["proxy"] for r in self._sessions if r.header.get("proxy")]
+        if proxies:
+            result["replay_proxies"] = [{**p, **(getattr(self.cfg, "proxy", None) or {})} for p in proxies]
+        return result
 
     @property
     def finite(self) -> bool:

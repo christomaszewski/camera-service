@@ -799,6 +799,7 @@ class CapturePipeline:
             first_timestamp_ns=int(stamp.timestamp_ns),
             replay_of=prov.get("replay_of"),
             replay_epoch_unix_ns=prov.get("replay_epoch_unix_ns"),
+            replay_proxies=prov.get("replay_proxies"),
             recording_encoder=enc or None,
             recording_lossy=(enc == "x264") if enc not in (None, "", "stream-copy") else None,
             recording_settings=x264_settings(cfg) if enc == "x264" else None,

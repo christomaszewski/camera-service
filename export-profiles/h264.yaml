@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "id": "h264",
+  "revision": 1,
+  "format": "camera-recording-proxy/v1",
+  "lossy": true,
+  "description": "Software-decode proxy preserving recording geometry and every capture stamp",
+  "supported_pixel_formats": ["Mono8", "GRAY8", "BayerRG8", "BayerGR8", "BayerGB8", "BayerBG8", "I420", "NV12", "NV24", "YV12", "YUY2", "UYVY", "RGB", "BGR", "RGBx", "BGRx"],
+  "encoding": {
+    "encoder": "x264",
+    "crf": 23,
+    "preset": "veryfast",
+    "profile": "constrained-baseline",
+    "bframes": 0,
+    "reference_frames": 1,
+    "cabac": false,
+    "keyframe_interval_s": 1,
+    "segment_seconds": 60,
+    "storage_format": "I420"
+  }
+}

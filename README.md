@@ -223,7 +223,8 @@ Both pace to the data's own timestamps (`speed`, `loop`, `retime: wall` knobs) a
 legibly — the pcap parser can even tell you the camera's real format/geometry when the config
 mismatches, if the capture includes the device enumeration. A `replay` plays **every session**
 a run directory holds for the instance (one per lifecycle activate), in timeline order with
-the recorded gaps between them; `replay.run` pins one. At end-of-data the recording
+the recorded gaps between them; `replay.run` pins one, and `replay.sessions` selects
+an exact list (mutually exclusive with `run`). At end-of-data the recording
 finalizes and the process either **holds** (keys served, `restart` accepted — the default
 whenever the control plane is on, so a run rig brought up does not exit-and-restart under
 compose) or exits 0 (`playback.on_finish: exit`, the bare-tool shape; `loop: true` makes a
@@ -231,6 +232,12 @@ long-lived fake camera for plugin development either way). The `playback:` block
 places a replay on a *shared* timeline — `initial_state: paused` + `start_at_unix_s` (a
 release gate every producer of a replay gets), `epoch_unix_ns` (the zero the bag player
 counts from), `from_s`/`to_s` (a window) — see [docs/PLAYBACK.md](docs/PLAYBACK.md)
+
+For lower decode cost, `rig run export RUN --service camera-service` generates this
+service's default H.264 proxies under the original run. Replay selects them only
+with `--use-proxies`; original recordings stay untouched. See
+[offline proxy exports](docs/proxy-exports.md) for formats, reuse, native image
+requirements, exact session bindings and provenance.
 "Timeline". A playback source feeds the recording through *blocking* appsrcs, so `speed: 0`
 (as fast as the pipeline drains) is lossless: the reader waits for the encoder instead of
 dropping. One caveat: a run containing a recorded gap longer than 60 s replays with that gap

@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""Offline camera export helper for Rig; uses a local native cam-dev image only.
+
+  tools/export-recordings --request request.json --result result.json [--preflight]
+
+Preflight inspects files and image availability without starting a container. No
+compose services, devices, cameras, transport volumes or network are required.
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import subprocess
+import sys
+import tempfile
+import uuid
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "core-driver"))
+from cam_driver.export_recordings import preflight
+
+
+def image_reference(env):
+    if env.get("CAM_DEV_IMAGE"):
+        return env["CAM_DEV_IMAGE"]
+    registry = env.get("CAM_REGISTRY") or env.get("RIG_IMAGE_REGISTRY", "")
+    tag = env.get("CAM_IMAGE_TAG") or env.get("RIG_IMAGE_TAG") or "dev"
+    if not env.get("CAM_IMAGE_TAG"):
+        # An offline export always uses the portable dev variant, even on a Jetson
+        # or a deployment whose last build/pull selected a hardware variant.
+        for suffix in ("-jp6m", "-jp6", "-jp7", "-dev"):
+            if tag.endswith(suffix):
+                tag = tag[:-len(suffix)] + "-dev"
+                break
+        else:
+            tag = "dev" if tag in ("jp6", "jp6m", "jp7", "dev") else tag + "-dev"
+    return f"{registry.rstrip('/') + '/' if registry else ''}cam-dev:{tag}"
+
+
+def runtime():
+    image = image_reference(os.environ)
+    architecture = {"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64", "AMD64": "amd64"}.get(platform.machine())
+    producer = {"image": image, "architecture": architecture}
+    missing = []
+    if architecture is None:
+        missing.append(f"unsupported native architecture {platform.machine()}")
+    try:
+        proc = subprocess.run(["docker", "image", "inspect", image], capture_output=True, text=True, timeout=15)
+        if proc.returncode:
+            diagnostic = " ".join(proc.stderr.split())[:400]
+            if "No such image" in proc.stderr or "No such object" in proc.stderr:
+                missing.append(f"native image {image} unavailable; build/pull camera-service's dev image explicitly")
+            else:
+                missing.append(f"cannot inspect Docker image {image}: {diagnostic or 'Docker image inspection failed'}")
+        else:
+            info = json.loads(proc.stdout)[0]
+            producer["image_id"] = info["Id"]
+            if info.get("Architecture") != architecture or info.get("Os") != "linux":
+                missing.append(f"{image} is {info.get('Os')}/{info.get('Architecture')}; need linux/{architecture}")
+    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
+        missing.append(f"Docker image inspection unavailable: {exc}")
+    return producer, missing
+
+
+def implementation_hash():
+    digest = hashlib.sha256()
+    for name in ("tools/export-recordings", "core-driver/cam_driver/export_recordings.py",
+                 "core-driver/cam_driver/playback.py", "core-driver/cam_driver/timestamps.py",
+                 "core-driver/cam_driver/formats.py"):
+        digest.update(name.encode())
+        digest.update((ROOT / name).read_bytes())
+    return digest.hexdigest()
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--request", required=True)
+    parser.add_argument("--result", required=True)
+    parser.add_argument("--preflight", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        request = json.loads(Path(args.request).read_text())
+        result = preflight(request, ROOT / "export-profiles")
+        producer, missing = runtime()
+        producer["implementation_sha256"] = implementation_hash()
+        result["producer"].update(producer)
+        result["missing_dependencies"] = missing
+        if not args.preflight:
+            if missing:
+                raise ValueError("; ".join(missing))
+            source = Path(request["source_root"]).resolve(strict=True)
+            destination = Path(request["destination"]).resolve(strict=True)
+            if any(c in str(path) for path in (source, destination) for c in (",", "\n", "\r")):
+                raise ValueError("Docker export mount paths may not contain commas or newlines")
+            with tempfile.TemporaryDirectory(prefix="camera-export-") as temporary:
+                control = Path(temporary)
+                rewritten = {**request, "source_root": "/input", "destination": "/output"}
+                (control / "request.json").write_text(json.dumps(rewritten))
+                name = "camera-export-" + uuid.uuid4().hex
+                command = ["docker", "run", "--rm", "--pull=never", "--name", name,
+                           "--platform", "linux/" + producer["architecture"],
+                           "--network", "none", "--read-only", "--cap-drop=ALL",
+                           "--security-opt", "no-new-privileges", "--tmpfs", "/tmp",
+                           "--user", f"{os.getuid()}:{os.getgid()}",
+                           "--env", "PYTHONDONTWRITEBYTECODE=1", "--env", "GST_REGISTRY=/tmp/gst-registry.bin",
+                           "--mount", f"type=bind,src={source},dst=/input,readonly",
+                           "--mount", f"type=bind,src={destination},dst=/output",
+                           "--mount", f"type=bind,src={control},dst=/control",
+                           "--entrypoint", "python3", producer["image_id"],
+                           "-m", "cam_driver.export_recordings", "--request", "/control/request.json",
+                           "--result", "/control/result.json"]
+                try:
+                    proc = subprocess.run(command)
+                    if proc.returncode:
+                        raise ValueError(f"offline converter failed (exit {proc.returncode}); no export was committed")
+                    result = json.loads((control / "result.json").read_text())
+                    result["producer"].update(producer)
+                finally:
+                    # On interruption Docker CLI can detach before the container stops.
+                    # Only this invocation's random, private container is eligible.
+                    subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, timeout=15)
+        Path(args.result).write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
+    except (ValueError, OSError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
+        print(f"camera export: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("camera export: interrupted; no export was committed", file=sys.stderr)
+        return 130
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

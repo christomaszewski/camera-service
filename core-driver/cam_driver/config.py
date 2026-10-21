@@ -165,6 +165,8 @@ class ReplayConfig:
     path: str = ""                # a run directory (EVERY session inside plays, in timeline order),
     #                               or one session's prefix path (<dir>/<prefix>-<stamp>)
     run: str = ""                 # pin one session's prefix when `path` is a dir holding several
+    sessions: Optional[list] = None  # exact selected prefixes; mutually exclusive with run
+    proxy: Optional[dict] = None     # Rig's resolved artifact identity, for diagnostics/provenance
     # The silence between two sessions is the recorded gap -- capped here so a directory that
     # accumulated runs over days does not wait days between them. 0 = verbatim. Forced verbatim
     # when playback.epoch_unix_ns places the replay on a shared timeline (a collapsed gap would
@@ -467,6 +469,16 @@ def parse_config(raw: dict) -> AppConfig:
     if not shm.socket_path:
         raise ValueError("shm.socket_path: required for camera.type: shm (the writer's shmsink socket)")
     replay = _build(ReplayConfig, raw.get("replay"))
+    if replay.proxy is not None and not isinstance(replay.proxy, dict):
+        raise ValueError("replay.proxy: expected an artifact provenance mapping")
+    if replay.sessions is not None:
+        if (not isinstance(replay.sessions, list) or not replay.sessions
+                or any(not isinstance(s, str) or not s or s in (".", "..")
+                       or any(c in s for c in "/\\*?[]") for s in replay.sessions)
+                or len(set(replay.sessions)) != len(replay.sessions)):
+            raise ValueError("replay.sessions: expected a nonempty list of unique exact session prefixes")
+        if replay.run:
+            raise ValueError("replay.run and replay.sessions are mutually exclusive")
     pcap = _build(PcapConfig, raw.get("pcap"))
     # Playback knobs that would otherwise fail late or silently: a negative speed is meaningless
     # (0 = as fast as the pipeline drains), and an unset pcap path surfaced as a bare

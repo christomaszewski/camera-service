@@ -73,6 +73,13 @@ examples:                                # repo-relative example configs. [0] is
 
 launch_surface:                          # the files rig copies to the vehicle (NOT the source/build context)
   - cam-up
+  - tools/export-recordings
+  - export-profiles/h264.yaml
+  - core-driver/cam_driver/__init__.py
+  - core-driver/cam_driver/export_recordings.py
+  - core-driver/cam_driver/playback.py
+  - core-driver/cam_driver/timestamps.py
+  - core-driver/cam_driver/formats.py
   - tools/sensor_env.py
   - docker-compose.yml
   - docker-compose.dev.yml
@@ -96,6 +103,14 @@ launch_surface:                          # the files rig copies to the vehicle (
   - tools/jp6-modern/stack-check.sh
   - tools/jp6-modern/cam-up-jp6m
 
+export:                                 # offline service-only derivatives; never in-place conversion
+  data: recordings/{name}
+  modes: [service]
+  command: [tools/export-recordings]
+  default_profile: h264
+  profiles:
+    h264: export-profiles/h264.yaml
+
 external_volumes:                        # rig removes these only on FINAL teardown (`rig down --purge`),
   - "cam_{name}_sock"                   #   never on a restart; {name} is the instance name
 
@@ -110,11 +125,17 @@ replay:                                  # `rig replay <run>`: this service can 
   #                                        DELETES the key so this service's own default applies.
   source:
     data: recordings/{name}                # where <instance> records: <run>/recordings/<instance>/<prefix>-*
+    binding: direct                       # Rig binds the selected original/proxy directory per instance
+    image_labels:                         # reject old images that silently ignore exact session bindings
+      cam-dev: {io.rig.camera.replay-bindings: "1"}
+      cam-core: {io.rig.camera.replay-bindings: "1"}
     overrides:
       camera: { type: replay }
       replay:
-        path: "{{replay_source}}/recordings/{{name}}"   # every session in the run, in timeline order
-        run: "{{replay_session}}"          # rig --session PREFIX pins one (null = all)
+        path: "{{replay_input_path}}"
+        run: null
+        sessions: "{{replay_input_sessions}}" # exact original session IDs, including aliases/subsets
+        proxy: "{{replay_input_proxy}}"     # optional selected export identity for diagnostics
         retime: "{{replay_retime}}"        # original under sim time (the bag's /clock), wall otherwise
         loop: false
       playback:

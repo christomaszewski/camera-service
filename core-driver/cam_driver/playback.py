@@ -14,6 +14,7 @@ Timeline conventions (both playback sources):
 from __future__ import annotations
 
 import csv
+import fnmatch
 import glob
 import json
 import logging
@@ -46,17 +47,46 @@ class RunInfo:
         return f"{self.base}-*.mkv"
 
 
-def discover_sessions(path: str, run: str = "") -> List[RunInfo]:
+def check_glob_hazards(run: RunInfo) -> None:
+    """Reject splitmuxsrc globs that could include a different session's parts."""
+    if any(ch in run.base for ch in "*?[]"):
+        raise ValueError(f"replay: run path {run.base!r} contains glob characters "
+                         "splitmuxsrc cannot handle -- rename/move the run")
+    run_dir = os.path.dirname(run.base)
+    over = sorted(set(fnmatch.filter(os.listdir(run_dir), os.path.basename(run.base) + "-*.mkv"))
+                  - {os.path.basename(p) for p in run.mkv_paths})
+    if over:
+        raise ValueError(
+            f"replay: {run.mkv_glob} would also match other files ({over[0]}, ...) -- "
+            "another run's prefix extends this one; move the runs into separate directories")
+
+
+def discover_sessions(path: str, run: str = "", sessions=None) -> List[RunInfo]:
     """Every recorded SESSION under `path`, in timeline order: a run directory holds one per
     lifecycle activate (each its own `<prefix>` triple), and a replay plays them back to back
     with the recorded gaps between them. Ordered by the header's `first_timestamp_ns` (sidecar
     mtime for headers that predate it). `run` pins ONE prefix; a prefix path (or its .json)
     names one directly. Legible errors otherwise."""
+    if sessions is not None:
+        if (not isinstance(sessions, list) or not sessions
+                or any(not isinstance(n, str) or not n or n in (".", "..")
+                       or any(c in n for c in "/\\*?[]") for n in sessions)
+                or len(set(sessions)) != len(sessions)):
+            raise ValueError("replay.sessions must be a nonempty list of unique exact session prefixes")
+        if run:
+            raise ValueError("replay.run and replay.sessions are mutually exclusive")
+        if not os.path.isdir(path):
+            raise ValueError("replay.sessions requires replay.path to be a directory")
     if not path:
         raise ValueError("replay.path is empty -- point it at a run directory or a run prefix")
     path = path.rstrip("/")
     if os.path.isdir(path):
-        if run:
+        if sessions is not None:
+            names = sessions
+            missing = [n for n in names if not os.path.isfile(os.path.join(path, n) + ".json")]
+            if missing:
+                raise ValueError(f"replay.sessions not found in {path}: {', '.join(missing)}")
+        elif run:
             base = os.path.join(path, run)
             if not os.path.isfile(base + ".json"):
                 raise ValueError(
@@ -68,7 +98,7 @@ def discover_sessions(path: str, run: str = "") -> List[RunInfo]:
             if not names:
                 raise ValueError(
                     f"replay.path {path} contains no runs (no <prefix>.json sidecar found)")
-        infos = [_load_run(os.path.join(path, n), skip_empty=not run) for n in names]
+        infos = [_load_run(os.path.join(path, n), skip_empty=not run and sessions is None) for n in names]
         infos = [info for info in infos if info is not None]
         if not infos:
             raise ValueError(f"replay.path {path} contains no recorded frames (only empty sessions)")
@@ -435,6 +465,7 @@ class PlaybackState:
                 "session": self.session,
                 "sessions": self.sessions,
                 "epoch_unix_ns": self.epoch_unix_ns,
+                **({"proxy": self.proxy} if getattr(self, "proxy", None) else {}),
             }
 
     # ---- the feeder's side (source thread) ---------------------------------------
