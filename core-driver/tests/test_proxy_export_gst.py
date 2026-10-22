@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -158,38 +159,125 @@ def test_multi_session_proxy_preserves_stamps_geometry_selection_and_source_byte
             src.stop()
 
 
-def test_tiled_bayer_proxy_is_untiled_before_lossy_encoding():
-    from cam_driver.bayer_tile import tile_cfa
+def test_windowed_proxy_starts_at_the_release_gate_without_waiting_from_s_again():
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary) / "source"
         camera = root / "recordings" / "camera"
         camera.mkdir(parents=True)
-        pixels = bytes([60, 120, 180, 200] * 64)
-        base = _write_session(camera, "bayer", 1, T0, 4,
-                              pixels=lambda _: tile_cfa(pixels, 16, 16, "rct", "rggb"))
-        header = json.loads(base.with_suffix(".json").read_text())
-        header.update(pixel_format="BayerRG8", bayer_pattern="rggb", cfa_tile_mode="rct")
-        base.with_suffix(".json").write_text(json.dumps(header))
+        _write_session(camera, "early", 1, T0, 3)
+        _write_session(camera, "late", 2, T0 + 5_000_000_000, 8, frame_id0=20)
         output = Path(temporary) / "output"
         output.mkdir()
         req = request(root)
         req["destination"] = str(output)
         convert(req, PROFILES)
         cfg = parse_config({"camera": {"type": "replay"}, "replay": {
-            "path": str(output / "recordings" / "camera"), "speed": 0}, "control": {"enabled": False}})
+            "path": str(output / "recordings" / "camera"), "speed": 1},
+            "playback": {"epoch_unix_ns": T0, "from_s": 5.08, "to_s": 5.24,
+                         "initial_state": "paused"}, "control": {"enabled": False}})
         src = ReplaySource(cfg.replay, cfg.playback)
         try:
             src.open()
             src.configure()
             consumer = _Consumer()
             src.start(consumer.on_frame)
-            _pump(lambda: src.finished)
-            assert src._untile is None
-            assert len(consumer.frames) == 4
-            error = sum(abs(a - b) for a, b in zip(consumer.frames[0][1], pixels)) / len(pixels)
-            assert error < 10, error
+            _pump(lambda: consumer.count() == 1, timeout_s=5)
+            assert consumer.ids() == [22]  # preview is already at --from, before the gate
+            assert src.playback.state == "paused"
+            released = time.monotonic() + .15
+            src.playback.arm_start_gate(time.time() + .15)
+            _pump(lambda: src.finished, timeout_s=1.5)
+            assert not src.finished_error
+            assert consumer.ids() == [22, 23, 24, 25]
+            assert consumer.stamps() == [T0 + 5_000_000_000 + i * IV for i in range(2, 6)]
+            delay = consumer.frames[1][2] - released
+            assert .015 < delay < .8, delay  # next frame due 40 ms after release, not 5.12 s
+
+            restarted = time.monotonic()
+            assert src.playback.request("restart")["ok"]
+            _pump(lambda: src.finished, timeout_s=1.5)
+            assert not src.finished_error
+            assert consumer.ids() == [22, 23, 24, 25] * 2
+            assert consumer.frames[4][2] - restarted < .8
+            assert src.playback.descriptor()["cycle"] == 1
         finally:
             src.stop()
+
+
+def test_bayer_proxies_are_untiled_then_debayered_before_lossy_encoding():
+    import numpy as np
+    from cam_driver.bayer_tile import tile_cfa
+    from test_recording_h264 import collect
+    for fmt, pattern, declared in (("BayerRG8", "rggb", None), ("BayerGR8", "grbg", None),
+                                   ("BayerGB8", "gbrg", None), ("BayerBG8", "bggr", None),
+                                   ("GRAY8", "rggb", "rggb"), ("BayerRG8", "bggr", "bggr")):
+        # Even widths that need row padding must survive both untile and debayer.
+        for mode, width in (("off", 16), ("plain", 18), ("green_diff", 16), ("rct", 18)):
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "source"
+                camera = root / "recordings" / "camera"
+                camera.mkdir(parents=True)
+                colors = [(200 + i * 7, 70 + i * 11, 30 + i * 9) for i in range(4)]
+
+                def pixels(i):
+                    channels = dict(zip("rgb", colors[i]))
+                    mosaic = np.empty((16, width), dtype=np.uint8)
+                    for phase, channel in enumerate(pattern):
+                        mosaic[phase // 2::2, phase % 2::2] = channels[channel]
+                    tiled = tile_cfa(mosaic.tobytes(), width, 16, mode, pattern) if mode != "off" \
+                        else mosaic.tobytes()
+                    stride = (width + 3) & ~3
+                    return b"".join(tiled[y * width:(y + 1) * width] + bytes(stride - width)
+                                    for y in range(16))
+
+                base = _write_session(camera, "bayer", 1, T0, 4, width=width, pixels=pixels)
+                header = json.loads(base.with_suffix(".json").read_text())
+                # Honor a recorded pattern override and infer it when older sidecars omit it.
+                header.update(pixel_format=fmt, bayer_pattern=declared, cfa_tile_mode=mode)
+                base.with_suffix(".json").write_text(json.dumps(header))
+                original = {p: file_hash(p) for p in camera.iterdir()}
+                output = Path(temporary) / "output"
+                output.mkdir()
+                req = request(root)
+                req["destination"] = str(output)
+                result = convert(req, PROFILES)
+                session = result["recordings"][0]["sessions"][0]
+                assert session["pixel_format"] == "I420" and session["bayer_pattern"] is None
+                assert session["source_bayer_pattern"] == pattern
+                assert session["validation"] == {"ok": True, "decoded_frames": 4, "stamps_preserved": True}
+                proxy_dir = output / "recordings" / "camera"
+                header = json.loads((proxy_dir / "bayer.json").read_text())
+                assert header["pixel_format"] == "I420" and header["bits_per_pixel"] == 8
+                assert header["bayer_pattern"] is None and header["cfa_tile_mode"] == "off"
+                assert header["proxy"]["source_pixel_format"] == fmt
+                assert header["proxy"]["source_bayer_pattern"] == pattern
+                assert "debayer" in header["proxy"]["transformations"]
+                assert all(file_hash(p) == digest for p, digest in original.items())
+                assert (proxy_dir / "bayer.csv").read_text() == base.with_suffix(".csv").read_text()
+                # Decode the H.264 as an ordinary player would: it must already be color.
+                decoded = collect(f'filesrc location="{proxy_dir}/bayer-00000.mkv" ! matroskademux ! '
+                                  'h264parse ! avdec_h264 ! videoconvert ! video/x-raw,format=RGB')
+                assert len(decoded) == len(colors)
+                for (_, data), color in zip(decoded, colors):
+                    stride = (width * 3 + 3) & ~3
+                    rgb = np.ndarray((16, width, 3), dtype=np.uint8, buffer=data, strides=(stride, 3, 1))
+                    error = np.abs(rgb.astype(np.int16) - color)
+                    assert error.mean() < 10, (pattern, mode, error.mean())
+                cfg = parse_config({"camera": {"type": "replay"}, "replay": {
+                    "path": str(proxy_dir), "speed": 0}, "control": {"enabled": False}})
+                src = ReplaySource(cfg.replay, cfg.playback)
+                try:
+                    src.open()
+                    src.configure()
+                    assert src.pixel_format() == "I420" and src._untile is None
+                    consumer = _Consumer()
+                    src.start(consumer.on_frame)
+                    _pump(lambda: src.finished)
+                    assert not src.finished_error
+                    assert consumer.ids() == [0, 1, 2, 3]
+                    assert consumer.stamps() == [T0 + i * IV for i in range(4)]
+                finally:
+                    src.stop()
 
 
 def test_gray16_proxies_match_webrtc_auto_and_reset_between_sessions():
@@ -244,7 +332,8 @@ def test_gray16_proxies_match_webrtc_auto_and_reset_between_sessions():
                 assert header["width"] == 16 and header["height"] == 16
                 assert header["bayer_pattern"] is None
                 proxy = header["proxy"]
-                assert proxy["profile_revision"] == 2 and proxy["lossy"] is True
+                assert proxy["profile_revision"] == req["profile"]["definition"]["revision"]
+                assert proxy["lossy"] is True
                 assert proxy["source_pixel_format"] == pixel_format and proxy["source_bits_per_pixel"] == 16
                 assert proxy["normalization"] == normalization
                 assert "gray16-percentile-stretch" in proxy["transformations"]

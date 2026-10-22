@@ -28,8 +28,9 @@ Timeline (playback: block, docs/PLAYBACK.md): frames are paced against the data'
 stamps from a ZERO -- the run's first frame by default, or `epoch_unix_ns` when an
 orchestrator hands every producer of a replay the same one -- so a session recorded ten
 minutes into the run comes out ten minutes after release, where a sibling bag player is.
-`from_s`/`to_s` window that timeline. Pacing/retime/loop semantics are shared with the pcap
-source -- see cam_driver.playback.
+`from_s`/`to_s` window that timeline: release starts at `epoch + from_s`, so skipped time
+is not replayed as silence. Pacing/retime/loop semantics are shared with the pcap source
+-- see cam_driver.playback.
 
 EOF: the last session's EOS -> `finished` (the main pipeline holds or exits, per
 config.hold_on_finish), a flush-seek to 0 (one session) or a rebuild of the first session's
@@ -235,7 +236,10 @@ class ReplaySource(GstPipelineSource):
         elif self.cfg.retime not in ("", "original"):
             raise ValueError(f"replay.retime: expected 'original' or 'wall', got {self.cfg.retime!r}")
         self._offset = self._retime_offset
-        self._pacer.anchor_src_ns = self._epoch_ns + self._offset
+        # Release starts at the window's lower bound, while stamps and reported positions
+        # retain the original epoch. Anchoring at the epoch would wait out from_s again.
+        start_ns = self._from_ns if self._from_ns is not None else self._epoch_ns
+        self._pacer.anchor_src_ns = start_ns + self._offset
 
         # ---- the reader shape, from the first part of each session ----
         caps = []
@@ -589,7 +593,8 @@ class ReplaySource(GstPipelineSource):
         self._playback.mark_cycle(self._cycle)
         self._skipped_ns = 0
         self._playback.take_restart()   # the feeder needs no flag: the seek/rebuild does the work
-        self._pacer.reset(self._epoch_ns + self._offset)
+        start_ns = self._from_ns if self._from_ns is not None else self._epoch_ns
+        self._pacer.reset(start_ns + self._offset)
         self._finished = False
         self._failed = False
         log.info("replay: %s -> cycle %d (timestamps shifted %+.3fs)",

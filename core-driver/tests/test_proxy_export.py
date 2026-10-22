@@ -92,6 +92,30 @@ def test_preflight_rejects_packed_bayer_and_mislabeled_high_depth():
             raises(lambda: preflight(request(root), PROFILES), "unsupported or incomplete recordings")
 
 
+def test_preflight_declares_debayered_color_and_original_pattern():
+    for fmt, pattern, declared in (("BayerRG8", "rggb", None), ("BayerGR8", "grbg", None),
+                                   ("BayerGB8", "gbrg", None), ("BayerBG8", "bggr", None),
+                                   ("GRAY8", "rggb", "rggb"), ("BayerRG8", "bggr", "bggr")):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session(root, pixel_format=fmt, bayer_pattern=declared)
+            req = request(root)
+            item = preflight(req, PROFILES)["recordings"][0]["sessions"][0]
+            assert item["pixel_format"] == "I420" and item["bayer_pattern"] is None
+            assert item["bits_per_pixel"] == 8
+            assert item["source_pixel_format"] == fmt and item["source_bits_per_pixel"] == 8
+            assert item["source_bayer_pattern"] == pattern
+            assert item["bayer_conversion"] == req["profile"]["definition"]["bayer_conversion"]
+
+
+def test_preflight_rejects_invalid_bayer_metadata():
+    for fmt, pattern in (("BayerRG8", "invalid"), ("I420", "rggb")):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session(root, pixel_format=fmt, bayer_pattern=pattern)
+            raises(lambda: preflight(request(root), PROFILES), "Bayer")
+
+
 def test_profile_hash_and_capture_timeline_validation():
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)

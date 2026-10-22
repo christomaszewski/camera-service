@@ -89,6 +89,18 @@ def _rows(run):
     return fields, rows, stamps
 
 
+def _bayer_pattern(header):
+    """Resolve the input CFA pattern before encoding; color proxies must not retain it."""
+    fmt, bits, inferred, _, _ = parse_pixel_format(header["pixel_format"])
+    pattern = header.get("bayer_pattern") or inferred
+    if pattern:
+        if pattern not in ("rggb", "grbg", "gbrg", "bggr"):
+            raise ValueError(f"invalid Bayer pattern: {pattern!r}")
+        if fmt != "GRAY8" or bits != 8:
+            raise ValueError("Bayer conversion requires an 8-bit mosaic")
+    return pattern
+
+
 def preflight(request, profile_root):
     if request.get("version") != CONTRACT_VERSION:
         raise ValueError("unsupported camera export request version")
@@ -134,6 +146,7 @@ def preflight(request, profile_root):
                     raise ValueError("h264 profile cannot truncate high-bit-depth recording data")
                 if gray16 and hdr.get("bayer_pattern"):
                     raise ValueError("h264 gray16 normalization supports monochrome recordings, not Bayer")
+                bayer = _bayer_pattern(hdr)
                 w, h = int(hdr["width"]), int(hdr["height"])
                 if w <= 0 or h <= 0 or w % 2 or h % 2:
                     raise ValueError("h264 profile requires positive even width and height")
@@ -159,6 +172,11 @@ def preflight(request, profile_root):
                 if gray16:
                     session.update(source_pixel_format=pf, source_bits_per_pixel=source_bits,
                                    bits_per_pixel=8, normalization=definition["gray16_normalization"])
+                elif bayer:
+                    session.update(pixel_format=definition["bayer_conversion"]["output_pixel_format"],
+                                   bits_per_pixel=8, bayer_pattern=None, source_pixel_format=pf,
+                                   source_bits_per_pixel=source_bits, source_bayer_pattern=bayer,
+                                   bayer_conversion=definition["bayer_conversion"])
                 selected.append(session)
             except (ValueError, OSError, KeyError, TypeError) as exc:
                 errors.append(f"{name}/{ident}: {exc}")
@@ -295,6 +313,7 @@ def _encode(run, target, definition, rows, stamps):
         raise ValueError("export destination contains characters unsupported by GStreamer")
     Gst = _gst()
     settings = definition["encoding"]
+    bayer = _bayer_pattern(run.header)
     stretch = None
     if run.header["pixel_format"] in GRAY16_FORMATS:
         # Match CAM_WEBRTC_NORMALIZE=auto; keep state within one recording session.
@@ -306,6 +325,7 @@ def _encode(run, target, definition, rows, stamps):
     keyframes = max(1, int(round(fps * settings["keyframe_interval_s"])))
     pipeline = Gst.parse_launch(
         'appsrc name=src format=time is-live=false block=true max-buffers=4 max-bytes=0 ! '
+        + ('bayer2rgb ! ' if bayer else '') +
         'videoconvert n-threads=2 ! video/x-raw,format=I420 ! '
         f'x264enc pass=qual quantizer={settings["crf"]} speed-preset={settings["preset"]} '
         f'tune=zerolatency bframes={settings["bframes"]} ref={settings["reference_frames"]} '
@@ -343,6 +363,14 @@ def _encode(run, target, definition, rows, stamps):
             else:
                 buf, caps = _untile_buffer(sample, run.header), sample.get_caps()
             if not count:
+                if bayer:
+                    # FFV1 stores the mosaic as GRAY8. After undoing CFA tiling, label
+                    # those bytes as Bayer so demosaicing happens before lossy encoding.
+                    structure = caps.get_structure(0).copy()
+                    structure.set_name("video/x-bayer")
+                    structure.set_value("format", bayer)
+                    caps = Gst.Caps.new_empty()
+                    caps.append_structure(structure)
                 src.set_property("caps", caps)
             # Capture stamps are unchanged. The original sidecar PTS is the authoritative
             # muxing timeline; decode PTS may include container offsets/rounding.
@@ -377,7 +405,10 @@ def convert(request, profile_root):
         raise ValueError("converter destination must be an empty staging directory")
     # Require all encoders before writing even the first session.
     Gst = _gst()
-    for plugin in ("x264enc", "h264parse", "avdec_h264", "matroskademux", "splitmuxsink", "matroskamux"):
+    plugins = ["x264enc", "h264parse", "avdec_h264", "matroskademux", "splitmuxsink", "matroskamux"]
+    if any(s.get("bayer_conversion") for r in result["recordings"] for s in r["sessions"]):
+        plugins.append("bayer2rgb")
+    for plugin in plugins:
         if Gst.ElementFactory.find(plugin) is None:
             raise ValueError(f"cam-dev image is missing required GStreamer element {plugin}")
     result["producer"]["gstreamer"] = Gst.version_string()
@@ -420,6 +451,12 @@ def convert(request, profile_root):
                 header["proxy"].update(
                     normalization=definition["gray16_normalization"],
                     transformations=["decode", "gray16-percentile-stretch", "convert-to-i420", "lossy-h264"])
+            elif session.get("bayer_conversion"):
+                header.update(pixel_format=session["pixel_format"], bits_per_pixel=8, bayer_pattern=None)
+                header["proxy"].update(
+                    source_bayer_pattern=session["source_bayer_pattern"],
+                    bayer_conversion=definition["bayer_conversion"],
+                    transformations=["decode", "undo-cfa-tiling", "debayer", "convert-to-i420", "lossy-h264"])
             Path(str(target) + ".json").write_text(json.dumps(header, indent=2, sort_keys=True) + "\n")
             with open(str(target) + ".csv", "w", newline="") as stream:
                 writer = csv.DictWriter(stream, fields)

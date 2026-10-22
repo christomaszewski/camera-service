@@ -1,11 +1,15 @@
 {
   "version": 1,
   "id": "h264",
-  "revision": 2,
+  "revision": 3,
   "format": "camera-recording-proxy/v1",
   "lossy": true,
   "description": "Software-decode proxy preserving recording geometry and every capture stamp",
   "supported_pixel_formats": ["Mono8", "GRAY8", "Mono16", "GRAY16_LE", "GRAY16_BE", "BayerRG8", "BayerGR8", "BayerGB8", "BayerBG8", "I420", "NV12", "NV24", "YV12", "YUY2", "UYVY", "RGB", "BGR", "RGBx", "BGRx"],
+  "bayer_conversion": {
+    "method": "bayer2rgb",
+    "output_pixel_format": "I420"
+  },
   "gray16_normalization": {
     "method": "percentile-stretch",
     "percentiles": [1.0, 99.0],

@@ -34,7 +34,7 @@ instance names. `--force` creates another generation without replacing old ones.
 
 ## The h264 profile
 
-Revision 2 uses software x264, CRF 23, `veryfast`, constrained baseline, no CABAC or
+Revision 3 uses software x264, CRF 23, `veryfast`, constrained baseline, no CABAC or
 B-frames, one reference frame, approximately one-second keyframe spacing, and
 60-second MKV segments. It preserves every frame, resolution, frame ID, capture
 timestamp, session boundary and recorded gap. Capture identity/timing metadata and
@@ -46,11 +46,16 @@ their stored timestamps survive validation. A timestamp mismatch reports the
 frame index, decoded and CSV timestamps, fixed offset, and difference; the one
 millisecond Matroska tolerance and exact frame-count checks still apply.
 
-Eight-bit mono, Bayer and supported RGB/YUV formats are accepted, with unchanged
-conversion behavior from revision 1. Lossless CFA storage tiling is undone before
-conversion; replay still delivers the Bayer mosaic
-and its original pattern, with approximate pixels. Storage is I420, so color data
-also incurs chroma subsampling. No scaling or frame-rate reduction occurs.
+Eight-bit mono, Bayer and supported RGB/YUV formats are accepted. Bayer recordings,
+including FFV1 MKVs, are decoded, restored from any lossless CFA storage tiling, and
+debayered with GStreamer's `bayer2rgb` before H.264 encoding. All four Bayer patterns
+are supported. The proxy is ordinary color video: its header declares `I420` with
+no Bayer pattern, and replay delivers color without another debayer pass. Proxy
+provenance retains the source pixel format, bit depth and Bayer pattern and records
+the conversion. Replay launch settings use readable selected sidecars instead of
+the live camera's Bayer hint. Storage is I420, so color data incurs chroma
+subsampling. No scaling or frame-rate reduction occurs. Mono and existing RGB/YUV
+conversion behavior is unchanged.
 
 `GRAY16_LE`, `GRAY16_BE` and `Mono16` recordings use the same `PercentileStretch`
 conversion as WebRTC's `CAM_WEBRTC_NORMALIZE: auto` preview: the 1st and 99th
@@ -70,11 +75,12 @@ There is no fallback to FFV1 masquerading as an h264 proxy. Limit export selecti
 recorded instance name and use a recipe `proxies.instances.<name>.use: original`
 preference for unsupported replay instances.
 
-To generate revision 2 proxies, update the installed camera-service checkout or
+To generate revision 3 proxies, update the installed camera-service checkout or
 bundle and rebuild or pull its native images together, then run the same
 `rig run export RUN --service camera-service` command. The new profile hash selects
-a new export identity, so `--force` is unnecessary. Previous revision 1 exports are
-retained and can still be selected with an explicit recipe generation pin.
+a new export identity, so `--force` is unnecessary. Previous revision 1 and 2 exports
+are retained and can still be selected with an explicit recipe generation pin;
+their Bayer proxies retain the old mosaic representation.
 
 The profile targets lower software decode cost; it does not bypass the current raw-frame
 transport or WebRTC re-encoding. It does not enable Apple VideoToolbox/NVIDIA codecs.

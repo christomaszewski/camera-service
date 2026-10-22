@@ -19,7 +19,9 @@ the supervisor's (in-image) and are ignored here.
 Uses PyYAML when it's importable; otherwise falls back to a tiny built-in parser that covers the
 (simple, fixed) sensor-config schema, so a vehicle host needs nothing but stock python3.
 """
+import json
 import os
+from pathlib import Path
 import re
 import shlex
 import sys
@@ -72,13 +74,43 @@ _LIVE_BLOCKS = ("gige", "usb", "rtsp")       # a live camera names its pixel_for
 _PLAYBACK_TYPES = ("pcap", "replay")         # that camera's data, played back from the host
 
 
+def replay_pixel_format(src):
+    """Prefer readable selected sidecars: a proxy can differ from the live camera's format."""
+    if not src.get("path"):
+        return ""
+    path = Path(src["path"])
+    if path.is_dir():
+        names = src.get("sessions") or ([src["run"]] if src.get("run") else None)
+        if names is not None and not isinstance(names, list):
+            return ""
+        headers = [path / (name + ".json") for name in names] if names else [
+            p for p in path.glob("*.json") if p.with_suffix(".csv").is_file()]
+    else:
+        headers = [path if path.suffix == ".json" else Path(str(path) + ".json")]
+    formats = set()
+    for header in headers:
+        try:
+            data = json.loads(header.read_text())
+            fmt = data.get("pixel_format")
+            if not isinstance(fmt, str) or not fmt:
+                return ""
+            if fmt == "GRAY8" and data.get("bayer_pattern") in _BAYER.values():
+                fmt = "Bayer" + next(k for k, v in _BAYER.items() if v == data["bayer_pattern"]) + "8"
+            formats.add(fmt)
+        except (OSError, ValueError, AttributeError):
+            return ""  # container-only paths still use the configured source hints
+    return formats.pop() if len(formats) == 1 else ""
+
+
 def source_pixel_format(cfg, stype):
     """The camera pixel_format the bridges label the stream with (-> CAM_ROS_ENCODING / CAM_BAYER).
 
     A LIVE source names it in its own block (rtsp never does: '' -> the mono path; its format
     comes off the decoded stream). A PLAYBACK source is that camera's data played back: `pcap`
     pins the format in its own block, but `replay` reads it from the recording's sidecar, so the
-    replay: block has no pixel_format at all -- while the bridges still need the launch-time hint
+    replay: block has no pixel_format at all. Read selected sidecars when available on the host:
+    debayered proxies carry color and must not inherit the live camera's Bayer hint. Otherwise
+    the bridges still need the launch-time hint
     (on the JP6 frame header a Bayer mosaic rides as plain GRAY8; only CAM_BAYER /
     CAM_ROS_ENCODING relabel it -- docs/unixfd-migration.md). `rig replay` renders the instance's
     OWN yaml with `camera.type: replay` patched on top, so the camera's live block -- and its
@@ -87,6 +119,10 @@ def source_pixel_format(cfg, stype):
     Only a playback source inherits, and the active block always wins: a live rtsp camera beside
     a stale gige: block stays mono, and a pcap pinned GRAY8 is GRAY8 whatever gige: says."""
     src = cfg.get(stype) or {}
+    if stype == "replay":
+        recorded = replay_pixel_format(src)
+        if recorded:
+            return recorded
     pf = str(src.get("pixel_format") or "")
     if pf or stype not in _PLAYBACK_TYPES:
         return pf
@@ -141,7 +177,8 @@ def _decomment(raw):
 def _load_fallback(text):
     """Stdlib-only parser for OUR sensor-config subset, used only when PyYAML is absent: top-level
     `name`, the source maps (`camera`/`gige`/`usb`/`rtsp` + the playback `pcap`/`replay`: flat
-    scalars -- `path` drives the input bind, `pixel_format` the bridges' label), and a `plugins`
+    scalars and replay's session list -- `path` drives the input bind, sidecars/`pixel_format`
+    the bridges' label), and a `plugins`
     list of maps with scalar keys + a nested `params` map. Indent-width agnostic; '#' comments;
     scalar leaves. NOT general YAML."""
     cfg = {"name": None, "camera": {}, "gige": {}, "usb": {}, "rtsp": {}, "pcap": {}, "replay": {},
@@ -150,6 +187,7 @@ def _load_fallback(text):
     cur = None           # current plugin map
     key_indent = None    # indent of the current plugin's direct keys
     in_params = False
+    replay_sessions = False
     for raw in text.splitlines():
         line = _decomment(raw)
         if not line.strip():
@@ -162,6 +200,7 @@ def _load_fallback(text):
         # config that way -- while hand-written configs indent it. Both are the same list.
         if indent == 0 and not (section == "plugins" and s.startswith("- ")):
             cur = None; key_indent = None; in_params = False   # top-level: a `key:` section, or a scalar
+            replay_sessions = False
             if s.endswith(":"):
                 section = s[:-1].strip()
             else:
@@ -173,6 +212,14 @@ def _load_fallback(text):
 
         if section in ("camera",) + _LIVE_BLOCKS + _PLAYBACK_TYPES:   # flat scalar keys (type,
             #                                                            pixel_format, path, ...)
+            if section == "replay" and s == "sessions:":
+                cfg[section]["sessions"] = []
+                replay_sessions = True
+                continue
+            if replay_sessions and s.startswith("- "):
+                cfg[section]["sessions"].append(str(_scalar(s[2:])))
+                continue
+            replay_sessions = False
             k, _, v = s.partition(":")
             if v.strip():
                 cfg[section][k.strip()] = _scalar(v)

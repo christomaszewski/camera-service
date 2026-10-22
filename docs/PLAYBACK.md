@@ -138,8 +138,8 @@ sets them per instance — rig renders them into the replay config):
 |---|---|
 | `initial_state: playing \| paused` | come up held on the first frame |
 | `start_at_unix_s` | the release gate: resume itself at this wall instant — every producer of the replay gets the same one, so they start together instead of at their own container start |
-| `epoch_unix_ns` | the timeline ZERO (the bag's start): frame k is released `(ts_k − epoch)/speed` after release, wherever the first recorded frame sits — a session recorded ten minutes into the run comes out ten minutes after release, where the bag is. Frames before the epoch are skipped. Unset = the data's own first frame. |
-| `from_s`, `to_s` | a window on that timeline (skip before, `finished` at) |
+| `epoch_unix_ns` | the timeline ZERO (the bag's start): frame k is released `(ts_k − epoch − from_s × 1e9)/speed` after release (`from_s` defaults to zero), preserving its place relative to the bag. Frames before the epoch are skipped. Unset = the data's own first frame. |
+| `from_s`, `to_s` | a window on that timeline (skip before, `finished` at). Release and restart pace from `epoch + from_s`, so the skipped interval adds no delay. A first frame later than that boundary keeps only its remaining lead-in. Frame stamps and reported positions retain the original timeline. |
 | `on_finish: hold \| exit \| auto` | see `state` above; `auto` = hold iff the control plane is enabled |
 
 A camera-service `replay` plays **every session** the run holds for the instance, in timeline

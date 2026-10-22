@@ -15,7 +15,9 @@ Run: python3 core-driver/tests/test_sensor_env.py
 """
 import contextlib
 import io
+import json
 import os
+from pathlib import Path
 import shlex
 import sys
 import tempfile
@@ -185,6 +187,37 @@ def test_replay_inherits_the_bayer_label_from_the_live_block():
     assert e["CAM_SOURCE_TYPE"] == "replay"            # still a playback source (the REPLAY chip)
     assert e["CAM_ROS_ENCODING"] == "bayer_rggb8"
     assert e["CAM_BAYER"] == "rggb"
+
+
+def test_replay_uses_selected_color_proxy_metadata_instead_of_live_bayer_hint():
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        for name, fmt in (("old", "BayerRG8"), ("color", "I420")):
+            (root / (name + ".json")).write_text(json.dumps({"pixel_format": fmt}))
+            (root / (name + ".csv")).touch()
+        cfg = _replay_of("gige", {"pixel_format": "BayerRG8"}, path=temporary)
+        cfg["plugins"][0]["params"]["debayer"] = True
+        cfg["replay"]["sessions"] = ["color"]
+        for parser in (True, False):
+            saved = sensor_env._HAVE_YAML
+            sensor_env._HAVE_YAML = parser
+            try:
+                e = _env(cfg)
+            finally:
+                sensor_env._HAVE_YAML = saved
+            assert e["CAM_ROS_ENCODING"] == "" and e["CAM_BAYER"] == ""
+        cfg["replay"]["sessions"] = ["old"]
+        assert _env(cfg)["CAM_BAYER"] == "rggb"  # legacy mosaic proxies still need debayering
+        del cfg["replay"]["sessions"]
+        cfg["replay"]["run"] = "color"
+        assert _env(cfg)["CAM_ROS_ENCODING"] == ""
+        del cfg["replay"]["run"]
+        for suffix in ("", ".json"):
+            cfg["replay"]["path"] = str(root / ("color" + suffix))
+            assert _env(cfg)["CAM_BAYER"] == ""
+        (root / "old.json").unlink()
+        cfg["replay"]["path"] = temporary
+        assert _env(cfg)["CAM_ROS_ENCODING"] == ""
 
 
 def test_replay_of_a_16bit_thermal_stays_on_the_mono_path():

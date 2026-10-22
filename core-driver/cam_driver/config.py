@@ -306,12 +306,12 @@ class PlaybackConfig:
     # one, so N cameras and a bag player start together instead of at their own container start.
     start_at_unix_s: Optional[float] = None
     # Timeline zero shared with sibling producers (the bag's start): frame k is released
-    # (ts_k - epoch)/speed after playback starts, WHEREVER the first recorded frame sits -- a session
-    # recorded 10 min into the run comes out 10 min after release, where the bag is. None = the
+    # (ts_k - epoch - from_s * 1e9)/speed after playback starts (from_s defaults to 0), WHEREVER
+    # the first recorded frame sits -- preserving its place relative to the bag. None = the
     # data's own first stamp (playback starts on frame 0, the pre-epoch behaviour). Frames before
     # the epoch are skipped (they are before the shared zero).
     epoch_unix_ns: Optional[int] = None
-    from_s: Optional[float] = None    # window: skip frames before epoch + from_s
+    from_s: Optional[float] = None    # window: skip before epoch + from_s; pace from this boundary
     to_s: Optional[float] = None      # window: finish at epoch + to_s (exclusive)
     # At end-of-data: hold = stay up, keys served, `restart` accepted (an orchestrated run, where a
     # 0-exit under compose `restart: unless-stopped` would just start over) | exit = finalize + exit 0
