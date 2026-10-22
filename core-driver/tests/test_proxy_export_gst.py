@@ -17,7 +17,7 @@ from test_replay_source import _write_session, T0, IV, _Consumer, _pump
 
 
 def _write_segmented_session(camera, pixel_format):
-    """Real writer with jitter, a late session start and a gap at an FFV1 GOP boundary."""
+    """Timestamp-faithful MKVs with jitter, a late start and a gap at an FFV1 GOP boundary."""
     Gst = _gst()
     base = camera / "segmented"
     points = [12_345_678_900 + i * IV + (i % 7) * 240_000
@@ -25,10 +25,33 @@ def _write_segmented_session(camera, pixel_format):
     pipeline = Gst.parse_launch(
         f'appsrc name=src is-live=false format=time caps="video/x-raw,format={pixel_format},'
         'width=16,height=16,framerate=25/1" ! videoconvert ! '
-        'avenc_ffv1 coder=1 context=1 threads=0 slices=4 slicecrc=1 ! '
+        'avenc_ffv1 name=encoder coder=1 context=1 threads=0 slices=4 slicecrc=1 ! '
         'splitmuxsink send-keyframe-requests=true muxer=matroskamux max-size-time=250000000 '
         f'location="{base}-%05d.mkv"')
     src = pipeline.get_by_name("src")
+    encoded = 0
+    encoder_offset = None
+
+    def preserve_fixture_pts(_pad, info):
+        nonlocal encoded, encoder_offset
+        buf = info.get_buffer()
+        if buf is not None:
+            # gst-libav 1.20 rounds to its 1/25-second codec timebase: it removes
+            # this fixture's jitter and shifts the 2.23-second gap by 10 ms BEFORE
+            # Matroska. This is a mux/decode/export test, so restore the deliberately
+            # irregular fixture timeline after the in-order FFV1 encoder. Preserve
+            # its segment offset; do not relax export's 1 ms mismatch guard.
+            assert encoded < len(points)
+            if encoder_offset is None:
+                encoder_offset = int(buf.pts) - points[0]
+            buf.pts = encoder_offset + points[encoded]
+            buf.dts = Gst.CLOCK_TIME_NONE
+            buf.duration = points[encoded + 1] - points[encoded] if encoded + 1 < len(points) else IV
+            encoded += 1
+        return Gst.PadProbeReturn.OK
+
+    pipeline.get_by_name("encoder").get_static_pad("src").add_probe(
+        Gst.PadProbeType.BUFFER, preserve_fixture_pts)
     pipeline.set_state(Gst.State.PLAYING)
     try:
         for i, pts in enumerate(points):
@@ -42,6 +65,7 @@ def _write_segmented_session(camera, pixel_format):
         assert msg is not None and msg.type == Gst.MessageType.EOS, msg
     finally:
         pipeline.set_state(Gst.State.NULL)
+    assert encoded == len(points)
     assert len(list(camera.glob("segmented-*.mkv"))) > 2
     base.with_suffix(".json").write_text(json.dumps({
         "pixel_format": pixel_format, "width": 16, "height": 16,

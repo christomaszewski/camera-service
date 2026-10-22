@@ -45,6 +45,11 @@ Split recording files are decoded individually so genuine gaps between parts and
 their stored timestamps survive validation. A timestamp mismatch reports the
 frame index, decoded and CSV timestamps, fixed offset, and difference; the one
 millisecond Matroska tolerance and exact frame-count checks still apply.
+Some legacy FFV1 encoders quantize timestamps to the advertised frame rate before
+muxing (GStreamer 1.20's `avenc_ffv1` at 25 fps uses a 40 ms grid). Recordings whose
+stored timeline consequently differs from the CSV by more than the allowed fixed
+offset and one-millisecond tolerance are rejected. Export does not widen that
+tolerance to conceal encoder retiming or accumulated drift.
 
 Eight-bit mono, Bayer and supported RGB/YUV formats are accepted. Bayer recordings,
 including FFV1 MKVs, are decoded, restored from any lossless CFA storage tiling, and

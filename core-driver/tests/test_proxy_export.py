@@ -5,11 +5,12 @@ import runpy
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cam_driver.config import parse_config
-from cam_driver.export_recordings import canonical_hash, preflight, safe_relative
+from cam_driver.export_recordings import _check_frame_pts, canonical_hash, preflight, safe_relative
 from cam_driver.playback import discover_sessions
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -42,6 +43,39 @@ def raises(fn, text):
         assert text in str(exc), str(exc)
     else:
         raise AssertionError("expected error: " + text)
+
+
+def test_frame_alignment_keeps_one_fixed_offset_and_one_millisecond_limit():
+    def sample(pts):
+        return SimpleNamespace(get_buffer=lambda: SimpleNamespace(pts=pts))
+
+    points = [12_345_678_900, 12_385_918_900, 12_426_158_900, 16_015_918_900]
+    # A large encoder offset is legitimate; Matroska rounds each stored PTS to ms.
+    actual = [((pts + 7_000_000_000 + 500_000) // 1_000_000) * 1_000_000 for pts in points]
+    offset = None
+    for index, (got, expected) in enumerate(zip(actual, points)):
+        offset = _check_frame_pts(sample(got), expected, offset, f"frame {index}")
+        assert offset == actual[0] - points[0]
+    expected = points[-1] + 40_000_000
+    assert _check_frame_pts(sample(expected + offset + 1_000_000), expected, offset, "edge") == offset
+    raises(lambda: _check_frame_pts(sample(expected + offset + 1_000_001), expected, offset, "edge"),
+           "tolerance=1000000 ns")
+    raises(lambda: _check_frame_pts(sample(expected + offset - 5_000_000), expected, offset, "boundary"),
+           "delta=-5000000 ns")
+
+
+def test_frame_alignment_rejects_accumulating_drift_and_missing_timestamps():
+    def sample(pts):
+        return SimpleNamespace(get_buffer=lambda: SimpleNamespace(pts=pts))
+
+    offset = _check_frame_pts(sample(7_000_000_000), 0, None, "frame 0")
+    # Each step differs by only 600 us; comparing adjacent frames or resetting
+    # offset would accept an arbitrarily drifting recording. One session offset must hold.
+    assert _check_frame_pts(sample(7_040_600_000), 40_000_000, offset, "frame 1") == offset
+    raises(lambda: _check_frame_pts(sample(7_081_200_000), 80_000_000, offset, "frame 2"),
+           "delta=+1200000 ns")
+    raises(lambda: _check_frame_pts(sample((1 << 64) - 1), 80_000_000, offset, "frame 2"),
+           "decoded frame has no PTS")
 
 
 def test_preflight_uses_portable_paths_and_keeps_unknown_recorded_names():
