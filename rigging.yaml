@@ -9,6 +9,8 @@ verbs:
   status: "ps"       # rig may append `--format json` to parse `docker compose ps`
   logs: "logs"
   config: "config"
+  images: "images"                       # read-only YAML list of the active runtime images (bake)
+  runtime-images: "runtime-images"       # read-only versioned JSON, including capability image roles
 ros_distro: lyrical
 tier: sensor                             # rig bring-up tier (infra -> sensors -> autonomy, reversed on the
 #                                          way down). `sensor` is also rig's default for an undeclared
@@ -82,6 +84,7 @@ launch_surface:                          # the files rig copies to the vehicle (
   - core-driver/cam_driver/timestamps.py
   - core-driver/cam_driver/formats.py
   - tools/sensor_env.py
+  - tools/runtime_images.py
   - docker-compose.yml
   - docker-compose.dev.yml
   - docker-compose.source.yml            # opt-in --source; requires a full checkout

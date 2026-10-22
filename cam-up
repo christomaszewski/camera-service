@@ -4,7 +4,7 @@
 # Bring up ONE GigE sensor's stack from ONE config (the single source of truth). Reads the
 # config, turns its enabled `isolation: container` plugins into compose profiles, parameterizes
 # the stack (project name, shared shm volume, per-plugin env), and runs `docker compose`.
-# It SELECTS + PARAMETERIZES — it never generates a compose file.
+# It selects and parameterizes; replay can freeze the resolved model to verified image IDs.
 #
 #   cam-up config/sensors/cam_a.yaml             # prod: auto-detects the JP6/JP7 host, host net (foreground up)
 #   cam-up --dev config/sensors/cam_a.yaml       # dev/bench (no Jetson): cam-dev core, host net
@@ -86,17 +86,12 @@ export CAM_NETWORK="${CAM_NETWORK:-host}"
 # `rmw_zenohd` router; see --zenohd / tools/zenohd.sh). FastDDS stays selectable via RMW_IMPLEMENTATION.
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
 
-# shm transport = a stable EXTERNAL volume, so sibling and other-stack containers can attach. Skip it for
-# `config`: a pure render must not mutate (or even reach) the daemon -- `docker compose config` doesn't
-# need the volume to exist, and `rig bake` may render on a box with no running daemon.
-[ "$VERB" = config ] || docker volume create "$CAM_SOCK_VOLUME" >/dev/null
-
 # zenoh SHM sanity: with ipc:host the bridge's zenoh pool is a POSIX segment in the HOST's /dev/shm
 # (docker's shm_size doesn't apply), and a too-small tmpfs doesn't fail the stack -- zenoh logs an
 # error and silently falls back to the network path, forfeiting the SHM speedup. Surface that at
 # up-time. Skip for `config` (pure render, no host probing) and hosts without /dev/shm (macOS dev:
 # the Docker VM's tmpfs is what applies, and it's sized with the VM).
-if [ "$VERB" != config ] && [ -n "${CAM_ZENOH_SHM_POOL_SIZE:-}" ] && [ -d /dev/shm ]; then
+if [ "$VERB" = up ] && [ -n "${CAM_ZENOH_SHM_POOL_SIZE:-}" ] && [ -d /dev/shm ]; then
   SHM_KB="$(df -Pk /dev/shm 2>/dev/null | awk 'NR==2{print $2}')"
   if [ -n "${SHM_KB:-}" ] && [ "$((SHM_KB * 1024))" -lt "$CAM_ZENOH_SHM_POOL_SIZE" ] 2>/dev/null; then
     echo "cam-up: WARNING: zenoh_shm_pool_size ($CAM_ZENOH_SHM_POOL_SIZE bytes) exceeds /dev/shm ($((SHM_KB / 1024)) MiB); zenoh will fall back to the network path -- enlarge /dev/shm (mount -o remount,size=...) or shrink the pool" >&2
@@ -240,11 +235,6 @@ if [ -n "${CAM_REGISTRY:-}" ] || [ "$DEV" = 1 ]; then
   fi
   export CAM_WEBRTC_IMAGE="${CAM_WEBRTC_IMAGE:-${IMAGE_PREFIX}webrtc-bridge:$IMG_TAG}"
 fi
-# --zenohd: ensure the single shared host zenoh router is up before the stack (standalone convenience;
-# rig runs it per host in production). Idempotent + one-per-host; reuses the resolved ros2-bridge image.
-if [ "$ZENOHD" = 1 ]; then CAM_ROS2_IMAGE="${CAM_ROS2_IMAGE:-ros2-bridge}" "$REPO/tools/zenohd.sh" up; fi
-# --roscore: same, for the ROS 1 master (ros1-bridge consumers; mirrors --zenohd). One per host, idempotent.
-if [ "$ROSCORE" = 1 ]; then CAM_ROS1_IMAGE="${CAM_ROS1_IMAGE:-ros1-bridge}" "$REPO/tools/roscore.sh" up; fi
 # The single-file config bind (CAM_CONFIG_HOST -> CAM_CONFIG, exported above) -- applied for every
 # config, wherever it lives.
 FILES+=(-f "$REPO/docker-compose.external-config.yml")
@@ -252,4 +242,22 @@ FILES+=(-f "$REPO/docker-compose.external-config.yml")
 ARGS=("$@"); [ ${#ARGS[@]} -eq 0 ] && ARGS=(up)
 PLAT_LABEL="$PLATFORM"   # dev is now a platform value, not a separate axis
 echo "cam-up: project=$COMPOSE_PROJECT_NAME platform=$PLAT_LABEL${CAM_REGISTRY:+ registry=$CAM_REGISTRY} profiles=[${COMPOSE_PROFILES:-<none>}] sock=$CAM_SOCK_VOLUME net=$CAM_NETWORK rmw=$RMW_IMPLEMENTATION config=$CAM_CONFIG_HOST (-> $CAM_CONFIG)" >&2
+IMAGE_ARGS=(--root "$REPO" --platform "$PLATFORM")
+[ "$ZENOHD" = 1 ] && IMAGE_ARGS+=(--zenohd)
+[ "$ROSCORE" = 1 ] && IMAGE_ARGS+=(--roscore)
+case "$VERB" in
+  images|runtime-images)
+    exec "$PYTHON" "$REPO/tools/runtime_images.py" "$VERB" "${IMAGE_ARGS[@]}" -- "${FILES[@]}";;
+  up)
+    if [ "${RIG_RUNTIME_IMAGE_PINS+x}" = x ]; then
+      exec "$PYTHON" "$REPO/tools/runtime_images.py" up "${IMAGE_ARGS[@]}" -- "${FILES[@]}" -- "${ARGS[@]}"
+    fi;;
+esac
+# Queries above only render Compose. External volumes and shared helpers are runtime actions.
+if [ "$VERB" != config ]; then
+  docker volume create "$CAM_SOCK_VOLUME" >/dev/null
+  # Standalone convenience; rig starts these as managed infrastructure instances instead.
+  if [ "$ZENOHD" = 1 ]; then CAM_ROS2_IMAGE="${CAM_ROS2_IMAGE:-ros2-bridge}" "$REPO/tools/zenohd.sh" up; fi
+  if [ "$ROSCORE" = 1 ]; then CAM_ROS1_IMAGE="${CAM_ROS1_IMAGE:-ros1-bridge}" "$REPO/tools/roscore.sh" up; fi
+fi
 exec docker compose "${FILES[@]}" "${ARGS[@]}"

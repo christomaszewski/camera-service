@@ -118,6 +118,19 @@ exercise it.
 ---
 
 ## Notes & knobs
+- **Read-only image inventory:** `cam-up <cfg> runtime-images` emits version 1 JSON with
+  `images` (unique active references) and `roles` (logical names such as `cam-dev`, `cam-core`,
+  and `ros2-bridge`). `cam-up <cfg> images` emits the same references as a YAML list for bake.
+  Both honor platform, registry, image overrides, and enabled plugin profiles without creating
+  volumes, launching shared helpers, or writing generated configuration.
+- **Verified replay images:** Rig can supply `RIG_RUNTIME_IMAGE_PINS` as
+  `{"version":1,"images":{"reference":"sha256:<64 hex digits>"}}`. A pinned `up` requires
+  exactly the active references, resolves Compose once, replaces images with those IDs,
+  removes build instructions, and disables pulling/building. Missing, extra, or malformed
+  pins fail before runtime changes. When Rig provides `RIG_TARGET_ARCH`, conflicting service
+  platforms or `DOCKER_DEFAULT_PLATFORM` values fail and the frozen model explicitly requests
+  that native Linux architecture. Shared `--zenohd`/`--roscore` startup is excluded from
+  pinned launches; Rig must start those services as managed infrastructure.
 - **`pull` is mandatory here.** With only the bundle, there's no build context on the vehicle, so a bare
   `up` would try (and fail) to build. `pull` fetches the registry images; `up` then just runs them.
 - **One var, whole stack:** `CAM_REGISTRY` → `<registry>/<name>:<platform>` for all three images. Override
