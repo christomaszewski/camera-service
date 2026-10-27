@@ -200,12 +200,16 @@ def test_empty_recording_attempts_do_not_block_mixed_run_replay():
         expected, _ = _record(Path(tmp), "NV12", [{"encoder": "ffv1"}, {"encoder": "x264"}],
                               count=3, empty_between=True)
         assert len(list(Path(tmp).glob("*.recording-settings.json"))) == 4
-        src = _source(Path(tmp))
-        try:
-            _check(_read(src), expected)
-            assert src.playback.descriptor()["sessions"] == 2
-        finally:
-            src.stop()
+        # Short H.264 fragments exposed a splitmuxsrc prepare/seek race: a duplicate
+        # first buffer shifted CSV stamps and made a valid recording look corrupt.
+        # Reopen the exact same recording repeatedly to exercise that startup boundary.
+        for _ in range(20):
+            src = _source(Path(tmp))
+            try:
+                _check(_read(src), expected)
+                assert src.playback.descriptor()["sessions"] == 2
+            finally:
+                src.stop()
 
 
 def test_stop_invalidates_pending_end_of_session_callbacks():
@@ -224,6 +228,27 @@ def test_stop_invalidates_pending_end_of_session_callbacks():
         assert src._pipeline.get_state(0)[1] == Gst.State.NULL
         assert src._reader_bus is None
         src.stop()  # teardown can stop a source again after end-of-data
+
+
+def test_restart_from_a_later_fragment_returns_to_the_session_beginning():
+    with tempfile.TemporaryDirectory() as tmp:
+        expected, sessions = _record(Path(tmp), "NV12", [{"encoder": "ffv1", "segment_seconds": 1}], count=38)
+        assert len(list(Path(tmp).glob("*.mkv"))) > 1
+        src = _source(Path(tmp), speed=1)
+        received = []
+        try:
+            src.start(lambda st, data: received.append((st, bytes(data))))
+            _pump(lambda: src._part_idx > 0)
+            assert src.playback.request("restart")["ok"]
+            _pump(lambda: src.finished)
+            assert not src.finished_error
+            span = expected[-1][0].timestamp_ns - expected[0][0].timestamp_ns + IV
+            restarted = [(st, data) for st, data in received
+                         if st.timestamp_ns >= expected[0][0].timestamp_ns + span]
+            assert [st.timestamp_ns for st, _ in restarted] == [st.timestamp_ns + span for st, _ in expected]
+            assert [data for _, data in restarted] == [data for _, data in expected]
+        finally:
+            src.stop()
 
 
 def test_mixed_replay_streams_previews_and_rerecords_every_frame():

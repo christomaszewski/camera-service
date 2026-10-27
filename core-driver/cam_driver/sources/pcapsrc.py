@@ -35,6 +35,23 @@ from ..timestamps import FrameStamp, TimestampSource
 from .gstbase import GstPipelineSource
 
 log = logging.getLogger(__name__)
+DRAIN_STALL_TIMEOUT_S = 10.0
+
+
+class _PacedDrainWait:
+    """A cancellable pacer wait whose scheduled wakeup is visible to the EOS watchdog."""
+    def __init__(self, source, branch):
+        self.source, self.branch = source, branch
+
+    def wait(self, seconds):
+        source = self.source
+        with source._drain_lock:
+            source._drain_waits[self.branch] = time.monotonic() + seconds
+        try:
+            return source._stop_evt.wait(seconds)
+        finally:
+            with source._drain_lock:
+                source._drain_waits.pop(self.branch, None)
 
 
 class PcapSource(GstPipelineSource):
@@ -70,10 +87,14 @@ class PcapSource(GstPipelineSource):
         self._finished = False
         self._failed = False
         self._stop_evt = threading.Event()
+        self._playback._coordination_cancel = self._stop_evt
         self._thread = None
         self._appsrc = None         # mjpeg only
         self._stamp_q = None        # mjpeg only: feed-order stamps for the pre-tee probe
         self._base_src_ts = None    # mjpeg only: buffer PTS zero point
+        self._drain_lock = threading.Lock()
+        self._drain_progress_at = 0.0
+        self._drain_waits = {}
 
     # ---- lifecycle ---------------------------------------------------------
     def open(self) -> None:
@@ -124,6 +145,9 @@ class PcapSource(GstPipelineSource):
 
     def _on_mini_eos(self, _bus, _msg) -> None:
         log.info("pcap: mini-pipeline drained")
+        # Publish terminal evidence before the main pipeline can observe finished
+        # and stop this source; the feeder may still be asleep in its drain poll.
+        self._playback.mark_finished()
         self._finished = True
 
     def _on_mini_error(self, _bus, msg) -> None:
@@ -131,12 +155,16 @@ class PcapSource(GstPipelineSource):
         log.error("pcap mini-pipeline error: %s | %s -- ending playback", err, dbg)
         self._failed = True
         self._finished = True
+        self._playback.mark_finished(str(err))
 
     def _pipeline_desc(self) -> str:
         w, h, fps = int(self.cfg.width), int(self.cfg.height), 0
         _caps, parser, sw_decoder = self._enc
         decoder, conv = select_decoder(sw_decoder, self._hw_decode_available())
-        raw_sink = "appsink name=rawsink emit-signals=true max-buffers=4 drop=true sync=false"
+        raw_sink = ("appsink name=rawsink emit-signals=true max-buffers=4 "
+                    f"drop={'false' if self._playback.coordinated else 'true'} sync=false")
+        decode_queue = "queue max-size-buffers=8" if self._playback.coordinated else \
+            "queue leaky=downstream max-size-buffers=8"
         return (
             # block=true: a full appsrc queue back-pressures the feeder's push-buffer --
             # bounded memory even at speed=0 (as-fast-as-possible replay)
@@ -144,7 +172,7 @@ class PcapSource(GstPipelineSource):
             f"caps=image/jpeg ! tee name=st "
             # decode branch is BEST-EFFORT (consumers); leaky so a slow decoder drops here
             # instead of back-pressuring the must-not-drop stream-copy (encsink) branch
-            f"st. ! queue leaky=downstream max-size-buffers=8 ! {parser} ! {decoder} ! {conv} ! "
+            f"st. ! {decode_queue} ! {parser} ! {decoder} ! {conv} ! "
             f"video/x-raw,format=I420,width={w},height={h} ! {raw_sink} "
             f"st. ! queue ! appsink name=encsink emit-signals=true max-buffers=8 drop=false sync=false"
         )
@@ -152,14 +180,62 @@ class PcapSource(GstPipelineSource):
     def start(self, on_frame, on_encoded=None) -> None:
         self._stop_evt.clear()
         if self._mjpeg:
+            if self._playback.coordinated:
+                inner_frame, inner_encoded = on_frame, on_encoded
+                def on_frame(st, data):
+                    if self._coordinated_frame(st, decoded=True):
+                        if inner_frame is not None:
+                            inner_frame(st, data)
+                        self._note_drain_progress()
+                def on_encoded(st, data, caps=None):
+                    if self._coordinated_frame(st, decoded=False):
+                        if inner_encoded is not None:
+                            inner_encoded(st, data, caps)
+                        self._note_drain_progress()
             super().start(on_frame, on_encoded)   # PLAYING + sink callbacks
         else:
             self._on_frame = on_frame
         self._thread = threading.Thread(target=self._feed_loop, name="pcap-feeder", daemon=True)
         self._thread.start()
 
+    def _coordinated_frame(self, stamp, *, decoded):
+        if decoded:
+            self._playback.prepared()
+        if self._playback.wait_if_paused(cancel=self._stop_evt) == playback.STOP:
+            return False
+        self._pacer.wait(stamp.timestamp_ns, cancel=_PacedDrainWait(self, decoded))
+        if self._playback.wait_if_paused(cancel=self._stop_evt) == playback.STOP:
+            return False
+        if decoded:
+            self._playback.note_frame(stamp.timestamp_ns)
+        return not self._stop_evt.is_set()
+
+    def _note_drain_progress(self):
+        with self._drain_lock:
+            self._drain_progress_at = time.monotonic()
+
+    def _wait_for_drain(self):
+        """Bound decoder stalls, excluding intentional holds and scheduled frame waits.
+
+        Coordinated MJPEG queues before release and paces in both output callbacks.
+        Its tail can legitimately take longer than the decoder timeout to play, even
+        when every frame fits in appsrc. Progress restarts the timeout; a future
+        pacing deadline extends it only until that specific wait should finish.
+        """
+        self._note_drain_progress()
+        while not self._finished and not self._stop_evt.is_set():
+            with self._drain_lock:
+                last = max([self._drain_progress_at, *self._drain_waits.values()])
+            if self._playback.coordinated and self._playback.state == playback.PAUSED:
+                self._note_drain_progress()
+            elif time.monotonic() - last >= DRAIN_STALL_TIMEOUT_S:
+                return False
+            self._stop_evt.wait(min(0.1, DRAIN_STALL_TIMEOUT_S / 4))
+        return True
+
     def stop(self) -> None:
         self._playback.cancel_start_gate()
+        self._playback.stop_coordination()
         self._stop_evt.set()
         # mjpeg: NULL the mini-pipeline FIRST -- it flushes the appsrc, unblocking a feeder
         # stuck in a block=true push-buffer; joining before that would always burn the timeout
@@ -190,11 +266,15 @@ class PcapSource(GstPipelineSource):
                     stamp = FrameStamp(frame_id=idx, timestamp_ns=ts,
                                        source=TimestampSource.SYSTEM,
                                        system_ns=ts, camera_ns=ts, chunk_ns=None)
+                    if pb.coordinated and self._pacer.anchor_src_ns is None:
+                        self._pacer.anchor_src_ns = ts
+                    if pb.coordinated and not self._mjpeg:
+                        pb.prepared()  # raw UVC payload has already passed size validation
                     # Playback control, at the one point the feeder already blocks: a pause holds
                     # here (consumers keep the last frame; a recording session gets nothing, which
                     # is the truth), a restart abandons this cycle, a stop wins over both. A boot
                     # hold lets the FIRST frame through (consumers negotiate + show it), then holds.
-                    if not pb.take_preroll():
+                    if not (pb.coordinated and self._mjpeg) and not pb.take_preroll():
                         verdict = pb.wait_if_paused(cancel=self._stop_evt)
                         if verdict == playback.STOP:
                             return
@@ -216,7 +296,8 @@ class PcapSource(GstPipelineSource):
                         self._push_encoded(stamp, frame)
                     elif self._on_frame is not None:
                         self._on_frame(stamp, frame)
-                    pb.note_frame(ts)
+                    if not (pb.coordinated and self._mjpeg):
+                        pb.note_frame(ts)
                     delivered += 1
                 st = self._extractor.stats
                 if cycle == 0 and not restarted:
@@ -252,15 +333,14 @@ class PcapSource(GstPipelineSource):
             if self._mjpeg and not self._stop_evt.is_set() and not self._failed:
                 eos_sent = self._appsrc.emit("end-of-stream") == Gst.FlowReturn.OK
                 if eos_sent:
-                    # bounded drain wait: a stream jpegparse can't parse never negotiates,
-                    # so EOS never reaches the bus -- fail loudly instead of hanging forever
-                    for _ in range(100):
-                        if self._finished or self._stop_evt.wait(0.1):
-                            break
-                    if not (self._finished or self._stop_evt.is_set()):
-                        log.error("pcap: mini-pipeline did not drain within 10s -- were the "
+                    if pb.coordinated and pb.wait_if_paused(cancel=self._stop_evt) == playback.STOP:
+                        return
+                    # Invalid JPEGs must still fail, while intentional output pacing and
+                    # pauses cannot consume the decoder's inactivity allowance.
+                    if not self._wait_for_drain():
+                        log.error("pcap: mini-pipeline stalled for %gs -- were the "
                                   "capture's JPEGs decodable? (%d stamp(s) never reached the "
-                                  "pipeline)", len(self._stamp_q))
+                                  "pipeline)", DRAIN_STALL_TIMEOUT_S, len(self._stamp_q))
                         self._failed = True
                         eos_sent = False   # the finally block flips finished
         except ValueError as e:
@@ -309,11 +389,11 @@ class PcapSource(GstPipelineSource):
 
     @property
     def finished(self) -> bool:
-        return self._finished
+        return self._finished or self._playback.coordination_error is not None
 
     @property
     def finished_error(self) -> bool:
-        return self._failed
+        return self._failed or self._playback.coordination_error is not None
 
     @property
     def delivered_frame_rate(self):

@@ -498,6 +498,22 @@ def test_a_held_playback_republishes_its_last_frame_to_the_transport_only():
         assert p._still_tick() is False
 
 
+def test_coordinated_playback_never_injects_held_preview_frames_into_ros_transport():
+    with tempfile.TemporaryDirectory() as tmp:
+        p, created, events = _pipe(tmp)
+        p.transport_src = _Appsrc(events, "transport_src")
+        p._width, p._height, p._gst_format = 8, 8, "GRAY8"
+        p.source.playback = SimpleNamespace(state="playing", coordinated=True)
+        p._on_frame(_stamp(0, 10 ** 9), bytes(64))
+        for state in ("playing", "paused", "finished"):
+            p.source.playback.state = state
+            p._still_pushed_mono = 0.0
+            assert p._still_tick() is True
+            assert len(p.transport_src.pushed) == 1
+        p._on_frame(_stamp(1, 2 * 10 ** 9), bytes(64))
+        assert len(p.transport_src.pushed) == 2
+
+
 def test_a_held_frame_advances_the_transport_pts_and_the_resume_lands_after_it():
     # The reconnect loop a paused/finished `rig replay` showed on unixfd: the held frame went out
     # with its ORIGINAL PTS -- a repeated RTP timestamp the browser drops, so the dashboard's

@@ -136,7 +136,7 @@ sets them per instance — rig renders them into the replay config):
 
 | Knob | Meaning |
 |---|---|
-| `initial_state: playing \| paused` | come up held on the first frame |
+| `initial_state: playing \| paused` | come up held on the first frame (the legacy hold publishes one preview) |
 | `start_at_unix_s` | the release gate: resume itself at this wall instant — every producer of the replay gets the same one, so they start together instead of at their own container start |
 | `epoch_unix_ns` | the timeline ZERO (the bag's start): frame k is released `(ts_k − epoch − from_s × 1e9)/speed` after release (`from_s` defaults to zero), preserving its place relative to the bag. Frames before the epoch are skipped. Unset = the data's own first frame. |
 | `from_s`, `to_s` | a window on that timeline (skip before, `finished` at). Release and restart pace from `epoch + from_s`, so the skipped interval adds no delay. A first frame later than that boundary keeps only its remaining lead-in. Frame stamps and reported positions retain the original timeline. |
@@ -170,6 +170,11 @@ snapshot and empty sidecars on disk, but whole-run replay skips it. A run contai
 sessions, or explicitly selecting an empty prefix, reports that there are no recorded frames.
 Incomplete or failed sessions are not silently skipped. Recording gaps retain their original timing
 on the shared timeline; standalone replay can optionally shorten them with `replay.gap_max_s`.
+
+Replay opens each exact Matroska fragment directly and retains the session's CSV cursor
+and pacing across fragment boundaries. This avoids a reproduced `splitmuxsrc` preparation
+race that could emit the first encoded frame twice. Restarting from a later fragment returns
+to the beginning of the selected session/window; frames are not deduplicated by pixel content.
 
 Replay refuses sessions marked truncated or with failed timestamp sidecars, and detects missing
 segment numbers before delivery. If decoding yields fewer or more frames than the CSV indexes,
@@ -272,3 +277,36 @@ config-driven, exactly as it was before this contract.
 | Producer | Source kinds | Status |
 |---|---|---|
 | camera-service (core) | `pcap`, `replay` | **implemented** — `cam_driver/playback.py` (policy + pacer), `cam_driver/control_zenoh.py` (`PlaybackControl`), declared only for finite sources |
+
+### Coordinated startup (opt-in Rig protocol)
+
+When Rig supplies `RIG_REPLAY_CONTROL_DIR`, `RIG_REPLAY_SESSION_ID`,
+`RIG_REPLAY_PLAN_ID` and `RIG_REPLAY_PARTICIPANT`, replay and PCAP sources join
+protocol version 1 as `<instance>.camera`. The launcher binds the control directory
+at `/replay-control`; camera publishes its own status and heartbeat there. The
+shared participant implementation is copied byte-for-byte from infra's
+`rig-infra/ros2-bag-player/tools/replay_coordination.py`. Its canonical SHA-256 is
+pinned in `tools/replay_coordination.sha256` and checked by the playback tests;
+update the shared client and both packaged copies together.
+
+Camera opens the selected recording and decodes the first selected frame before
+reporting `held`. That frame stays inside the source. No paused preview, encoded
+recording buffer or transport frame escapes before release. Encoded replay and
+MJPEG PCAP use nonleaky decoder queues in this mode so preroll preserves queued
+frames too. `arm` reports readiness without producing camera output; a prepared
+release requires an acknowledged, immutable future time and a matching commit.
+Playback then uses that common scheduled time as its pacing origin. Window cuts
+retain the first selected frame and any remaining lead-in after the window start.
+Held-preview refreshes are suppressed in coordinated mode because the same transport feeds
+ROS consumers; refreshing would inject duplicate historical frames during gaps or after EOF.
+
+Playback controls cannot bypass a coordinated startup hold. Missing/late commit,
+abort, protocol errors and source failures close the output gate and report a
+terminal status; stopping a held source reports `aborted`. The ordinary paused
+preview and fixed `start_at_unix_s` gate remain available when coordination is not
+selected. A coordinated invocation ignores that legacy fixed gate.
+
+`replay-capabilities` advertises the camera component and requires
+`io.rig.replay.coordination=1` on the active `cam-dev` or `cam-core` image. Only
+rebuilt images contain the runtime client and carry this label; copying a newer
+launcher onto an older image does not make that image support coordination.

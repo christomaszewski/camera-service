@@ -178,6 +178,30 @@ if args[:2] != ["volume", "create"] and "model" not in entry:
             shutil.copy2(REPO / rel, dest)
         self.assertEqual(self.query(repo=staging)["images"], self.query()["images"])
 
+    def test_coordination_capability_and_frozen_control_mount(self):
+        capability = self.launch("replay-capabilities")
+        self.assertEqual(capability.returncode, 0, capability.stderr)
+        self.assertEqual(json.loads(capability.stdout)["coordination"], {
+            "version": 1, "components": ["camera"],
+            "image_labels": {"cam-dev": {"io.rig.replay.coordination": "1"}}})
+        control = self.folder / "control"
+        control.mkdir()
+        fields = dict(RIG_REPLAY_CONTROL_DIR=str(control), RIG_REPLAY_SESSION_ID="a" * 32,
+                      RIG_REPLAY_PLAN_ID="b" * 64, RIG_REPLAY_PARTICIPANT="image_test")
+        selected = self.query(**fields)
+        pins = {"version": 1, "images": self.pins(selected)}
+        result = self.launch("up", RIG_RUNTIME_IMAGE_PINS=json.dumps(pins), **fields)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        model = next(call["model"] for call in reversed(self.commands()) if "model" in call)
+        core = model["services"]["core-driver"]
+        mount = next(m for m in core["volumes"] if m["target"] == "/replay-control")
+        self.assertEqual(mount["source"], str(control))
+        self.assertFalse(mount.get("bind", {}).get("create_host_path", False))
+        self.assertEqual(core["environment"]["RIG_REPLAY_CONTROL_DIR"], "/replay-control")
+        self.assertEqual(core["environment"]["RIG_REPLAY_PARTICIPANT"], "image_test")
+        self.assertNotIn("RIG_REPLAY_CONTROL_DIR", model["services"]["ros2-bridge"].get("environment", {}))
+        self.assertEqual(list(control.iterdir()), [])  # rendering never creates protocol state
+
     def test_native_architecture_rejects_foreign_service_or_ambient_platform(self):
         result = self.launch("runtime-images", RIG_TARGET_ARCH="arm64",
                              DOCKER_DEFAULT_PLATFORM="linux/amd64")

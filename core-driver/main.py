@@ -79,14 +79,17 @@ def main(argv=None) -> int:
 
     # The source owns the frontend: device + timestamp policy + feeder (here: GigE/Aravis,
     # incl. chunk/PTP setup). Everything downstream (pipeline) is source-agnostic.
+    source = None
     try:
         source = make_source(cfg)
         source.open()
         source.configure()
-    except (CameraError, ValueError, OSError) as e:
+    except (CameraError, ValueError, OSError, RuntimeError) as e:
         # OSError: the playback sources open user-named files (pcap capture, run sidecar)
         # at open() -- a typo'd path must be one legible line, not a restart-looped traceback
         log.error("%s", e)
+        if source is not None and source.playback is not None:
+            source.playback.mark_finished(str(e))
         return 2
 
     pipe = CapturePipeline(cfg, source)
@@ -98,6 +101,8 @@ def main(argv=None) -> int:
         # legible line + a non-zero exit. Uncaught, it's a raw traceback that compose restart-loops
         # with no hint of which element/path is missing.
         log.error("pipeline build failed: %s", e)
+        if source.playback is not None:
+            source.playback.mark_finished(str(e))
         return 2
 
     # Lifecycle policy over the pipeline's sessions: boot state (config / crash-resume), legal

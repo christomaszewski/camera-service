@@ -1,0 +1,15 @@
+# Opt-in coordinated replay only. The runtime implementation is baked into a labeled
+# camera image; vendoring this launcher does not add support to an older image.
+services:
+  core-driver:
+    volumes:
+      - type: bind
+        source: ${RIG_REPLAY_CONTROL_DIR:?coordinated replay requires its control directory}
+        target: /replay-control
+        bind:
+          create_host_path: false
+    environment:
+      RIG_REPLAY_CONTROL_DIR: /replay-control
+      RIG_REPLAY_SESSION_ID: ${RIG_REPLAY_SESSION_ID:?coordinated replay requires session identity}
+      RIG_REPLAY_PLAN_ID: ${RIG_REPLAY_PLAN_ID:?coordinated replay requires plan identity}
+      RIG_REPLAY_PARTICIPANT: ${RIG_REPLAY_PARTICIPANT:?coordinated replay requires participant identity}

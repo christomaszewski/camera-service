@@ -1,26 +1,26 @@
 """Recorded-run playback source (a GstPipelineSource).
 
 Feeds the service from a run THIS service previously recorded: `<prefix>-NNNNN.mkv`
-parts read seamlessly by splitmuxsrc (the reader pair of the splitmuxsink that wrote
-them) + the sidecar CSV/JSON to re-stamp every frame with its ORIGINAL FrameStamp
+parts read in order through matroskademux + the sidecar CSV/JSON to re-stamp every
+frame with its ORIGINAL FrameStamp
 (frame_id, timestamps, provenance) -- so recording, transport, and plugins downstream
 behave as if the original camera were live.
 
 A run directory holds one SESSION per lifecycle activate (each its own <prefix> triple);
-the replay plays them back to back in timeline order, one reader pipeline per session,
+the replay plays them back to back in timeline order, one reader pipeline per fragment,
 with the recorded gaps between them honoured as silence. `replay.run` pins one session.
 
 Two delivery paths, resolved by probing each session's first .mkv part against its sidecar.
 The consumer format stays constant; raw recordings can change codec and tiling per session:
 
   RAW runs (ffv1 / hw-hevc-lossless / x265-lossless, or opt-in lossy x264):
-      splitmuxsrc ! decoder ! videoconvert ! <header format> ! rawsink -> on_frame
+      filesrc ! matroskademux ! decoder ! videoconvert ! <header format> ! rawsink -> on_frame
     Decoded back to the source format (exact pixels only for lossless recordings); a CFA-tiled
     recording is un-tiled per frame (bayer_tile.untile_cfa, the exact inverse) so
     consumers see the original mosaic.
 
   STREAM-COPY runs (USB-MJPEG / RTSP H.26x, header pixel_format == I420):
-      splitmuxsrc ! tee -> decode branch -> rawsink (consumers)
+      filesrc ! matroskademux ! tee -> decode branch -> rawsink (consumers)
                        -> encsink (on_encoded)      -- the recording stream-copies AGAIN,
     byte-faithful to the original capture, via the base's dual-output machinery.
 
@@ -149,6 +149,7 @@ class ReplaySource(GstPipelineSource):
         self._to_ns: Optional[int] = None
         self._pacer = self._playback.pacer   # ONE pacer: set_speed reaches the feeder's wait
         self._stop_evt = threading.Event()   # cancels a pacing sleep (recorded gaps can be seconds)
+        self._playback._coordination_cancel = self._stop_evt
         self._finished = False
         self._failed = False
         self._mkv_caps = None
@@ -286,6 +287,7 @@ class ReplaySource(GstPipelineSource):
     def _activate_session(self, idx: int) -> None:
         self._session_idx = idx
         self._run = self._sessions[idx]
+        self._part_idx = 0
         self._mkv_caps = self._session_caps[idx]
         # Reset even when the next session is untiled (e.g. a switch to lossy H.264).
         self._untile = None
@@ -381,14 +383,39 @@ class ReplaySource(GstPipelineSource):
         inner_frame, inner_enc, untile = self._user_on_frame, self._user_on_encoded, self._untile
 
         def on_frame(st, data):
+            if self._playback.coordinated and not self._coordinated_frame(st, decoded=True):
+                return
             if inner_frame is not None and self._deliverable(st):
                 inner_frame(st, untile(data) if untile is not None else data)
 
         def on_encoded(st, data, caps=None):
+            if self._playback.coordinated and not self._coordinated_frame(st, decoded=False):
+                return
             if inner_enc is not None and self._deliverable(st):
                 inner_enc(st, data, caps)
 
         return on_frame, (on_encoded if inner_enc is not None else None)
+
+    def _coordinated_frame(self, st, *, decoded):
+        # Decode into the appsink before declaring readiness. Both raw and encoded
+        # callbacks retain their first frame here; neither transport nor recording sees
+        # it until the common release. Nonleaky queues preserve the preroll tail too.
+        if not self._deliverable(st):
+            if (decoded and self._to_ns is not None
+                    and st.timestamp_ns - self._offset >= self._to_ns and not self._finished):
+                self._finish(self._gen)
+            return False
+        if decoded:
+            self._playback.prepared()
+        if self._playback.wait_if_paused(cancel=self._stop_evt) == playback.STOP:
+            return False
+        self._pacer.wait(st.timestamp_ns, cancel=self._stop_evt)
+        if self._playback.wait_if_paused(cancel=self._stop_evt) == playback.STOP:
+            return False
+        if decoded:
+            self._playback.note_frame(st.timestamp_ns,
+                                     cycle_base_ns=self._epoch_ns + self._offset + self._skipped_ns)
+        return self._deliverable(st)
 
     def _play(self) -> None:
         """Arm the CURRENT reader pipeline: connect its sinks and set it PLAYING."""
@@ -436,17 +463,24 @@ class ReplaySource(GstPipelineSource):
     def _pipeline_desc(self) -> str:
         hdr = self._run.header
         w, h = int(hdr["width"]), int(hdr["height"])
-        src = f'splitmuxsrc location="{self._run.mkv_glob}"'
+        # splitmuxsrc's prepare/seek race can emit the first encoded buffer twice
+        # (reproduced on 1.28.8), shifting every subsequent CSV row. Each splitmuxsink
+        # fragment is independently decodable. Read exact paths one at a time and
+        # retain the session's CSV cursor across fragment boundaries instead.
+        path = self._run.mkv_paths[self._part_idx].replace('\\', '\\\\').replace('"', '\\"')
+        src = f'filesrc location="{path}" ! matroskademux'
         raw_sink = "appsink name=rawsink emit-signals=true max-buffers=8 drop=false sync=false"
         if self._enc:
             _caps, parser, sw_decoder = self._enc
             decoder, conv = select_decoder(sw_decoder, self._hw_decode_available(),
                                            getattr(self.cfg, "decoder", "auto"))
+            decode_queue = "queue max-size-buffers=8" if self._playback.coordinated else \
+                "queue leaky=downstream max-size-buffers=8"
             return (
                 f"{src} ! tee name=st "
                 # decode branch is BEST-EFFORT (consumers); leaky so a slow decoder drops
                 # here instead of stalling the must-not-drop stream-copy branch below
-                f"st. ! queue leaky=downstream max-size-buffers=8 ! {parser} ! {decoder} ! {conv} ! "
+                f"st. ! {decode_queue} ! {parser} ! {decoder} ! {conv} ! "
                 f"video/x-raw,format=I420,width={w},height={h} ! {raw_sink} "
                 f"st. ! queue ! appsink name=encsink emit-signals=true max-buffers=8 drop=false sync=false"
             )
@@ -495,10 +529,12 @@ class ReplaySource(GstPipelineSource):
         if self._from_ns is not None and raw < self._from_ns:
             return st                      # before the window: decoded, never paced or delivered
         if self._to_ns is not None and raw >= self._to_ns:
-            if not self._finished:
+            if not self._finished and not self._playback.coordinated:
                 log.info("replay: window end reached (%d frames delivered)", idx)
                 self._finish(self._gen)
             return st
+        if self._playback.coordinated:
+            return st  # the decoded/output callbacks own coordinated readiness and pacing
         # blocks the streaming thread = natural backpressure; stop() cancels the sleep
         # (a recorded gap can be seconds long and must not stall shutdown). A pause holds HERE
         # too -- the decode pipeline simply waits on its own thread, exactly like a long gap.
@@ -519,6 +555,7 @@ class ReplaySource(GstPipelineSource):
         self._gen += 1        # invalidate pending EOS/quiesce callbacks before releasing the reader
         self._stop_evt.set()   # wake a pacing sleep so set_state(NULL) isn't blocked by it
         self._playback.cancel_start_gate()
+        self._playback.stop_coordination()
         self._remove_reader_watch()
         super().stop()
 
@@ -541,7 +578,7 @@ class ReplaySource(GstPipelineSource):
         """End of data (streaming thread or main loop): mark finished and, from the main loop,
         quiesce the reader so a `to`-window end doesn't keep decoding the tail for nothing."""
         self._finished = True
-        self._playback.mark_finished()
+        self._playback.mark_finished("replay failed" if self._failed else None)
         GLib.idle_add(self._quiesce, gen)
 
     def _quiesce(self, gen: int) -> bool:
@@ -553,6 +590,14 @@ class ReplaySource(GstPipelineSource):
     def _on_eos(self, _bus, _msg, gen: int) -> None:
         if gen != self._gen or self._finished:
             return   # a reader already replaced (restart raced the EOS)
+        if self._part_idx + 1 < len(self._run.mkv_paths):
+            self._halt_reader()
+            self._part_idx += 1
+            # Keep _idx, the pacer and the session binding: a fragment is not a new
+            # recording session. EOS has already drained both output branches.
+            self.configure()
+            self._play()
+            return
         if not self._check_row_count():
             self._failed = True
             self._finish(gen)
@@ -599,7 +644,7 @@ class ReplaySource(GstPipelineSource):
         self._failed = False
         log.info("replay: %s -> cycle %d (timestamps shifted %+.3fs)",
                  reason, self._cycle, self._cycle * self._span_ns / 1e9)
-        single = len(self._sessions) == 1 or self._session_idx == self._first_idx
+        single = self._part_idx == 0 and (len(self._sessions) == 1 or self._session_idx == self._first_idx)
         if single and not was_finished and self._pipeline is not None:
             self._idx = 0
             if self._pipeline.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH, 0):
@@ -621,6 +666,7 @@ class ReplaySource(GstPipelineSource):
         log.error("replay pipeline error: %s | %s -- ending playback", err, dbg)
         self._failed = True     # surfaces as a non-zero exit; recording finalizes regardless
         self._finished = True
+        self._playback.mark_finished(str(err))
 
     @property
     def playback(self):
@@ -641,11 +687,11 @@ class ReplaySource(GstPipelineSource):
 
     @property
     def finished(self) -> bool:
-        return self._finished
+        return self._finished or self._playback.coordination_error is not None
 
     @property
     def finished_error(self) -> bool:
-        return self._failed
+        return self._failed or self._playback.coordination_error is not None
 
     @property
     def delivered_frame_rate(self):

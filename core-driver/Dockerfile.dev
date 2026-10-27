@@ -8,6 +8,7 @@ RUN bash /build-gstreamer/build.sh
 
 FROM ${BASE} AS distro
 LABEL io.rig.camera.replay-bindings="1"
+LABEL io.rig.replay.coordination="1"
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-gi python3-yaml python3-numpy python3-pip \

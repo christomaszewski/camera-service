@@ -732,6 +732,11 @@ class CapturePipeline:
         pb = getattr(self.source, "playback", None)
         if pb is None or self._still is None:
             return True
+        # The plugin transport also feeds ROS consumers. A preview refresh would
+        # become an extra historical Image during gaps or after completion. The
+        # coordinated timeline must contain only the recorded frames.
+        if getattr(pb, "coordinated", False):
+            return True
         if time.monotonic() - self._still_pushed_mono < 0.9:
             return True
         stamp, frame_bytes, pts = self._still

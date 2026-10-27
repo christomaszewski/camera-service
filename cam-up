@@ -238,6 +238,9 @@ fi
 # The single-file config bind (CAM_CONFIG_HOST -> CAM_CONFIG, exported above) -- applied for every
 # config, wherever it lives.
 FILES+=(-f "$REPO/docker-compose.external-config.yml")
+if [ -n "${RIG_REPLAY_CONTROL_DIR:-}${RIG_REPLAY_SESSION_ID:-}${RIG_REPLAY_PLAN_ID:-}${RIG_REPLAY_PARTICIPANT:-}" ]; then
+  FILES+=(-f "$REPO/docker-compose.replay-control.yml")
+fi
 
 ARGS=("$@"); [ ${#ARGS[@]} -eq 0 ] && ARGS=(up)
 PLAT_LABEL="$PLATFORM"   # dev is now a platform value, not a separate axis
@@ -246,6 +249,10 @@ IMAGE_ARGS=(--root "$REPO" --platform "$PLATFORM")
 [ "$ZENOHD" = 1 ] && IMAGE_ARGS+=(--zenohd)
 [ "$ROSCORE" = 1 ] && IMAGE_ARGS+=(--roscore)
 case "$VERB" in
+  replay-capabilities)
+    ROLE=cam-core; [ "$PLATFORM" != dev ] || ROLE=cam-dev
+    printf '{"coordination":{"version":1,"components":["camera"],"image_labels":{"%s":{"io.rig.replay.coordination":"1"}}}}\n' "$ROLE"
+    exit 0;;
   images|runtime-images)
     exec "$PYTHON" "$REPO/tools/runtime_images.py" "$VERB" "${IMAGE_ARGS[@]}" -- "${FILES[@]}";;
   up)

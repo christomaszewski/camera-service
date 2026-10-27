@@ -355,8 +355,79 @@ class PlaybackState:
         # instant; each resumes itself there, so a replay's cameras and bag player start together.
         self._gate: Optional[threading.Timer] = None
         self._gate_armed = False
-        if start_at_unix_s is not None:
+        self._coordination = None
+        self._coordination_released = False
+        self._coordination_error = None
+        self._coordination_prepared = threading.Event()
+        self._coordination_closed = threading.Event()
+        self._coordination_cancel = None
+        if any(key in os.environ for key in (
+                "RIG_REPLAY_CONTROL_DIR", "RIG_REPLAY_SESSION_ID", "RIG_REPLAY_PLAN_ID",
+                "RIG_REPLAY_PARTICIPANT")):
+            from .replay_coordination import Participant
+            self._coordination = Participant.from_env("camera")
+            self._state = PAUSED
+            self._preroll_pending = False  # internal decoder preroll never becomes a preview
+            threading.Thread(target=self._coordinate, name="camera-replay-coordination",
+                             daemon=True).start()
+        elif start_at_unix_s is not None:
             self.arm_start_gate(float(start_at_unix_s))
+
+    @property
+    def coordinated(self) -> bool:
+        return self._coordination is not None
+
+    @property
+    def coordination_error(self):
+        return self._coordination_error
+
+    def prepared(self) -> None:
+        """The source has a validated, decoded first frame buffered behind its output hold."""
+        self._coordination_prepared.set()
+
+    def _coordinate(self) -> None:
+        from .replay_coordination import CoordinationAborted
+        try:
+            at = self._coordination.wait_release(
+                prepared_check=self._coordination_prepared.is_set,
+                ready_check=self._coordination_prepared.is_set)
+            with self._cond:
+                if self._coordination_closed.is_set():
+                    return
+                self._coordination.started()
+                self._coordination_released = True
+                self._release()
+                # Late thread scheduling must not shift this camera's timeline relative to
+                # the other producers. The participant already checked the release bound.
+                if self.pacer.anchor_src_ns is not None:
+                    self.pacer._t0_wall -= int((self._clock() - at) * 1e9)
+                self._cond.notify_all()
+            while not self._coordination_closed.wait(0.05):
+                self._coordination.poll()
+        except Exception as exc:  # a coordination failure always closes the output gate
+            if not self._coordination_closed.is_set():
+                try:
+                    if not isinstance(exc, CoordinationAborted):
+                        self._coordination.failed(str(exc))
+                finally:
+                    self._coordination_fail(str(exc))
+
+    def _coordination_fail(self, error) -> None:
+        with self._cond:
+            self._coordination_error = str(error)
+            self.last_error = str(error)
+            self._state = FINISHED
+            self._coordination_closed.set()
+            if self._coordination_cancel is not None:
+                self._coordination_cancel.set()
+            self._cond.notify_all()
+
+    def stop_coordination(self) -> None:
+        if self._coordination is not None and not self._coordination_closed.is_set():
+            try:
+                self._coordination.aborted("camera stopped")
+            finally:
+                self._coordination_fail("camera stopped")
 
     def arm_start_gate(self, at_unix_s: float) -> None:
         """Resume at the wall instant `at_unix_s` (a no-op if not paused by then, or if an
@@ -421,6 +492,8 @@ class PlaybackState:
         return self.pacer.speed
 
     def controls(self) -> list:
+        if self.coordinated and not self._coordination_released:
+            return []
         if self._state == FINISHED:
             return ["restart"] if self._restartable else []
         first = "pause" if self._state == PLAYING else "resume"
@@ -515,6 +588,8 @@ class PlaybackState:
             while self._state == PAUSED and not (cancel is not None and cancel.is_set()) \
                     and not self._restart_pending:
                 self._cond.wait(0.2)
+            if self._coordination_error is not None:
+                return STOP
             if cancel is not None and cancel.is_set():
                 return STOP
             if self._restart_pending:
@@ -524,6 +599,14 @@ class PlaybackState:
             return RESUME
 
     def mark_finished(self, error: Optional[str] = None) -> None:
+        if self.coordinated and not self._coordination_closed.is_set():
+            if error or not self._coordination_released:
+                error = error or "camera reached end before coordinated release"
+                self._coordination.failed(error)
+                self._coordination_fail(error)
+            else:
+                self._coordination.completed()
+                self._coordination_closed.set()
         with self._cond:
             if self._state == FINISHED:
                 return
@@ -536,6 +619,8 @@ class PlaybackState:
     # ---- the control surface (main loop) --------------------------------------------
     def request(self, op: str, params: Optional[dict] = None) -> dict:
         params = params or {}
+        if self.coordinated and not self._coordination_released:
+            return self._result(False, error="coordinated startup owns playback until release")
         self._gate_armed = False      # an operator's request outranks a scheduled release
         with self._cond:
             cur = self._state
