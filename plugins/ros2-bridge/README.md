@@ -108,6 +108,13 @@ standard `...compressed.*` params.
 
 ## Build & run
 
+Fleet builds inherit `RIG_BASE_IMAGE` in both the compiler and runtime stages, sharing the
+deployment's ROS layers. Standalone builds keep the stock `ros:${ROS_DISTRO}-ros-base` default.
+`tools/build-images.sh` and the bridge/source Compose services pass this input through;
+direct Docker builds can use `--build-arg BASE_IMAGE=registry/fleet-ros:version`.
+See the [fleet build contract](../../docs/fleet-build-contract.md) for middleware selection
+and base compatibility requirements.
+
 ```bash
 docker build -f plugins/ros2-bridge/Dockerfile -t ros2-bridge .
 tools/zenohd.sh up                                   # one shared zenoh router per host
