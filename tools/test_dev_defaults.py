@@ -15,7 +15,7 @@ REPO = Path(__file__).resolve().parents[1]
 def clean_env(**overrides):
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(('CAM_', 'RIG_', 'COMPOSE_'))
-           and k not in ('BASE_IMAGE', 'WEBRTC_BASE', 'GST_RS_TAG', 'ROS_DISTRO',
+           and k not in ('BASE_IMAGE', 'WEBRTC_BASE', 'GST_RS_TAG', 'ROS_DISTRO', 'RMW_IMPLEMENTATION',
                          'IMAGES', 'PUSH', 'PLATFORM_FLAG', 'L4T_MULTIMEDIA', 'L4T_VERSION')}
     return env | overrides
 
@@ -40,6 +40,40 @@ class DevDefaults(unittest.TestCase):
         result = subprocess.run(cmd, cwd=REPO, env=clean_env(**env),
                                 text=True, capture_output=True, check=True)
         return json.loads(result.stdout)['services']
+
+    def render_all(self, platform='dev', **env):
+        # Include ros2-source as well as the publishing bridge; either can build their shared image.
+        overlay = 'jp6' if platform == 'jp6m' else platform
+        result = subprocess.run(['docker', 'compose', '-f', 'docker-compose.yml', '-f',
+                                 f'docker-compose.{overlay}.yml', '--profile', '*',
+                                 'config', '--format', 'json'], cwd=REPO,
+                                env=clean_env(CAM_PLATFORM=platform, **env),
+                                text=True, capture_output=True, check=True)
+        return json.loads(result.stdout)['services']
+
+    def build_commands(self, platform='dev', **overrides):
+        # Capture arguments at the Docker CLI boundary without a daemon, build, or push.
+        fake = Path(self.tmp.name) / 'docker'
+        fake.write_text('#!/usr/bin/env python3\nimport json, os, sys\n'
+                        'with open(os.environ["CAM_TEST_COMMANDS"], "a") as out:\n'
+                        '    out.write(json.dumps(sys.argv[1:]) + "\\n")\n')
+        fake.chmod(0o755)
+        commands = Path(self.tmp.name) / 'commands.jsonl'
+        commands.write_text('')
+        env = clean_env(PATH=f'{self.tmp.name}:{os.environ["PATH"]}', PUSH='0',
+                        CAM_TEST_COMMANDS=str(commands), **overrides)
+        subprocess.run(['bash', 'tools/build-images.sh', 'registry.example:5000', f'v1-{platform}'],
+                       cwd=REPO, env=env, capture_output=True, check=True)
+        return [json.loads(line) for line in commands.read_text().splitlines()]
+
+    @staticmethod
+    def build_args(command):
+        return dict(command[i + 1].split('=', 1) for i, arg in enumerate(command)
+                    if arg == '--build-arg')
+
+    @staticmethod
+    def by_image(commands):
+        return {call[call.index('-t') + 1].split('/')[-1].split(':')[0]: call for call in commands}
 
     def assert_dev(self, services, tag='dev', prefix=''):
         for name, image in (('core-driver', 'cam-dev'), ('webrtc-bridge', 'webrtc-bridge'),
@@ -121,12 +155,44 @@ class DevDefaults(unittest.TestCase):
                 self.assertEqual(svc['ros2-bridge']['environment']['CAM_PLATFORM'], platform)
 
     def test_raw_compose_includes_ros_source(self):
-        result = subprocess.run(['docker', 'compose', '-f', 'docker-compose.yml', '-f',
-                                 'docker-compose.dev.yml', '--profile', '*', 'config', '--format', 'json'],
-                                cwd=REPO, env=clean_env(), text=True, capture_output=True, check=True)
-        svc = json.loads(result.stdout)['services']
+        svc = self.render_all()
         self.assert_dev(svc)
         self.assertEqual(svc['ros2-source']['image'], 'ros2-bridge:dev')
+
+    def test_compose_shared_ros_base_does_not_change_media_bases(self):
+        base = 'registry.example:5000/fleet-ros@sha256:' + 'a' * 64
+        for platform in ('dev', 'jp6', 'jp7', 'jp6m'):
+            with self.subTest(platform=platform):
+                baseline = self.render_all(platform)
+                services = self.render_all(platform, RIG_BASE_IMAGE=base,
+                                           RIG_ROS_RMW='rmw_cyclonedds_cpp')
+                for name in ('ros2-bridge', 'ros2-source'):
+                    args = services[name]['build']['args']
+                    self.assertEqual(args['BASE_IMAGE'], base)
+                    self.assertEqual(args['ROS_DISTRO'], 'lyrical')
+                    self.assertEqual(args['ROS_RMW'], 'rmw_cyclonedds_cpp')
+                for name in ('core-driver', 'webrtc-bridge', 'ros1-bridge'):
+                    self.assertEqual(services[name]['build'], baseline[name]['build'], name)
+
+    def test_compose_ros_base_fallbacks_and_middleware_precedence(self):
+        cases = [({}, 'lyrical', 'rmw_zenoh_cpp'),
+                 ({'RIG_BASE_IMAGE': '', 'ROS_DISTRO': 'jazzy'}, 'jazzy', 'rmw_zenoh_cpp'),
+                 ({'CAM_ROS_RMW': 'rmw_cyclonedds_cpp'}, 'lyrical', 'rmw_cyclonedds_cpp'),
+                 ({'RIG_ROS_RMW': 'rmw_fastrtps_cpp', 'CAM_ROS_RMW': 'rmw_cyclonedds_cpp'},
+                  'lyrical', 'rmw_fastrtps_cpp'),
+                 ({'RIG_ROS_RMW': '', 'CAM_ROS_RMW': 'rmw_cyclonedds_cpp'},
+                  'lyrical', 'rmw_cyclonedds_cpp'),
+                 ({'RIG_ROS_RMW': '', 'CAM_ROS_RMW': ''}, 'lyrical', 'rmw_zenoh_cpp')]
+        for env, distro, middleware in cases:
+            with self.subTest(env=env):
+                services = self.render_all(RMW_IMPLEMENTATION='rmw_fastrtps_cpp', **env)
+                for name in ('ros2-bridge', 'ros2-source'):
+                    args = services[name]['build']['args']
+                    self.assertEqual(args['BASE_IMAGE'], f'ros:{distro}-ros-base')
+                    self.assertEqual(args['ROS_DISTRO'], distro)
+                    self.assertEqual(args['ROS_RMW'], middleware)
+                    self.assertEqual(services[name]['environment']['RMW_IMPLEMENTATION'],
+                                     'rmw_fastrtps_cpp')
 
     def test_vendored_dev_uses_image_code(self):
         staging = Path(self.tmp.name) / 'vendored'
@@ -155,23 +221,11 @@ class DevDefaults(unittest.TestCase):
         self.assertTrue(any(v['target'] == '/app' for v in core['volumes']))
 
     def test_build_matrix(self):
-        # Capture build commands at the CLI boundary; no builds, pushes, or registry access.
-        fake = Path(self.tmp.name) / 'docker'
-        fake.write_text('#!/usr/bin/env python3\nimport json, os, sys\n'
-                        'with open(os.environ["CAM_TEST_COMMANDS"], "a") as out:\n'
-                        '    out.write(json.dumps(sys.argv[1:]) + "\\n")\n')
-        fake.chmod(0o755)
-        commands = Path(self.tmp.name) / 'commands.jsonl'
         for platform in ('dev', 'jp6', 'jp7', 'jp6m'):
             with self.subTest(platform=platform):
-                commands.write_text('')
-                env = clean_env(PATH=f'{self.tmp.name}:{os.environ["PATH"]}', PUSH='0',
-                                CAM_TEST_COMMANDS=str(commands))
-                subprocess.run(['bash', 'tools/build-images.sh', 'registry.example:5000', f'v1-{platform}'],
-                               cwd=REPO, env=env, capture_output=True, check=True)
-                calls = [json.loads(line) for line in commands.read_text().splitlines()]
+                calls = self.build_commands(platform)
                 self.assertTrue(all(call[0] == 'build' for call in calls))
-                by_image = {call[call.index('-t') + 1].split('/')[-1].split(':')[0]: call for call in calls}
+                by_image = self.by_image(calls)
                 web = by_image['webrtc-bridge']
                 self.assertEqual(web[web.index('--target') + 1], 'modern' if platform == 'dev' else 'runtime')
                 if platform == 'dev':
@@ -184,6 +238,44 @@ class DevDefaults(unittest.TestCase):
                 else:
                     self.assertIn('cam-core', by_image)
                     self.assertNotIn('cam-dev', by_image)
+
+    def test_shared_ros_base_build_matrix(self):
+        base = 'registry.example:5000/fleet-ros@sha256:' + 'b' * 64
+        for platform in ('dev', 'jp6', 'jp7', 'jp6m'):
+            for buildx in (False, True):
+                with self.subTest(platform=platform, buildx=buildx):
+                    mode = {'RIG_BUILD_PLATFORMS': 'linux/arm64'} if buildx else {}
+                    baseline = self.by_image(self.build_commands(platform, **mode))
+                    calls = self.build_commands(platform, RIG_BASE_IMAGE=base,
+                                                RIG_ROS_RMW='rmw_cyclonedds_cpp', **mode)
+                    expected_prefix = ['buildx', 'build'] if buildx else ['build']
+                    self.assertTrue(all(call[:len(expected_prefix)] == expected_prefix for call in calls))
+                    by_image = self.by_image(calls)
+                    args = self.build_args(by_image['ros2-bridge'])
+                    self.assertEqual(args['BASE_IMAGE'], base)
+                    self.assertEqual(args['ROS_DISTRO'], 'lyrical')
+                    self.assertEqual(args['ROS_RMW'], 'rmw_cyclonedds_cpp')
+                    for name in set(by_image) - {'ros2-bridge'}:
+                        self.assertEqual(self.build_args(by_image[name]),
+                                         self.build_args(baseline[name]), name)
+
+    def test_build_ros_base_fallbacks_and_middleware_precedence(self):
+        cases = [({}, 'rmw_zenoh_cpp'),
+                 ({'RIG_BASE_IMAGE': ''}, 'rmw_zenoh_cpp'),
+                 ({'CAM_ROS_RMW': 'rmw_cyclonedds_cpp'}, 'rmw_cyclonedds_cpp'),
+                 ({'RIG_ROS_RMW': 'rmw_fastrtps_cpp', 'CAM_ROS_RMW': 'rmw_cyclonedds_cpp'},
+                  'rmw_fastrtps_cpp'),
+                 ({'RIG_ROS_RMW': '', 'CAM_ROS_RMW': 'rmw_cyclonedds_cpp'}, 'rmw_cyclonedds_cpp'),
+                 ({'RIG_ROS_RMW': '', 'CAM_ROS_RMW': ''}, 'rmw_zenoh_cpp')]
+        for env, middleware in cases:
+            with self.subTest(env=env):
+                calls = self.build_commands(IMAGES='ros2-bridge', ROS_DISTRO='jazzy',
+                                             RMW_IMPLEMENTATION='rmw_fastrtps_cpp', **env)
+                self.assertEqual(len(calls), 1)
+                args = self.build_args(calls[0])
+                self.assertNotIn('BASE_IMAGE', args)
+                self.assertEqual(args['ROS_DISTRO'], 'jazzy')
+                self.assertEqual(args['ROS_RMW'], middleware)
 
 
 if __name__ == '__main__':

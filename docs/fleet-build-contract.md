@@ -21,6 +21,21 @@ uses Buildx publication and provenance for these builds. `RIG_BUILD_NO_CACHE=1` 
 `--no-cache --pull` to every image build. Standalone calls without `RIG_BUILD_PLATFORMS` retain
 host-native Docker builds and the existing `PLATFORM_FLAG` override.
 
+The ROS 2 bridge uses `RIG_BASE_IMAGE` as the parent of **both** its build and runtime stages.
+The reference is consumed verbatim, including digest pins; no camera platform suffix is added.
+The base must provide the selected `ROS_DISTRO` and support each requested CPU architecture.
+With the variable empty or unset, standalone builds retain `ros:${ROS_DISTRO}-ros-base`.
+The same inputs apply to Compose builds of `ros2-bridge` and `ros2-source` (which share an image).
+The core's `BASE_IMAGE` and WebRTC base remain independent NVIDIA/Ubuntu inputs.
+
+`RIG_ROS_RMW` selects the bridge's middleware package at build time, falling back to
+`CAM_ROS_RMW`, then `rmw_zenoh_cpp`, through the Docker build argument `ROS_RMW`.
+The ambient runtime `RMW_IMPLEMENTATION` does not select build dependencies. At launch,
+Compose continues to use `RMW_IMPLEMENTATION` to select an
+installed middleware. The image installs camera-specific dependencies above the shared base;
+`--no-upgrade` preserves explicitly requested parent packages but is not a complete dependency
+lock, so run `rig image audit` against the resulting fleet before deployment.
+
 ```sh
 # Standalone native dev build; full default image set, no publication.
 PUSH=0 RIG_TARGET_PLATFORM=dev tools/build-images.sh registry.lan:5000 bench-dev

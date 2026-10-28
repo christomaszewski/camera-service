@@ -25,6 +25,10 @@
 #     CAM_DEV_TARGET=distro          build the distro-only core for compatibility (dev: modern default)
 #     CAM_WEBRTC_TARGET=runtime      build the distro-only bridge (dev: modern default)
 #     ROS_DISTRO=lyrical             ros2-bridge ROS 2 distro
+#     RIG_BASE_IMAGE=...             resolved fleet ROS base, passed verbatim to ros2-bridge ONLY
+#                                    (both build stages); empty/unset keeps the stock ROS parent.
+#     RIG_ROS_RMW=rmw_zenoh_cpp      fleet middleware package to install in ros2-bridge; falls back
+#                                    to CAM_ROS_RMW, then Zenoh. Runtime RMW_IMPLEMENTATION is separate.
 #     PUSH=1                         set 0 to build+tag locally without pushing
 #     PLATFORM_FLAG=                 e.g. --platform=linux/arm64 to cross-build from x86
 #     RIG_BUILD_NO_CACHE=1           rig's build-env contract: `rig build --no-cache` exports this;
@@ -96,6 +100,7 @@ case "$VARIANT" in
        IMAGES="${IMAGES:-cam-core ros2-bridge webrtc-bridge}" ;;
 esac
 ROS_DISTRO="${ROS_DISTRO:-lyrical}"
+ROS_RMW="${RIG_ROS_RMW:-${CAM_ROS_RMW:-rmw_zenoh_cpp}}"
 L4T_MULTIMEDIA="${L4T_MULTIMEDIA:-}"
 L4T_VERSION="${L4T_VERSION:-}"
 PUSH="${PUSH:-1}"
@@ -121,7 +126,9 @@ for img in $IMAGES; do
     cam-core)     build_one cam-core     core-driver/Dockerfile           --build-arg "BASE_IMAGE=$BASE_IMAGE" \
                      --build-arg "L4T_MULTIMEDIA=$L4T_MULTIMEDIA" --build-arg "L4T_VERSION=$L4T_VERSION" ;;
     cam-dev)      build_one cam-dev      core-driver/Dockerfile.dev       --target "$DEV_TARGET" --build-arg "BASE=$BASE_IMAGE" ;;   # NB: the dev image's arg is BASE, not BASE_IMAGE
-    ros2-bridge)   build_one ros2-bridge   plugins/ros2-bridge/Dockerfile   --build-arg "ROS_DISTRO=$ROS_DISTRO" ;;
+    ros2-bridge)   build_one ros2-bridge   plugins/ros2-bridge/Dockerfile   --build-arg "ROS_DISTRO=$ROS_DISTRO" \
+                     --build-arg "ROS_RMW=$ROS_RMW" \
+                     ${RIG_BASE_IMAGE:+--build-arg "BASE_IMAGE=$RIG_BASE_IMAGE"} ;;
     ros1-bridge)   build_one ros1-bridge   plugins/ros1-bridge/Dockerfile ;;   # Noetic (ROS_DISTRO baked in)
     webrtc-bridge) build_one webrtc-bridge plugins/webrtc-bridge/Dockerfile --target "$WEBRTC_TARGET" \
                      ${WEBRTC_BASE:+--build-arg "BASE_IMAGE=$WEBRTC_BASE"} ${GST_RS_TAG:+--build-arg "GST_RS_TAG=$GST_RS_TAG"} \

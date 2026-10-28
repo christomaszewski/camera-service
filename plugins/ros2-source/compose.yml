@@ -12,6 +12,10 @@ services:
     build:
       context: ../..
       dockerfile: plugins/ros2-bridge/Dockerfile
+      args:
+        ROS_DISTRO: ${ROS_DISTRO:-lyrical}
+        BASE_IMAGE: ${RIG_BASE_IMAGE:-ros:${ROS_DISTRO:-lyrical}-ros-base}
+        ROS_RMW: ${RIG_ROS_RMW:-${CAM_ROS_RMW:-rmw_zenoh_cpp}}
     init: true
     stop_signal: SIGINT
     network_mode: ${CAM_NETWORK:-host}     # host = join the host ROS 2 graph

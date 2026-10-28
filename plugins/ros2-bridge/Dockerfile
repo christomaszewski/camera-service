@@ -6,17 +6,25 @@
 # Build (from repo root):  docker build -f plugins/ros2-bridge/Dockerfile -t ros2-bridge .
 # Fallback to the prior LTS:  docker build --build-arg ROS_DISTRO=jazzy ...
 ARG ROS_DISTRO=lyrical
+# Rig supplies its resolved deployment base verbatim. Standalone builds retain the
+# stock ROS parent; the core driver's BASE_IMAGE is a separate NVIDIA/Ubuntu input.
+# Compile and run against the same parent so the component uses the fleet's ROS ABI.
+ARG BASE_IMAGE=ros:${ROS_DISTRO}-ros-base
+ARG ROS_RMW=rmw_zenoh_cpp
 
 # ---- builder: colcon build the component library ----
-FROM ros:${ROS_DISTRO}-ros-base AS builder
+FROM ${BASE_IMAGE} AS builder
 ARG ROS_DISTRO
+ARG ROS_RMW
 ENV DEBIAN_FRONTEND=noninteractive
 # --no-upgrade: same parent-is-the-version-authority rule as the runtime stage below (this stage
 # doesn't ship, but keeping the builder's ROS packages at the parent's versions is consistent).
-RUN apt-get update && apt-get install -y --no-install-recommends --no-upgrade \
+RUN rmw_pkg="ros-${ROS_DISTRO}-$(echo "${ROS_RMW}" | tr '_' '-')" \
+    && apt-get update && apt-get install -y --no-install-recommends --no-upgrade \
       build-essential cmake pkg-config \
       libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
       ros-${ROS_DISTRO}-image-transport ros-${ROS_DISTRO}-rclcpp-components \
+      "${rmw_pkg}" \
       python3-colcon-common-extensions \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /ws
@@ -26,17 +34,15 @@ COPY plugins/ros2-bridge /ws/src/cam_ros2_bridge
 COPY plugins/ros2-source /ws/src/cam_ros2_source
 # colcon-common-extensions carries colcon-ros: without it an ament_python package builds as a plain
 # setuptools package -- importable, but with no AMENT_PREFIX_PATH hook, so `ros2 run` cannot find it.
+# CMake also consults RMW_IMPLEMENTATION. Override any parent runtime default for
+# this command only, using the middleware installed above.
 RUN . /opt/ros/${ROS_DISTRO}/setup.sh && \
-    colcon build --packages-select cam_ros2_bridge cam_ros2_source --cmake-args -DCMAKE_BUILD_TYPE=Release
+    RMW_IMPLEMENTATION="${ROS_RMW}" colcon build --packages-select cam_ros2_bridge cam_ros2_source --cmake-args -DCMAKE_BUILD_TYPE=Release
 
-# ---- runtime: ros-base + runtime GStreamer/ROS + the built component lib ----
-# TODO(re-parent): building FROM ${RIG_BASE_IMAGE} (rig-infra's fleet-ros = ros-base + rmw-zenoh +
-# rosbag2/mcap, a superset of what this runtime needs from ROS) would make shared-package agreement
-# STRUCTURAL instead of convention-based -- rig exports RIG_BASE_IMAGE to build commands for exactly
-# this. Needs its own testing pass on both JP variants; until then the --no-upgrade rule below is
-# the convergence mechanism.
-FROM ros:${ROS_DISTRO}-ros-base
+# ---- runtime: shared ROS base + camera-specific deps + the built component library ----
+FROM ${BASE_IMAGE} AS runtime
 ARG ROS_DISTRO
+ARG ROS_RMW
 ENV DEBIAN_FRONTEND=noninteractive
 # plugins-bad provides `shmsrc` (JP6 transport) and `bayer2rgb` (JP7 in-pipeline debayer); on 24.04 it
 # also ships the GStreamer `onnx` element (libgstonnx -> onnxruntime), which we never use and whose arm64
@@ -44,22 +50,18 @@ ENV DEBIAN_FRONTEND=noninteractive
 # rclcpp-components -> component_container_mt; image-proc -> the DebayerNode composed on JP6 color.
 # python3-gi / python3-gst-1.0 / gir1.2-gst-plugins-base-1.0 -> GStreamer from Python for ros2-source
 # (the FdAllocator typelib for its unixfd framing rides in gst-plugins-base).
-# rmw-zenoh-cpp -> the default ROS 2 middleware (RMW_IMPLEMENTATION=rmw_zenoh_cpp); it ships the
-# `rmw_zenohd` router too, so this same image runs the shared host router. FastDDS stays available
-# (ros-base ships rmw_fastrtps_cpp) as a selectable fallback via RMW_IMPLEMENTATION.
+# Install the fleet's declared RMW (Zenoh by default). Runtime selection remains the
+# conventional RMW_IMPLEMENTATION environment variable, independent of this build arg.
 #
-# --no-upgrade: installing a package the parent ALREADY carries (rclcpp-components here) would
-# otherwise silently upgrade it to the current candidate, skewing this image ahead of the shared
-# ros:${ROS_DISTRO}-ros-base parent that rig-infra's fleet-ros also builds from -- `rig image audit`
-# flags exactly that skew. The parent is the version authority: parent-carried packages stay at the
-# parent's version, genuinely-new packages install normally, and if a new package ever strictly
-# needs a NEWER parent package apt fails loudly instead of skewing silently. (Same mechanism as
-# rig's v0.2.24 consumer --no-upgrade mandate, one level down.)
-RUN apt-get update && apt-get install -y --no-install-recommends --no-upgrade \
+# --no-upgrade preserves explicitly requested packages already installed in the parent.
+# Dependency resolution can still upgrade other packages: validate fleet builds with
+# `rig image audit` rather than treating this flag as a complete version lock.
+RUN rmw_pkg="ros-${ROS_DISTRO}-$(echo "${ROS_RMW}" | tr '_' '-')" \
+    && apt-get update && apt-get install -y --no-install-recommends --no-upgrade \
       gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
       ros-${ROS_DISTRO}-image-transport ros-${ROS_DISTRO}-compressed-image-transport \
       ros-${ROS_DISTRO}-rclcpp-components ros-${ROS_DISTRO}-image-proc \
-      ros-${ROS_DISTRO}-rmw-zenoh-cpp \
+      "${rmw_pkg}" \
       python3-gi python3-gst-1.0 gir1.2-gst-plugins-base-1.0 \
     && rm -f /usr/lib/*/gstreamer-1.0/libgstonnx.so /usr/lib/*/libonnxruntime.so* \
     && rm -rf /var/lib/apt/lists/*
