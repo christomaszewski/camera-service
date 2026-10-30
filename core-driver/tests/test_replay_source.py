@@ -219,6 +219,65 @@ def test_restart_from_the_end_rebuilds_the_reader_and_plays_the_run_again():
     src.stop()
 
 
+def test_the_old_readers_tail_cannot_finish_the_cycle_a_restart_opened():
+    run = _run_dir(); run.mkdir()
+    _write_session(run, "cam-a", 1, T0, 6)
+    src = _source(run, to_s=.08)                     # frame 2 ends the window; 3-5 are its tail
+    src._quiesce = lambda gen: False                 # the tail stays in flight until the restart
+    new_stamp, halt = src._new_stamp, src._halt_reader
+    teardown, tail_seen = threading.Event(), threading.Event()
+
+    def stamp_tail_at_teardown(buf):
+        tail = src._idx == 3
+        if tail:
+            teardown.wait(5)
+        st = new_stamp(buf)
+        if tail:
+            tail_seen.set()
+        return st
+
+    def halt_after_the_tail():
+        teardown.set()
+        tail_seen.wait(5)
+        halt()
+
+    src._new_stamp, src._halt_reader = stamp_tail_at_teardown, halt_after_the_tail
+    c = _Consumer()
+    src.start(c.on_frame)
+    _pump(lambda: src.finished)
+    assert c.ids() == [0, 1]
+    assert src.playback.request("restart")["ok"] and tail_seen.is_set()
+    _pump(lambda: src.finished)
+    assert c.ids() == [0, 1] * 2                     # finished means THIS cycle's end
+    assert src.playback.state == FINISHED and src.playback.descriptor()["cycle"] == 1
+    src.stop()
+
+
+def test_an_end_posted_while_the_old_reader_stops_is_gone_when_the_new_one_starts():
+    run = _run_dir(); run.mkdir()
+    _write_session(run, "cam-a", 1, T0, 4)
+    src = _source(run)
+    c = _Consumer()
+    src.start(c.on_frame)
+    _pump(lambda: src.finished)
+    halt, play = src._halt_reader, src._play
+    at_play = []
+
+    def halt_with_a_last_word():
+        src._halt_reader = halt                      # once: after the join no thread is left to post
+        src.playback.mark_finished("the old reader's last word")
+        halt()
+
+    def note_state_then_play():
+        at_play.append((src.finished, src.playback.state, src.playback.last_error))
+        play()
+
+    src._halt_reader, src._play = halt_with_a_last_word, note_state_then_play
+    assert src.playback.request("restart")["ok"]
+    assert at_play == [(False, "playing", None)]
+    src.stop()
+
+
 def test_sessions_of_a_different_shape_are_refused_and_a_pin_plays_one():
     run = _run_dir(); run.mkdir()
     _write_session(run, "cam-a", 1, T0, 3)

@@ -668,7 +668,13 @@ class ReplaySource(GstPipelineSource):
         reading) or is rebuilt on the first session. The loop wrap, an operator's `restart`, and
         a restart from `finished` are one mechanism (main-loop thread: the bus handler's, and the
         zenoh adapter dispatches there). Raises on a failed seek so a request is a legible refusal."""
-        was_finished = self._finished
+        single = self._part_idx == 0 and (len(self._sessions) == 1 or self._session_idx == self._first_idx)
+        seek = single and not self._finished and self._pipeline is not None
+        if not seek:
+            # A reader on its way out still drains the frames past `to` on its own thread. Join it
+            # before opening the new cycle: a tail frame that found `_finished` clear would end it
+            # (the watchdog then exits a bare run), and what it posted until now is reset below.
+            self._halt_reader()
         self._cycle += 1
         self._offset = self._retime_offset + self._cycle * self._span_ns
         self._playback.mark_cycle(self._cycle)
@@ -680,8 +686,7 @@ class ReplaySource(GstPipelineSource):
         self._failed = False
         log.info("replay: %s -> cycle %d (timestamps shifted %+.3fs)",
                  reason, self._cycle, self._cycle * self._span_ns / 1e9)
-        single = self._part_idx == 0 and (len(self._sessions) == 1 or self._session_idx == self._first_idx)
-        if single and not was_finished and self._pipeline is not None:
+        if seek:
             self._idx = 0
             if self._pipeline.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH, 0):
                 return

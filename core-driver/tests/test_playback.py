@@ -348,6 +348,19 @@ def test_restart_is_the_one_control_left_when_a_restartable_source_finishes():
     assert pcap.controls() == [] and not pcap.request("restart")["ok"]
 
 
+def test_a_new_cycle_drops_a_stale_end_but_not_a_coordination_failure():
+    pb = _pb()
+    pb.mark_finished("the old reader's last word")
+    pb.mark_cycle(1)
+    assert pb.state == PLAYING and pb.last_error is None
+    pb.request("pause")
+    pb.mark_cycle(2)
+    assert pb.state == PAUSED                # only an end is undone; a hold stays held
+    pb._coordination_fail("peer lost")
+    pb.mark_cycle(3)
+    assert pb.state == FINISHED and pb.last_error == "peer lost"
+
+
 def test_descriptor_carries_the_timeline_fields_the_source_fills():
     pb = _pb()
     pb.source_path, pb.session, pb.sessions, pb.epoch_unix_ns = "/runs/x/cam-1", 1, 3, 10 ** 18

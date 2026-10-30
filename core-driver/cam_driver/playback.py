@@ -556,12 +556,16 @@ class PlaybackState:
             self._frames += 1
 
     def mark_cycle(self, cycle: int) -> None:
-        """A new cycle began (loop wrap or restart): position/frames start over."""
+        """A new cycle began (loop wrap or restart): position/frames start over, and an end the
+        previous reader posted on its way out no longer applies. A coordination failure still does."""
         with self._cond:
             self._cycle = cycle
             self._frames = 0
             self._position_ns = 0
             self._cycle_base_ns = None
+            if self._state == FINISHED and self._coordination_error is None:
+                self._state = PLAYING
+                self.last_error = None
 
     def take_restart(self) -> bool:
         """Feeder (or a source's restart hook): was a restart requested since the last check?
