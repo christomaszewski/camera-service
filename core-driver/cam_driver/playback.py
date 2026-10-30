@@ -314,7 +314,7 @@ class PlaybackState:
     Pure Python and thread-safe: `request()` runs on the GLib main loop (the zenoh adapter
     dispatches there, like change_state); the feeder calls `note_frame()` per frame and
     `wait_if_paused()` at its pacing point from the SOURCE thread. The source supplies one hook,
-    `on_restart` (pcap: abandon the current cycle; replay: flush-seek to 0) -- the MECHANISM stays
+    `on_restart` (pcap: abandon the current cycle; replay: rebuild its reader) -- the MECHANISM stays
     in the source, the policy here.
     """
 
@@ -672,7 +672,7 @@ class PlaybackState:
         if op == "restart":
             if self._on_restart is not None:
                 try:
-                    self._on_restart()       # replay: the seek, which takes the flag itself
+                    self._on_restart()       # replay: the rebuild, which takes the flag itself
                 except Exception as e:   # noqa: BLE001 -- a mechanism failure is a legible refusal
                     log.exception("playback: restart hook raised")
                     with self._cond:

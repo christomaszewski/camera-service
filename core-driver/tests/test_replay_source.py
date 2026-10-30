@@ -278,6 +278,55 @@ def test_an_end_posted_while_the_old_reader_stops_is_gone_when_the_new_one_start
     src.stop()
 
 
+def test_a_frame_in_flight_at_a_mid_play_restart_cannot_shift_the_cycle_a_row():
+    run = _run_dir(); run.mkdir()
+    _write_session(run, "cam-a", 1, T0, 6, pixels=lambda i: bytes([i * 16]) * (W * H))
+    src = _source(run)
+    new_stamp = src._new_stamp
+    in_flight = threading.Event()
+
+    def stamp_once_the_restart_began(buf):
+        if src._cycle == 0 and src._idx == 3:
+            in_flight.set()
+            src._stop_evt.wait(2)                    # decoded, not stamped; teardown lets it go
+        return new_stamp(buf)
+
+    src._new_stamp = stamp_once_the_restart_began
+    c = _Consumer()
+    src.start(c.on_frame)
+    _pump(in_flight.is_set)
+    assert src.playback.request("restart")["ok"]
+    _pump(lambda: src.finished)
+    assert not src.finished_error
+    assert c.ids()[-6:] == [0, 1, 2, 3, 4, 5]
+    # Ids alone cannot see a shifted cycle: compare what each stamp says with the frame it is on.
+    assert [data[0] for _, data, _ in c.frames] == [st.frame_id * 16 for st, _, _ in c.frames]
+    src.stop()
+
+
+def test_a_restart_held_on_the_windows_last_frame_stays_held():
+    run = _run_dir(); run.mkdir()
+    _write_session(run, "cam-a", 1, T0, 6)
+    src = _source(run, speed=1, from_s=.04, to_s=.12, initial_state="paused")
+    c = _Consumer()
+    src.start(c.on_frame)
+    halt = src._halt_reader
+
+    def halt_as_the_tail_frame_lands():
+        src._halt_reader = halt
+        src._stop_evt.set()                          # the join wakes the hold ...
+        src._new_stamp(None)                         # ... and the reader's next frame is past `to`
+        halt()
+
+    src._halt_reader = halt_as_the_tail_frame_lands
+    try:                                             # a held reader outlives a failed assert
+        _pump(lambda: src._idx == 3)                 # frame 1 previewed, frame 2 (the last) held
+        assert src.playback.request("restart")["ok"]
+        assert src.playback.state == PAUSED and not src.finished
+    finally:
+        src.stop()
+
+
 def test_sessions_of_a_different_shape_are_refused_and_a_pin_plays_one():
     run = _run_dir(); run.mkdir()
     _write_session(run, "cam-a", 1, T0, 3)

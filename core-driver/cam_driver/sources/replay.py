@@ -34,8 +34,8 @@ is not replayed as silence. Pacing/retime/loop semantics are shared with the pca
 
 EOF: the last session's EOS -> `finished` (the main pipeline holds or exits, per
 config.hold_on_finish), a flush-seek to 0 (one session) or a rebuild of the first session's
-reader when `loop` is on. `restart` from any state -- finished included -- is the same
-mechanism. (Loop + stream-copy note: PTS values repeat each cycle, so the best-effort decode
+reader when `loop` is on. `restart` from any state -- finished included -- rebuilds that
+reader. (Loop + stream-copy note: PTS values repeat each cycle, so the best-effort decode
 branch's stamp correlation may briefly cross cycles; the recording branch is in-order.)
 """
 from __future__ import annotations
@@ -165,9 +165,9 @@ class ReplaySource(GstPipelineSource):
         self._offset = 0            # retime + loop shift applied to every delivered stamp
         self._buffer_frames = False  # opt-in from CapturePipeline; start() retains its bytes API
         self._shared_memory = False
-        # Runtime playback control (docs/PLAYBACK.md). Restart is the loop wrap's own mechanism
-        # (a flush-seek to 0 or a rebuild of the first reader), so the hook IS _restart, on the
-        # main loop. Restart works from `finished` too: the reader is simply rebuilt.
+        # Runtime playback control (docs/PLAYBACK.md). Restart shares the loop wrap's mechanism, so
+        # the hook IS _restart, on the main loop. It rebuilds the first reader from any state,
+        # `finished` included.
         self._playback = playback.PlaybackState(
             "replay", speed=cfg.speed, loop=cfg.loop, on_restart=self._restart,
             initial_state=getattr(pb_cfg, "initial_state", playback.PLAYING),
@@ -612,7 +612,10 @@ class ReplaySource(GstPipelineSource):
 
     def _finish(self, gen: int) -> None:
         """End of data (streaming thread or main loop): mark finished and, from the main loop,
-        quiesce the reader so a `to`-window end doesn't keep decoding the tail for nothing."""
+        quiesce the reader so a `to`-window end doesn't keep decoding the tail for nothing. A reader
+        being torn down ends nothing: the join wakes a held one, and its next frame can be past `to`."""
+        if self._stop_evt.is_set():
+            return
         self._finished = True
         self._playback.mark_finished("replay failed" if self._failed else None)
         GLib.idle_add(self._quiesce, gen)
@@ -664,12 +667,15 @@ class ReplaySource(GstPipelineSource):
 
     def _restart(self, reason: str = "restart") -> None:
         """Back to the start of the run: the next cycle's stamps are shifted past this one's, the
-        pacer re-anchors at now, and the reader either flush-seeks to 0 (one session, still
-        reading) or is rebuilt on the first session. The loop wrap, an operator's `restart`, and
-        a restart from `finished` are one mechanism (main-loop thread: the bus handler's, and the
-        zenoh adapter dispatches there). Raises on a failed seek so a request is a legible refusal."""
+        pacer re-anchors at now, and the reader either flush-seeks to 0 (a loop wrap in one session)
+        or is rebuilt on the first session. The loop wrap, an operator's `restart`, and a restart
+        from `finished` are one mechanism (main-loop thread: the bus handler's, and the zenoh
+        adapter dispatches there). Raises on a failed rebuild so a request is a legible refusal."""
         single = self._part_idx == 0 and (len(self._sessions) == 1 or self._session_idx == self._first_idx)
-        seek = single and not self._finished and self._pipeline is not None
+        # Only a loop wrap may keep the reader: EOS has drained it. Mid-play a frame can be in
+        # flight and no reset is safe around a flush-seek: before it, that frame takes row 0 and
+        # shifts the whole cycle a row; after it, the new pass may already be stamping.
+        seek = reason == "loop" and single and self._pipeline is not None
         if not seek:
             # A reader on its way out still drains the frames past `to` on its own thread. Join it
             # before opening the new cycle: a tail frame that found `_finished` clear would end it
