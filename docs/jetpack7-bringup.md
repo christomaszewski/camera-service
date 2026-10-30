@@ -88,7 +88,12 @@ Prove bit-exact (the part that matters — a "lossless" codec over a range-scale
 lossless): `./core-driver/tools/nvenc_lossless_test.sh` pushes known random GRAY8 frames through the
 exact HW encode fragment, decodes them, and compares byte-for-byte. **Validated on a JP7.2 Orin AGX
 (driver R595.78): `NVENC LOSSLESS PASS` — 60/60 frames bit-exact, worst |Δ| = 0, 1.32× raw** (noise
-is incompressible, so >1× is itself proof nothing was discarded; full [0,255] range survives NV24).
+is incompressible, so >1× is itself proof nothing was discarded).
+**Correction (Oct 2026):** that run was 512×512, below GStreamer's 576-row switch to limited-range
+defaults, so it could not show that the full [0,255] range survives NV24. It did not at camera
+geometry until the recorder pinned full range. The tool now defaults to 2448×2048. **Re-run on an R39
+Orin: `NVENC LOSSLESS PASS`, 24/24 frames bit-exact at 2448×2048, 1.317× raw**; the unpinned path
+failed 0/24 there ([details](recording-tuning.md#8-bit-lossless-and-the-colour-step)).
 Baked-in gotchas: the core image installs `kmod` (libnvtvmr runs `lsmod` during NVENC init, else it
 aborts with a generic error), and the plugin lands in the standard gstreamer dir so no `GST_PLUGIN_PATH`
 change is needed. (Harmless `(Argus) … nvargus-daemon failed` lines during plugin scan are the unused CSI

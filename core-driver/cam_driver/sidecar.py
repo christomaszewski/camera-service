@@ -70,6 +70,11 @@ class SidecarHeader:
     # Loss introduced by THIS encode; not a claim about original sensor/source fidelity.
     # None for stream-copy or unknown (the delivered bitstream may already be lossy).
     recording_lossy: Optional[bool] = None
+    # Colorimetry pinned on the YUV container a mono/Bayer plane rode in (hw-hevc / x265 lossless;
+    # formats.LUMA_COLORIMETRY). Decoders re-assert it so the plane comes back verbatim. None = no YUV
+    # conversion (ffv1, stream-copy, colour), or a recording made before the pin existed (taller
+    # than 576 rows, such a recording's luma is a few codes off).
+    recording_colorimetry: Optional[str] = None
     recording_settings: Optional[dict] = None
     recording_settings_file: Optional[str] = None
 

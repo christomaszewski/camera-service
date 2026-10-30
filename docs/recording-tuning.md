@@ -89,6 +89,44 @@ tradeoff. A separate live fake-USB test recorded 199 frames across two activate/
 kept transport flowing while inactive, and replayed/re-recorded every decoded frame and original
 capture stamp. Physical sensor/Jetson hardware was not tested for this option.
 
+## 8-bit lossless and the colour step
+
+`hw-hevc-lossless` and `x265-lossless` carry a Mono8/Bayer8 plane in the Y plane of a YUV container
+(NV24 and I420), so `videoconvert` sits in front of the codec. The recorder pins that container to
+full range (`formats.LUMA_COLORIMETRY`) so the plane is copied verbatim, writes the pin into the
+sidecar as `recording_colorimetry`, and replay and export re-assert it on decode. That keeps the
+result independent of whatever range the encoder signals in the bitstream. `ffv1` has no YUV step.
+
+**Recordings without `recording_colorimetry`** (v1.12.0 and earlier) were not bit-exact above 576
+rows. Unpinned, GStreamer picks limited range for tall frames, which squeezes 256 codes into 220 with
+dither before the lossless codec. It can't be undone, and those sidecars still say
+`recording_lossy: false`. Replay logs a warning for them. Random 2448×2048 frames came back like this:
+
+| Runtime | GStreamer | Pixels changed | Max error |
+|---|---|---|---|
+| `jp6` | 1.20.3 | 99.6% | 3 codes |
+| `jp7` | 1.24.2 | 54% | 1 code |
+| `jp6m`, `dev` | 1.28.8 | 54% | 1 code |
+
+Recordings of 576 rows or fewer round-trip exactly on both paths, and `ffv1` was never affected.
+
+The pin also makes the recorder cheaper, because `videoconvert` drops the matrix and dither work.
+On an R39 Orin in MAXN at 2448×2048 with `n-threads=4`, on noise frames:
+
+| CPU per frame | Unpinned | Pinned |
+|---|---|---|
+| Colour step | 44.7 ms | 7.9 ms |
+| Whole recorder path | 125 ms | 67 ms |
+
+**Validation.** The pin is verified on all three runtimes in CI, up to `nvvidconv`. On real NVENC it
+is validated on an R39 Orin (GStreamer 1.24.2, the same as `jp7`): at 2448×2048 the validator passed
+24/24 frames, the old unpinned path failed 0/24, and the production recorder fragment decoded exact
+through replay, P-frames included. NVENC there carries the range into the bitstream (`1:4:5:1`,
+full range), so the sidecar override is a safeguard rather than a necessity on R39.
+
+**JP6 is not validated yet.** r36 has a different NVENC and `nvvidconv`, so run the lossless proof
+in [the hardware test procedure](hardware-test-procedure.md) on a JP6 host at the sensor's geometry.
+
 ## Lossless CFA tiling and temporal compression
 
 The lossless paths (HW HEVC on the Orin, FFV1/x265 on CPU) remain unchanged. For an 8-bit **Bayer**

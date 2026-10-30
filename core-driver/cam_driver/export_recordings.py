@@ -204,7 +204,7 @@ def _decode(run):
     at a boundary and can accumulate rounding drift, so its reconstructed timeline
     cannot validate the original CSV. The Matroska parts retain continuous PTS.
     """
-    from .sources.replay import _check_glob_hazards, _probe_mkv, _RAW_DECODE
+    from .sources.replay import _check_glob_hazards, _probe_mkv, _RAW_DECODE, raw_decode_chain
     Gst = _gst()
     _check_glob_hazards(run)
     fmt = parse_pixel_format(run.header["pixel_format"])[0]
@@ -213,7 +213,7 @@ def _decode(run):
         if codec not in _RAW_DECODE:
             raise ValueError(f"unsupported/unreadable recording codec {codec}: {part}")
         pipeline = Gst.parse_launch(
-            f'filesrc location="{part}" ! matroskademux ! {_RAW_DECODE[codec]} ! videoconvert n-threads=2 ! '
+            f'filesrc location="{part}" ! matroskademux ! {raw_decode_chain(codec, run.header)} ! videoconvert n-threads=2 ! '
             f'video/x-raw,format={fmt},width={int(run.header["width"])},height={int(run.header["height"])} ! '
             'appsink name=sink sync=false max-buffers=4 drop=false')
         sink, bus = pipeline.get_by_name("sink"), pipeline.get_bus()
@@ -425,7 +425,7 @@ def convert(request, profile_root):
             parts = sorted(outdir.glob(prefix + "-*.mkv"))
             header = dict(run.header)
             # Preserve capture metadata, regenerate storage-dependent fields and summaries.
-            header.update({"recording_encoder": "x264", "recording_lossy": True,
+            header.update({"recording_encoder": "x264", "recording_lossy": True, "recording_colorimetry": None,
                            "bayer_pattern": header.get("bayer_pattern") or parse_pixel_format(header["pixel_format"])[2],
                            "recording_settings": definition["encoding"], "recording_settings_file": None,
                            "cfa_tile_mode": "off", "pts_offset_ns": 0,

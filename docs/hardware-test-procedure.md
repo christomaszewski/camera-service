@@ -133,9 +133,10 @@ python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print({k:d[k] for k i
 Lossless proof, on the exact recorder fragment, with the deployment's pinned core image and the JP6
 CSV mounts:
 ```bash
-docker run --rm --runtime nvidia --network host <cam-core image> tools/nvenc_lossless_test.py --frames 60
+docker run --rm --runtime nvidia --network host <cam-core image> tools/nvenc_lossless_test.py --geometry 2448x2048 --frames 60
 ```
-Expect `NVENC LOSSLESS PASS`, `60/60 frames bit-exact`. Record: encoder, MB per minute, PASS.
+Use the sensor's real geometry: a run at 576 rows or fewer can't catch a range squeeze. Expect
+`NVENC LOSSLESS PASS`, `60/60 frames bit-exact`. Record: encoder, MB per minute, PASS.
 (README "Post-processing" has the decode-and-compare recipe for a real frame.)
 
 ### B3. The bridges and the dashboard

@@ -52,7 +52,8 @@ from gi.repository import GLib, Gst
 
 from .. import playback
 from ..bayer_tile import normalize_mode, untile_cfa
-from ..formats import FFV1_DECODER, encoded_info, select_decoder
+from ..formats import (FFV1_DECODER, LUMA_COLORIMETRY, encoded_info, parse_pixel_format,
+                       select_decoder)
 from ..gst_frame import GstFrame
 from ..timestamps import FrameStamp, TimestampSource
 from .gstbase import GstPipelineSource
@@ -69,6 +70,37 @@ _RAW_DECODE = {
 }
 # mkv track caps -> formats.encoded_info key for the STREAM-COPY path.
 _ENC_KEY = {"image/jpeg": "MJPEG", "video/x-h264": "H264", "video/x-h265": "H265"}
+
+
+def raw_decode_chain(codec: str, header: dict) -> str:
+    """The software decode for a RAW recording, ready for `videoconvert` to its stored format.
+
+    A sidecar carrying recording_colorimetry stored a mono/Bayer plane verbatim in the Y plane of a
+    full-range YUV container. capssetter re-asserts that range on the decoded caps so videoconvert
+    copies Y back unchanged, whatever range the encoder wrote into the bitstream (NVENC's VUI is not
+    relied on). Older sidecars keep the conversion they always had."""
+    chain = _RAW_DECODE[codec]
+    colorimetry = header.get("recording_colorimetry")
+    if colorimetry is None:
+        return chain
+    if colorimetry != LUMA_COLORIMETRY:
+        raise ValueError(f"unsupported recording_colorimetry {colorimetry!r} (expected {LUMA_COLORIMETRY})")
+    if Gst.ElementFactory.find("capssetter") is None:
+        raise ValueError("capssetter (gst-plugins-good) is required to decode this recording bit-exact")
+    return f'{chain} ! capssetter caps="video/x-raw,colorimetry=(string){colorimetry}"'
+
+
+def legacy_luma_note(header: dict) -> Optional[str]:
+    """Why a mono/Bayer recording made before the full-range pin is not bit-exact, or None. Above
+    576 rows its plane was squeezed to limited range (with dither) before the lossless codec, so the
+    decode is only within a few codes of the sensor (formats.LUMA_COLORIMETRY)."""
+    if header.get("recording_colorimetry") or header.get("recording_encoder") not in (
+            "hw-hevc-lossless", "x265-lossless"):
+        return None
+    if parse_pixel_format(header.get("pixel_format") or "GRAY8")[4] or int(header.get("height") or 0) <= 576:
+        return None
+    return (f"{header['recording_encoder']} recording from before the full-range colorimetry pin: "
+            "luma is within a few codes of the sensor, not bit-exact")
 # Source shape stays fixed for downstream consumers. Codec and storage tiling belong to each
 # session's reader; changing recording settings does not change the sensor's delivered format.
 _SHAPE_KEYS = ("pixel_format", "width", "height", "bayer_pattern")
@@ -271,6 +303,10 @@ class ReplaySource(GstPipelineSource):
             for run, codec in zip(self._sessions, caps):
                 if codec not in _RAW_DECODE:
                     raise ValueError(f"replay: unsupported recorded codec {codec!r} in {run.mkv_paths[0]}")
+                raw_decode_chain(codec, run.header)        # reject an unknown colorimetry up front
+                note = legacy_luma_note(run.header)
+                if note:
+                    log.warning("replay: %s: %s", run.base, note)
         self._activate_session(self._first_idx)
         log.info("replay source: %s (%d session(s), %d frames, %s -> %s, ~%.1f fps, %.1fs on the "
                  "timeline%s%s%s%s)",
@@ -485,7 +521,7 @@ class ReplaySource(GstPipelineSource):
                 f"st. ! queue ! appsink name=encsink emit-signals=true max-buffers=8 drop=false sync=false"
             )
         gst_format = self._container_format(hdr)
-        return (f"{src} ! {_RAW_DECODE[self._mkv_caps]} ! videoconvert n-threads=2 ! "
+        return (f"{src} ! {raw_decode_chain(self._mkv_caps, hdr)} ! videoconvert n-threads=2 ! "
                 f"video/x-raw,format={gst_format},width={w},height={h} ! {raw_sink}")
 
     @staticmethod

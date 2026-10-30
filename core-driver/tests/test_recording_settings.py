@@ -140,6 +140,7 @@ def test_control_round_trip_and_sessions_keep_pixels_and_frozen_settings():
                 header = json.loads(Path(sess.path_base + ".json").read_text())
                 assert header["recording_settings_file"] == str(path)
                 assert header["recording_encoder"] == encoder
+                assert header["recording_colorimetry"] is None, "colour/ffv1/x264 never pin a luma range"
                 decoder = "h264parse ! avdec_h264" if encoder == "x264" else FFV1_DECODER
                 decoded = [item for part in result["session"]["files"]
                            for item in collect(f'filesrc location="{part}" ! matroskademux ! {decoder} ! videoconvert ! {caps}')]

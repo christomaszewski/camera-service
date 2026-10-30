@@ -84,15 +84,40 @@ def test_x265_missing_falls_back():
 
 
 def test_x265_8bit_mono_pins_i420():
-    # mono/Bayer must ride bit-exact in the Y plane -- the caps pin keeps videoconvert honest
+    # mono/Bayer must ride bit-exact in the Y plane -- the caps pin (format AND full range) keeps
+    # videoconvert honest; above 576 rows an unpinned range defaults to limited (220 codes)
     d = _desc(_DEV, encoder="x265-lossless")
-    assert "video/x-raw,format=I420 ! x265enc" in d
+    assert f"video/x-raw,format=I420,colorimetry={rec.LUMA_COLORIMETRY} ! x265enc" in d
 
 
 def test_x265_8bit_color_left_unpinned():
     # color: an I420 pin would chroma-resample 4:2:2/4:4:4/RGB sources, so no pin is emitted
     d = _desc(_DEV, encoder="x265-lossless", is_color=True)
-    assert "x265enc" in d and "format=I420" not in d
+    assert "x265enc" in d and "format=I420" not in d and "colorimetry" not in d
+
+
+def test_nvenc_mono_pins_full_range_nv24():
+    # The GRAY8/Bayer8 plane becomes NV24's Y plane; full range is what makes that copy exact
+    d = _desc(_JETSON)
+    assert f"video/x-raw,format=NV24,colorimetry={rec.LUMA_COLORIMETRY} ! nvvidconv" in d
+
+
+def test_nvenc_color_keeps_its_own_colorimetry():
+    # A colour source's YUV colorimetry transfers through videoconvert; a full-range pin would
+    # re-range it. (auto never picks NVENC for colour; this is the explicit request.)
+    d = _desc(_JETSON, encoder="hw-hevc-lossless", is_color=True)
+    assert "video/x-raw,format=NV24 ! nvvidconv" in d and "colorimetry" not in d
+
+
+def test_luma_colorimetry_marks_only_yuv_carried_mono():
+    # The sidecar's recording_colorimetry: set exactly where the recorder pinned it
+    pinned = rec.LUMA_COLORIMETRY
+    assert rec.luma_colorimetry("hw-hevc-lossless", False) == pinned
+    assert rec.luma_colorimetry("x265-lossless", False) == pinned
+    for enc in ("ffv1", "stream-copy", "x264", None):
+        assert rec.luma_colorimetry(enc, False) is None
+    assert rec.luma_colorimetry("hw-hevc-lossless", True) is None
+    assert rec.luma_colorimetry("x265-lossless", True) is None
 
 
 def test_x265_gray16_depth_guard():

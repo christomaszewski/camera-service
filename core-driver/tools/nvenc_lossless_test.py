@@ -8,6 +8,12 @@ bit-exact even though the codec is "lossless". Chroma subsampling is irrelevant 
 we drop chroma on decode and only compare the Y plane -- so a mismatch means a
 range/colorimetry scale (small systematic delta) or genuine corruption (large delta).
 
+GEOMETRY MATTERS: unpinned, GStreamer picks the YUV side's default colorimetry by height --
+limited range above 576 rows. A 512x512 run therefore passed while every 5 MP recording lost
+up to 3 codes per pixel. The default is a 5 MP class geometry; pass --geometry for the sensor's.
+The recorder now pins full range (formats.LUMA_COLORIMETRY, mirrored below) and replay re-asserts
+it on decode, so this checks the pin survives nvvidconv + NVENC.
+
 This pushes known, near-incompressible random GRAY8 frames through the EXACT recorder
 encode fragment (see cam_driver/recorder.py: build_recorder_description, hw-hevc-lossless),
 decodes them back to GRAY8, and compares byte-for-byte against the bytes we fed in.
@@ -16,8 +22,8 @@ Runs inside the core image WITH the NVENC CDI device (see docs/jetpack7-bringup.
     docker run --rm --device nvidia.com/gpu=all cam-core tools/nvenc_lossless_test.py
 (or via tools/nvenc_lossless_test.sh). Everything stays in the container's /tmp -- no
 bind mounts, no root-owned artefacts on the host. PASS => the HW path is mathematically
-lossless for 8-bit mono; FAIL with small systematic deltas => a full-range cap to add in
-the recorder's NV24 conversion.
+lossless for 8-bit mono; FAIL with small systematic deltas => the full-range pin did not
+survive nvvidconv/NVENC on this L4T (a range/colorimetry scale, not codec loss).
 """
 import argparse
 import os
@@ -25,8 +31,9 @@ import random
 import subprocess
 import sys
 
-W, H = 512, 512
-IMG = W * H                       # GRAY8 bytes/frame (matches the fake-camera geometry)
+W, H = 2448, 2048                 # 5 MP class GigE geometry (> 576 rows; see the docstring)
+IMG = W * H                       # GRAY8 bytes/frame
+LUMA_COLORIMETRY = "1:4:0:0"      # mirrors cam_driver/formats.py (this script runs standalone)
 IN, ENC, OUT = "/tmp/nv_in.raw", "/tmp/nv_enc.mkv", "/tmp/nv_out.raw"
 
 
@@ -35,26 +42,40 @@ def encode_argv():
     return ["gst-launch-1.0", "-q",
             "filesrc", f"location={IN}", "!",
             "rawvideoparse", "format=gray8", f"width={W}", f"height={H}", "framerate=25/1", "!",
-            "videoconvert", "!", "video/x-raw,format=NV24", "!",
+            "videoconvert", "!", f"video/x-raw,format=NV24,colorimetry={LUMA_COLORIMETRY}", "!",
             "nvvidconv", "!", "video/x-raw(memory:NVMM),format=NV24", "!",
             "nvv4l2h265enc", "enable-lossless=1", "maxperf-enable=1", "!",
             "h265parse", "!", "matroskamux", "!", "filesink", f"location={ENC}"]
 
 
 def decode_argv():
-    # Decode HEVC back to GRAY8 (drops chroma -> Y plane = the mono image we encoded).
+    # Decode HEVC back to GRAY8 (drops chroma -> Y plane = the mono image we encoded), re-asserting
+    # full range on the decoded caps the way replay does (sources/replay.py raw_decode_chain).
     return ["gst-launch-1.0", "-q",
             "filesrc", f"location={ENC}", "!", "matroskademux", "!",
-            "h265parse", "!", "avdec_h265", "!", "videoconvert", "!",
+            "h265parse", "!", "avdec_h265", "!",
+            "capssetter", f"caps=video/x-raw,colorimetry=(string){LUMA_COLORIMETRY}", "!", "videoconvert", "!",
             "video/x-raw,format=GRAY8", "!", "filesink", f"location={OUT}"]
 
 
 def main() -> int:
+    global W, H, IMG
     ap = argparse.ArgumentParser(description="bit-exact check for the HW HEVC-lossless recorder path")
-    ap.add_argument("--frames", type=int, default=60, help="number of random GRAY8 frames (default 60)")
-    n_in = ap.parse_args().frames
+    ap.add_argument("--frames", type=int, default=24, help="number of random GRAY8 frames (default 24)")
+    ap.add_argument("--geometry", help=f"WxH of the test frames (default {W}x{H}); use the sensor's")
+    args = ap.parse_args()
+    n_in = args.frames
     if n_in <= 0:
         ap.error("--frames must be positive")
+    if args.geometry:
+        try:
+            W, H = (int(v) for v in args.geometry.lower().split("x"))
+        except ValueError:
+            ap.error("--geometry must be WxH, e.g. 2448x2048")
+        if W <= 0 or H <= 0:
+            ap.error("--geometry must be positive")
+        IMG = W * H
+    print(f"geometry {W}x{H}, {n_in} frames")
 
     with open(IN, "wb") as f:                          # near-incompressible ground truth
         for i in range(n_in):

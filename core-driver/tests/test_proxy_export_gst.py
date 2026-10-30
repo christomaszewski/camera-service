@@ -160,7 +160,7 @@ def test_multi_session_proxy_preserves_stamps_geometry_selection_and_source_byte
         for prefix in ("early", "late"):
             path = output / "recordings" / "old_camera" / prefix
             header = json.loads(path.with_suffix(".json").read_text())
-            assert header["recording_encoder"] == "x264" and header["recording_lossy"] is True
+            assert header["recording_encoder"] == "x264" and header["recording_lossy"] is True and header["recording_colorimetry"] is None
             assert header["proxy"]["source_files"]
             with path.with_suffix(".csv").open() as stream, (camera / (prefix + ".csv")).open() as original_csv:
                 assert list(csv.DictReader(stream)) == list(csv.DictReader(original_csv))

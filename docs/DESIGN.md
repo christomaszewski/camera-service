@@ -75,11 +75,12 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
   x265 as an explicit (8-bit-only) CPU-temporal option. Encoder elements are **probed at build time**:
   a missing NVENC (x86 dev box, container without the L4T stack) falls back to FFV1 with a warning
   instead of failing the pipeline, and >8-bit through x265 falls back to FFV1 rather than silently
-  dropping sensor bits. A mono/Bayer mosaic rides in the Y plane of NV24; the Bayer pattern is
-  recorded in the sidecar for post-debayer. FFV1 is run **multi-threaded across slices** — single-
+  dropping sensor bits. A mono/Bayer mosaic rides in the Y plane of NV24, pinned to full range so the
+  conversion is a verbatim copy (`formats.LUMA_COLORIMETRY`; unpinned, GStreamer's default is limited
+  range above 576 rows); the pin and the Bayer pattern are recorded in the sidecar. FFV1 is run **multi-threaded across slices** — single-
   threaded it caps ~27 fps for 16-bit 640×512 on an Orin core, which stalled a 60 fps thermal recorder
-  until sliced. (NVENC lossless validated bit-exact on a JP7.2 Orin AGX — see
-  [jetpack7-bringup.md](jetpack7-bringup.md).)
+  until sliced. (NVENC lossless validated bit-exact on a JP7.2 Orin AGX at 512×512 — see
+  [jetpack7-bringup.md](jetpack7-bringup.md); at 2448×2048 on R39 with the full-range pin; JP6 pending.)
 
 - **Transport = shm + a 36-byte header (`application/x-cam-frame`).** GStreamer's `shmsink`/`shmsrc`
   transmit **only raw bytes** — PTS, DTS, and all `GstMeta` are dropped across the process boundary

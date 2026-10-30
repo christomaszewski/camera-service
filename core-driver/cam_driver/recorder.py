@@ -19,13 +19,15 @@ Encoders degrade by AVAILABILITY too: the launch-fragment elements are probed at
 encoder -- NVENC off-Jetson or in a container without the L4T stack, x265/libav not installed --
 falls back to FFV1 with a warning instead of killing the service inside Gst.parse_launch.
 
-Validated on a JetPack 7.2 Orin AGX (L4T r39.x, driver R595.78): the
-NV24/NVMM -> nvv4l2h265enc enable-lossless=1 path is BIT-EXACT for 8-bit mono --
-60/60 random-noise frames round-trip with worst |delta| = 0, and the encoded stream is
-1.32x raw (incompressible noise can't shrink, which is the proof it's truly lossless).
-The GRAY8 -> NV24 conversion keeps full range, so there's no [16,235] clamp. Re-verify
-after a JetPack bump (NVMM caps negotiation + the lossless enum are L4T-version-dependent):
-`tools/nvenc_lossless_test.sh` (or .py) with the NVENC CDI device.
+Bit-exactness needs more than a lossless codec: the mono/Bayer plane must also cross the
+GRAY8 -> NV24 (or -> I420) conversion verbatim. Those caps pin formats.LUMA_COLORIMETRY (full
+range). Unpinned, GStreamer gives the YUV side its height-based default, which is limited range above
+576 rows, and every recording taller than that lost up to 3 codes per pixel before NVENC/x265
+saw it. The JetPack 7.2 validation (60/60 noise frames exact, 1.32x raw) ran at 512x512 and so
+never reached that default. With the pin, an R39 Orin passes 24/24 noise frames at 2448x2048 (1.317x
+raw) where the unpinned path passes 0/24; JP6 is not yet validated. Validate at the sensor geometry:
+`tools/nvenc_lossless_test.sh` (or .py) with the NVENC CDI device, which defaults to 2448x2048.
+Re-verify after a JetPack bump (NVMM caps negotiation and the lossless enum are L4T-version-dependent).
 """
 from __future__ import annotations
 
@@ -35,9 +37,19 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
-from .formats import select_encoder
+from .formats import LUMA_COLORIMETRY, select_encoder
 
 log = logging.getLogger(__name__)
+
+# Encoders that carry a mono/Bayer plane in the Y plane of a YUV container.
+_LUMA_IN_YUV = ("hw-hevc-lossless", "x265-lossless")
+
+
+def luma_colorimetry(enc, is_color):
+    """The colorimetry pinned on the YUV container a mono/Bayer recording rides in, for the sidecar.
+    None when the plane never crosses a YUV conversion (ffv1, stream-copy, x264) or the source is
+    colour (its own colorimetry carries through)."""
+    return LUMA_COLORIMETRY if enc in _LUMA_IN_YUV and not is_color else None
 
 # nvv4l2h265enc preset-level enum (HW search depth: bigger = smaller lossless file, slower encode).
 _PRESET_LEVEL = {"disable": 0, "ultrafast": 1, "fast": 2, "medium": 3, "slow": 4}
@@ -185,6 +197,10 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
         # GOP/keyframe window; preset-level = HW search depth (bigger = smaller file, slower -- the lever
         # for archival size, but must sustain the frame rate); num-B-Frames only when asked (Xavier-only
         # on Tegra). Property names/lossless interplay are L4T-version-dependent.
+        # A mono/Bayer plane pins full range (formats.LUMA_COLORIMETRY) so videoconvert copies it into
+        # Y verbatim; colour keeps its own colorimetry.
+        luma = luma_colorimetry(enc, is_color)
+        nv24 = "video/x-raw,format=NV24" + (f",colorimetry={luma}" if luma else "")
         opts = f" maxperf-enable={1 if getattr(cfg, 'nvenc_maxperf', True) else 0}"
         level = _preset_level(getattr(cfg, "nvenc_preset", ""))
         if level is not None:
@@ -195,21 +211,22 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
             opts += f" num-B-Frames={bframes}"
         return (
             "queue max-size-buffers=12 name=rec_q ! "
-            f"{vconv} ! video/x-raw,format=NV24 ! "
+            f"{vconv} ! {nv24} ! "
             "nvvidconv ! video/x-raw(memory:NVMM),format=NV24 ! "
             f"nvv4l2h265enc enable-lossless=1{opts} ! h265parse ! " + sink
         ), enc
 
     if enc == "x265-lossless":
         # CPU lossless + temporal; 8-bit only (>8-bit fell back to ffv1 above). Throughput-limited
-        # at 4K. Mono/Bayer: pin I420 so the (mosaic) plane rides bit-exact in Y with neutral
-        # chroma -- unpinned, videoconvert is free to negotiate a format that munges the data.
-        # Color keeps the unpinned negotiation (use ffv1 for guaranteed-bit-exact color).
+        # at 4K. Mono/Bayer: pin I420 at full range so the (mosaic) plane rides bit-exact in Y with
+        # neutral chroma -- unpinned, videoconvert is free to negotiate a format or range that munges
+        # the data. Color keeps the unpinned negotiation (use ffv1 for guaranteed-bit-exact color).
         opts = "lossless=1"
         if gop:
             opts += f":keyint={gop}:min-keyint={gop}"
         opts += f":bframes={bframes}"
-        pin = "" if is_color else "video/x-raw,format=I420 ! "
+        luma = luma_colorimetry(enc, is_color)
+        pin = f"video/x-raw,format=I420,colorimetry={luma} ! " if luma else ""
         return (
             f"queue max-size-buffers=12 name=rec_q ! {vconv} ! {pin}"
             f'x265enc option-string="{opts}" speed-preset=ultrafast ! h265parse ! ' + sink

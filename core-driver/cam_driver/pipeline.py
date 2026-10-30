@@ -807,6 +807,7 @@ class CapturePipeline:
             replay_proxies=prov.get("replay_proxies"),
             recording_encoder=enc or None,
             recording_lossy=(enc == "x264") if enc not in (None, "", "stream-copy") else None,
+            recording_colorimetry=rec.luma_colorimetry(enc, self._is_color),
             recording_settings=x264_settings(cfg) if enc == "x264" else None,
             recording_settings_file=getattr(sess, "settings_path", None),
         )

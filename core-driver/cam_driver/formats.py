@@ -37,6 +37,14 @@ VALID_DECODERS = ("auto", "software")
 # as truncated. Legacy unsliced FFV1 also works, with no slice-level parallelism available.
 FFV1_DECODER = "avdec_ffv1 thread-type=slice"
 
+# A mono/Bayer plane recorded through a YUV container (hw-hevc-lossless rides it in NV24's Y plane,
+# x265-lossless in I420's) must cross `videoconvert` untouched, so the YUV side is pinned to full
+# range. Left unset, GStreamer picks that side's default colorimetry by HEIGHT -- limited-range
+# BT.709 above 576 rows -- and squeezes the 256 sensor codes into 220, dithered. Measured on 1.20.3,
+# 1.24.2 and 1.28.8: a 5 MP mosaic came back up to 3 codes off while the codec itself was lossless.
+# The recorder writes this into the sidecar (recording_colorimetry) and decoders re-assert it.
+LUMA_COLORIMETRY = "1:4:0:0"   # 0-255 range, BT.601 matrix, transfer/primaries unspecified
+
 # Encoded delivery (already-compressed sources: MJPEG USB, H.264/H.265 RTSP). Per codec:
 #   src_caps -- caps the source tags the encoded buffers with (= the recorder appsrc caps)
 #   parser   -- the recorder stream-copies through this into the muxer (no re-encode)

@@ -161,7 +161,7 @@ bench() {  # bench <label> <pipeline...>
 }
 line "## encode throughput ($FRAMES frames each, videotestsrc, wall clock incl. startup)"
 bench "h264 1080p NV12 nvv4l2h264enc" videotestsrc num-buffers="$FRAMES" pattern=smpte ! video/x-raw,format=NV12,width=1920,height=1080,framerate=60/1 ! nvvidconv ! 'video/x-raw(memory:NVMM),format=NV12' ! nvv4l2h264enc ! h264parse ! fakesink sync=false
-bench "hevc lossless 2048x1536 GRAY8->NV24 nvv4l2h265enc (recorder path)" videotestsrc num-buffers="$FRAMES" pattern=snow ! video/x-raw,format=GRAY8,width=2048,height=1536,framerate=30/1 ! videoconvert ! video/x-raw,format=NV24 ! nvvidconv ! 'video/x-raw(memory:NVMM),format=NV24' ! nvv4l2h265enc enable-lossless=1 maxperf-enable=1 ! h265parse ! fakesink sync=false
+bench "hevc lossless 2048x1536 GRAY8->NV24 nvv4l2h265enc (recorder path)" videotestsrc num-buffers="$FRAMES" pattern=snow ! video/x-raw,format=GRAY8,width=2048,height=1536,framerate=30/1 ! videoconvert ! video/x-raw,format=NV24,colorimetry=1:4:0:0 ! nvvidconv ! 'video/x-raw(memory:NVMM),format=NV24' ! nvv4l2h265enc enable-lossless=1 maxperf-enable=1 ! h265parse ! fakesink sync=false
 bench "h264 1080p encode + nvv4l2decoder round trip" videotestsrc num-buffers="$FRAMES" pattern=smpte ! video/x-raw,format=NV12,width=1920,height=1080,framerate=60/1 ! nvvidconv ! 'video/x-raw(memory:NVMM),format=NV12' ! nvv4l2h264enc ! h264parse ! nvv4l2decoder ! fakesink sync=false
 bench "h264 1080p x264enc ultrafast (software baseline)" videotestsrc num-buffers="$FRAMES" pattern=smpte ! video/x-raw,format=I420,width=1920,height=1080,framerate=60/1 ! x264enc speed-preset=ultrafast tune=zerolatency ! fakesink sync=false
 line ""

@@ -31,6 +31,7 @@ import numpy as np  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # so cam_driver imports
 from cam_driver import bayer_tile, recorder  # noqa: E402
+from cam_driver.sources.replay import raw_decode_chain  # noqa: E402
 
 ENCODERS = {  # cli name -> (recorder encoder, the gst element that must exist)
     "x265": ("x265-lossless", "x265enc"),
@@ -59,14 +60,15 @@ def _run_loop(pipeline, timeout_s=900):
     return err[0] if err else None
 
 
-def decode_mosaic(path, n, w, h, out_raw):
-    """Decode up to n frames; write the stride-corrected Y-plane mosaic to out_raw. Returns frame count."""
+def decode_mosaic(path, n, w, h, out_raw, header=None):
+    """Decode up to n frames; write the stride-corrected Y-plane mosaic to out_raw. Returns frame count.
+    `header` (the sidecar) carries recording_colorimetry, which the decode re-asserts to stay bit-exact."""
     Gst.init(None)
     cnt = [0]
     fo = open(out_raw, "wb")
     pipe = Gst.parse_launch(
-        f'filesrc location="{path}" ! matroskademux ! avdec_h265 ! videoconvert ! '
-        f'video/x-raw,format=GRAY8 ! fakesink name=fs sync=false')
+        f'filesrc location="{path}" ! matroskademux ! {raw_decode_chain("video/x-h265", header or {})} ! '
+        f'videoconvert ! video/x-raw,format=GRAY8 ! fakesink name=fs sync=false')
     fs = pipe.get_by_name("fs")
 
     def cb(_pad, info):
@@ -202,7 +204,7 @@ def main():
     if skipped:
         print(f"  (skipped encoders not in this image: {','.join(skipped)} -- run on the Orin for nvenc)")
     mosaic_src = os.path.join(a.work, "_source.raw")          # decoded mosaic (distinct from the 'mosaic' mode)
-    n = decode_mosaic(a.recording, a.frames, w, h, mosaic_src)
+    n = decode_mosaic(a.recording, a.frames, w, h, mosaic_src, meta)
     print(f"  decoded {n} mosaic frames ({w*h/1e6:.1f} MB/frame raw)\n")
 
     base_bytes = {}   # (encoder, preset) -> mosaic total bytes (for ratios)

@@ -9,7 +9,7 @@ Where the project is, what's validated, what's left, and how to resume. Pair wit
 |---|---|---|
 | **P0** | Scaffold + Docker (l4t-jetpack core; ubuntu dev image) | ✅ done |
 | **P1** | Timestamp spine — Aravis appsrc, PTP via `GevIEEE1588`, chunk `Timestamp`/`FrameID`, fallback ladder, sidecar CSV + JSON | ✅ done |
-| **P2** | Pluggable lossless recorder (HW HEVC-lossless / FFV1 / x265), `splitmuxsink` | ✅ done (FFV1 validated in containers; **NVENC validated bit-exact on a JP7.2 Orin AGX** — [jetpack7-bringup.md](jetpack7-bringup.md)) |
+| **P2** | Pluggable lossless recorder (HW HEVC-lossless / FFV1 / x265), `splitmuxsink` | ✅ done (FFV1 validated in containers; **NVENC validated bit-exact at 2448×2048 on an R39 Orin; JP6 pending** — [jetpack7-bringup.md](jetpack7-bringup.md)) |
 | **P3** | Transport (JP7 `unixfd` / JP6 shm+header, + optional raw endpoint), C++ `rclcpp` ros2-bridge (both consumers; raw + lazy compressed `Image`), per-sensor supervisor | ✅ done |
 | **P4** | **WebRTC** consumer (`webrtcsink`, lossy low-latency, remote viewing) | ✅ done (headless loopback validated in containers **and on an R39 Orin with HW NVENC**; browser viewing still to try; webrtcsink pins H.264 constrained-baseline ≤ gst-plugins-rs 0.15) |
 | **P5** | Hardening (reconnect, disk-full, NVENC session budget, NIC/PTP tuning) + on-Jetson / on-camera validation | ⏳ in progress — **source reconnect/backoff done** (GigE, USB hotplug, RTSP re-probe); **JP7 bring-up done**; disk-full + NVENC budget next |
@@ -61,8 +61,10 @@ shm both work.
 
 ## Validated on the Orin (hardware)
 
-- **NVENC HW lossless recorder** — bit-exact on a JP7.2 Orin AGX (60/60 frames, worst |Δ| = 0, 1.32× raw)
-  via `tools/nvenc_lossless_test.sh`; see [jetpack7-bringup.md](jetpack7-bringup.md). (8-bit only.)
+- **NVENC HW lossless recorder** — bit-exact on a JP7.2 Orin AGX at 512×512 (60/60 frames, worst |Δ| = 0,
+  1.32× raw) via `tools/nvenc_lossless_test.sh`; see [jetpack7-bringup.md](jetpack7-bringup.md). (8-bit only.)
+  That geometry missed the >576-row range squeeze; with the full-range pin, 24/24 frames are bit-exact at
+  2448×2048 on an R39 Orin. JP6 still needs its own run.
 - **RTSP source** against a real 4K H.265 camera (`core-driver/tools/orin_rtsp_validate.sh`,
   `orin_rtsp_transport_ab.sh`; example configs `config/rtsp-real*.yaml`, `config/sensors/cam_rtsp.yaml`).
 - **USB source** with a real UVC camera, including hotplug/hot-swap reconnect

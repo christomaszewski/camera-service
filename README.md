@@ -73,6 +73,10 @@ The recorder is **pluggable / capability-detecting**:
 | 8-bit + temporal, no NVENC | `x265-lossless` (set explicitly) | ✅ | ✅ | ❌ CPU |
 | 8-bit, lower CPU / configurable quality | `x264` (set explicitly) | ❌ lossy | ✅ | ❌ CPU |
 
+Bit-exact on the NVENC and x265 paths depends on the full-range pin added after v1.12.0: older
+recordings taller than 576 rows are a few codes off the sensor. See
+[8-bit lossless and the colour step](docs/recording-tuning.md#8-bit-lossless-and-the-colour-step).
+
 `auto` remains lossless/source-copy. See [H.264 recording settings](docs/recording-tuning.md#optional-h264-recording)
 for `x264_crf` quality and `x264_preset` speed controls.
 
@@ -276,11 +280,14 @@ For iteration, mount the code live so edits need no rebuild:
 
 ```bash
 # Decode back to raw frames
-ffmpeg -i cam-<stamp>-00000.mkv -f rawvideo -pix_fmt gray8 frames.raw      # 8-bit (Y plane = mosaic)
+ffmpeg -i cam-<stamp>-00000.mkv -vf extractplanes=y -pix_fmt gray8 -f rawvideo frames.raw   # 8-bit HEVC: Y plane = mosaic
+ffmpeg -i cam-<stamp>-00000.mkv -f rawvideo -pix_fmt gray8 frames.raw      # 8-bit FFV1
 ffmpeg -i cam-<stamp>-00000.mkv -f rawvideo -pix_fmt gray16le frames.raw   # 16-bit (Mono16 / thermal Y16)
 # Confirm bit-exact round trip
 ffmpeg -i cam-<stamp>-00000.mkv -i source.y4m -lavfi psnr -f null -        # expect psnr_avg:inf
 ```
+Use `extractplanes` for HEVC: a plain `-pix_fmt gray8` rescales Y unless the bitstream signals full
+range, and the recording's range lives in the sidecar (`recording_colorimetry`), not the stream.
 For raw Bayer recorded as gray, debayer using `bayer_pattern` from the JSON header after extraction.
 The JSON header records `bits_per_pixel`, so pick `gray8` vs `gray16le` from it.
 
@@ -423,8 +430,9 @@ file; `restart` records the data again from its start into the same session.
 - [x] **P0** project scaffold + container
 - [x] **P1** timestamp spine — custom Aravis appsrc, PTP via `GevIEEE1588`, chunk `Timestamp`/`FrameID`, fallback ladder, sidecar CSV + JSON
 - [x] **P2** pluggable lossless recorder (HW HEVC-lossless / FFV1 / x265) — software FFV1 validated in
-  containers; **NVENC HW lossless validated bit-exact on a JP7.2 Orin AGX** (60/60 random-noise frames,
-  worst |Δ| = 0, 1.32× raw — see [docs/jetpack7-bringup.md](docs/jetpack7-bringup.md))
+  containers; **NVENC HW lossless validated bit-exact on a JP7.2 Orin AGX at 512×512** (60/60
+  random-noise frames, worst |Δ| = 0, 1.32× raw — see [docs/jetpack7-bringup.md](docs/jetpack7-bringup.md)).
+  Above 576 rows it needs the full-range pin, validated at 2448×2048 on an R39 Orin; **JP6 is not yet validated**
 - [x] **P3** transport + consumers — shm publish (header endpoint + optional raw `video/x-raw`), the C++
   `rclcpp` **ros2-bridge** ([plugins/ros2-bridge](plugins/ros2-bridge); raw + lazy compressed `Image` with the
   capture time in `header.stamp`), and the config-driven **per-sensor supervisor**

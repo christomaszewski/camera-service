@@ -166,8 +166,9 @@ Follow [the hardware procedure](hardware-test-procedure.md),
 2. Exercise the real GigE and USB cameras at deployed formats/rates: discovery, chunk selectors,
    ChunkTimestamp/FrameID, PTP lock and timestamp provenance, packet loss and unplug/reconnect.
    Check recorded pixels, frame counts and sidecar alignment, including 16-bit/Bayer paths.
-3. Run `tools/nvenc_lossless_test.py --frames 60` inside the candidate core with the platform's
-   NVIDIA runtime/device arguments. Require all frames and bit-exact pixels. Separately validate
+3. Run `tools/nvenc_lossless_test.py --geometry <sensor WxH> --frames 60` inside the candidate core
+   with the platform's NVIDIA runtime/device arguments. Require all frames and bit-exact pixels. The
+   geometry matters: GStreamer's default colorimetry changes above 576 rows. Separately validate
    NVDEC, NVMM conversion and recordings at actual camera dimensions/rates.
 4. Test the dashboard in the browsers used on the vehicle, with real NVIDIA H.264 encoding,
    multiple viewers, reconnects and constrained network bandwidth. Verify congestion control
