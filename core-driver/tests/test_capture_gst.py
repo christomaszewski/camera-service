@@ -23,8 +23,8 @@ from gi.repository import Gst  # noqa: E402
 Gst.init(None)
 
 from cam_driver import transport  # noqa: E402
-from cam_driver.capture.encode import (EncodeError, JpegEncoder, pad_rows, scaled_size,  # noqa: E402
-                                       to_8bit)
+from cam_driver.capture.encode import (CPU_ELEMENT, EncodeError, JpegEncoder, pad_rows,  # noqa: E402
+                                       scaled_size, to_8bit)
 from cam_driver.capture.frames import Frame  # noqa: E402
 from cam_driver.capture.reader import (TransportReader, from_caps, from_header_bytes,  # noqa: E402
                                        select_endpoint, unixfd_socket)
@@ -109,8 +109,102 @@ def test_bad_settings_and_bad_frames_are_refused():
     enc = JpegEncoder()
     with pytest.raises(EncodeError, match="mosaic"):
         enc.encode(_frame("RGB", 4, 4, bytes(48), "rggb"))
-    with pytest.raises(EncodeError):
+    with pytest.raises(EncodeError, match="truncated"):
         enc.encode(_frame("GRAY8", 64, 48, b"\x00" * 10))           # far too short for its caps
+    enc.close()
+
+
+# ---- encoder backends ----------------------------------------------------------------------
+# nvjpegenc only exists on a Jetson, so the hardware PATH (I420 input, even-side crop, the probe, the
+# runtime fallback) is exercised with jpegenc standing in for it via the injectable element name.
+HW_STANDIN = "jpegenc"
+
+
+def test_cpu_is_used_when_asked_or_when_the_hardware_element_is_missing():
+    cpu = JpegEncoder(encoder="cpu", hw_element=HW_STANDIN)
+    assert not cpu.hardware and cpu.backend == CPU_ELEMENT and cpu.fallback is None
+    auto = JpegEncoder(encoder="auto", hw_element="nvjpegenc-not-here")
+    assert not auto.hardware and auto.fallback is None          # auto: no hardware is not a problem
+    hw = JpegEncoder(encoder="hw", hw_element="nvjpegenc-not-here")
+    assert not hw.hardware and "not available" in hw.fallback   # hw: say why it is not used
+    assert hw.describe() == {"backend": CPU_ELEMENT, "hardware": False, "requested": "hw",
+                             "fallback": hw.fallback, "quality": 90, "max_width": 0}
+    for e in (cpu, auto, hw):
+        e.close()
+    with pytest.raises(ValueError, match="jpeg_encoder"):
+        JpegEncoder(encoder="gpu")
+
+
+def test_a_hardware_element_that_fails_the_probe_is_not_used():
+    enc = JpegEncoder(encoder="auto", hw_element="identity")     # exists, but is no JPEG encoder
+    assert not enc.hardware and "probe failed" in enc.fallback
+    assert _decode(enc.encode(_frame("GRAY8", 16, 16, bytes(256))).jpeg)[:2] == (16, 16)
+    enc.close()
+
+
+@pytest.mark.parametrize("fmt, w, h, nbytes, bayer, out", [
+    ("GRAY8", 64, 48, 64 * 48, None, (64, 48)),
+    ("GRAY8", 65, 49, 65 * 49, None, (64, 48)),                 # odd sides cropped, not resampled
+    ("GRAY16_LE", 32, 24, 32 * 24 * 2, None, (32, 24)),
+    ("GRAY8", 64, 48, 64 * 48, "rggb", (64, 48)),
+    ("RGB", 33, 21, 33 * 21 * 3, None, (32, 20)),
+    ("NV12", 64, 48, 64 * 48 * 3 // 2, None, (64, 48)),
+])
+def test_the_hardware_path_feeds_even_sided_i420(fmt, w, h, nbytes, bayer, out):
+    enc = JpegEncoder(encoder="hw", hw_element=HW_STANDIN)
+    try:
+        assert enc.hardware and enc.backend == HW_STANDIN
+        res = enc.encode(_frame(fmt, w, h, bytes(nbytes), bayer))
+        assert (res.width, res.height) == out
+        dw, dh, dfmt = _decode(res.jpeg)
+        assert (dw, dh) == out and dfmt == "I420"               # colour JPEG even for mono input
+    finally:
+        enc.close()
+
+
+def test_the_hardware_path_downscales_to_even_sides():
+    enc = JpegEncoder(encoder="hw", hw_element=HW_STANDIN, max_width=40)
+    res = enc.encode(_frame("GRAY8", 129, 97, bytes(129 * 97)))
+    assert (res.width, res.height) == (40, 30) and _decode(res.jpeg)[:2] == (40, 30)
+    enc.close()
+
+
+def test_a_runtime_hardware_failure_moves_to_the_cpu_for_good(monkeypatch):
+    enc = JpegEncoder(encoder="auto", hw_element=HW_STANDIN)
+    assert enc.hardware
+    real = JpegEncoder._encode
+
+    def broken_hw(self, inp):
+        if self.hardware:
+            raise EncodeError("NVJPG engine hung")
+        return real(self, inp)
+
+    monkeypatch.setattr(JpegEncoder, "_encode", broken_hw)
+    res = enc.encode(_frame("GRAY8", 64, 48, bytes(64 * 48)))
+    assert (res.width, res.height) == (64, 48) and not enc.hardware
+    assert "failed at runtime: NVJPG engine hung" in enc.fallback
+    assert all(not key[0] for key in enc._pipes)                # the hardware pipelines are gone
+    enc.close()
+
+
+def test_a_truncated_frame_is_refused_before_either_encoder_sees_it():
+    enc = JpegEncoder(encoder="auto", hw_element=HW_STANDIN)
+    with pytest.raises(EncodeError, match="truncated frame: 10 bytes for GRAY8 64x48"):
+        enc.encode(_frame("GRAY8", 64, 48, b"\x00" * 10))
+    assert enc.hardware and enc.fallback is None
+    enc.close()
+
+
+def test_a_frame_neither_encoder_can_take_does_not_switch_encoders(monkeypatch):
+    enc = JpegEncoder(encoder="auto", hw_element=HW_STANDIN)
+
+    def always_fails(self, inp):
+        raise EncodeError("unencodable")
+
+    monkeypatch.setattr(JpegEncoder, "_encode", always_fails)
+    with pytest.raises(EncodeError, match="unencodable"):
+        enc.encode(_frame("GRAY8", 64, 48, bytes(64 * 48)))
+    assert enc.hardware and enc.fallback is None                # the frame's fault, not the encoder's
     enc.close()
 
 

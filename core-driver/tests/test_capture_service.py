@@ -34,6 +34,10 @@ _JPEG = b"\xFF\xD8" + b"\xFF\xDA\x00\x02" + b"img" + b"\xFF\xD9"
 
 class _Encoder:
     quality = 77
+    backend = "fake-jpeg"
+
+    def describe(self):
+        return {"backend": self.backend, "hardware": False}
 
     def __init__(self, fail=False):
         self.fail, self.calls = fail, 0
@@ -78,7 +82,8 @@ def test_settings_defaults_and_validation():
     for bad, match in [({"buffr_s": 1}, "unknown key"), ({"sinks": ["s3"]}, "sinks"), ({"sinks": []}, "sinks"),
                        ({"buffer_s": 0}, "buffer_s"), ({"wait_ms": -1}, "wait_ms"), ({"wait_ms": True}, "wait_ms"),
                        ({"queue": 0}, "queue"), ({"transport": "tcp"}, "transport"),
-                       ({"bayer_pattern": "rgbg"}, "bayer_pattern"), ({"tolerance_ms": -1}, "tolerance_ms")]:
+                       ({"bayer_pattern": "rgbg"}, "bayer_pattern"), ({"tolerance_ms": -1}, "tolerance_ms"),
+                       ({"jpeg_encoder": "gpu"}, "jpeg_encoder")]:
         with pytest.raises(ValueError, match=match):
             svc.CaptureSettings.from_params(bad)
 
@@ -100,6 +105,7 @@ def test_a_timed_capture_with_gps_writes_jpeg_with_exif_and_a_sidecar():
     assert jpeg.endswith(_JPEG[2:])                       # the image itself is untouched
     assert side["run_id"] == "run1" and side["instance"] == "cam_test" and side["vehicle_id"] == "7"
     assert side["frame"]["frame_id"] == 106 and side["image"]["quality"] == 77
+    assert side["image"]["encoder"] == "fake-jpeg"
     assert side["request"]["meta"] == {"leg": 2} and side["orientation"] == {"yaw_deg": 45, "pitch_deg": 1}
     assert side["gps"]["method"] == "extrapolated" and side["gps"]["msl_alt_m"] == 5.0
     assert side["gps"]["applied"]["lat"] < 10.0           # moved 3 ms south (the frame is earlier)
@@ -159,6 +165,7 @@ def test_descriptor_and_observers():
     assert d["service"] == "frame-capture" and d["buffer"]["frames"] == 10 and d["captures"] == 1
     assert d["time"] == {"basis": "auto", "scale": "auto", "tai_offset_s": 37}
     assert d["sinks"] == [{"name": "mem"}] and len(events) == 1
+    assert d["encoder"] == {"backend": "fake-jpeg", "hardware": False}
 
 
 # ---- sinks ---------------------------------------------------------------------------------
@@ -441,7 +448,7 @@ def test_build_wires_everything_from_the_sensor_config(monkeypatch):
         assert zenoh_sink.prefix == "fleet/9/store/R1/cam_a/keyframes"
         assert reader.bayer_hint == "rggb" and reader.plugin_socket.endswith("sock/frames")
         assert control.key_base == "fleet/9/svc/cam_a/capture" and service.ring.span_ns == 1_500_000_000
-        assert service.encoder.quality == 70
+        assert service.encoder.quality == 70 and service.encoder.requested == "auto"
         service.encoder.close()
 
 

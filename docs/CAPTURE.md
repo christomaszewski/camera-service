@@ -29,6 +29,7 @@ All parameters, with defaults:
 | `tolerance_ms` | one frame interval | How far the chosen frame may be from the requested time (measured from the stream; 50 ms until known) |
 | `wait_ms` | `250` | How long a request may wait for its frame to come through the pipeline |
 | `quality` | `90` | JPEG quality, 1–100 |
+| `jpeg_encoder` | `auto` | `auto` (the Jetson's hardware `nvjpegenc` when it is present and passes a startup probe, else CPU `jpegenc`), `hw` (the same, but a missing or failing hardware encoder is reported as a fallback), `cpu` |
 | `max_width` | `0` | Downscale to this width (keeping the aspect ratio); `0` = full size |
 | `mono16` | `stretch` | 16-bit → 8-bit: `stretch` (0.5–99.5 percentile range → 0–255) or `shift` (the high byte) |
 | `bayer_pattern` | `auto` | CFA pattern of a mono plane: `auto` (`recording.bayer_pattern`, else the source's `pixel_format`), `none`, or `rggb`/`grbg`/`gbrg`/`bggr` |
@@ -161,8 +162,26 @@ enough for overlap decisions, and it switches to real capture times by itself on
 
 JPEG is 8-bit, so 16-bit mono (a thermal core's Y16) is scaled by `mono16` first, and a CFA mosaic
 is demosaiced (`bayer2rgb`). JP7 advertises an 8-bit mosaic as `video/x-bayer`. On JP6, and for
->8-bit mosaics, the pattern comes from `bayer_pattern`. Encoding is CPU `jpegenc`: captures are
-occasional, and a 640×480 encode takes ~20 ms on an Orin core.
+>8-bit mosaics, the pattern comes from `bayer_pattern`. A frame shorter than its geometry is
+refused (`encode_failed`) rather than encoded from garbage.
+
+**Encoder.** With `jpeg_encoder: auto` the plugin uses the Jetson's hardware JPEG encoder
+(`nvjpegenc`, from NVIDIA's L4T GStreamer plugins: in the JP6 image's L4T layer, injected by CDI on
+JP7) when the element exists **and** encodes a 16×16 probe frame at startup; otherwise the CPU
+`jpegenc`. The hardware encoder is fed system-memory I420, so a mono camera's JPEG is a colour JPEG
+of a grey image, and an odd-sized frame loses its last column / row (cropped, not resampled; a
+`max_width` downscale is already even). One encoder is chosen per process: NVIDIA's libjpeg
+replacement and the stock libjpeg have been reported to clash when both are loaded in one process,
+so the CPU encoder is only loaded beside the hardware one after the hardware one has failed. If the
+hardware encoder fails on a frame at runtime, that frame is retried on the CPU and the plugin stays
+on the CPU for the life of the process. The descriptor's `encoder` block (`backend`, `hardware`,
+`requested`, `fallback`) and each sidecar's `image.encoder` say which encoder was used.
+
+`tools/jpeg_encode_benchmark.py` compares the two on a host, per frame size, each in its own process
+(wall and CPU ms per frame). Run it on the Orin before relying on either: the hardware encoder takes
+the work off the CPU, but the repo's own measurement of the hardware JPEG *decoder* found it slower
+than the CPU at 720p because of the memory round trip, and small frames may behave the same way.
+`jpeg_encoder: cpu` opts out.
 
 ## EXIF
 
@@ -200,7 +219,7 @@ The sidecar:
   "run_id": "20261108T140000Z_flight1",
   "frame":   { "frame_id": …, "utc_ns": …, "basis": "capture", "stamp_ns": …, "stamp_source": …,
                "arrival_ns": …, "format": "GRAY8", "bayer": null, "width": …, "height": … },
-  "image":   { "file": "<utc_ns>.jpg", "width": …, "height": …, "quality": 90, "bytes": … },
+  "image":   { "file": "<utc_ns>.jpg", "width": …, "height": …, "quality": 90, "encoder": "nvjpegenc", "bytes": … },
   "request": { "stamp_ns": …, "tag": "overlap", "id": …, "meta": { … } },
   "match":   { "dt_ms": 1.5 },
   "gps":     { "given": { … }, "applied": { … }, "method": "extrapolated", "dt_ms": 5.0, "msl_alt_m": 310.2 },
@@ -211,8 +230,8 @@ The sidecar:
 ## Descriptor and events
 
 The descriptor (`get .../capture`) reports the buffer (frames, bytes, oldest/newest match time,
-measured frame interval, current basis), the reader (transport, connected, frames, errors), the time
-settings, the default tolerance and wait, each sink (with the store's state: `present`, `absent`,
+measured frame interval, current basis), the reader (transport, connected, frames, errors), the
+encoder (backend, hardware, requested, fallback), the time settings, the default tolerance and wait, each sink (with the store's state: `present`, `absent`,
 `no_run`, `no_session`), and counts with the last successful reply. `.../capture/events` publishes
 each successful reply with `instance` added.
 
@@ -221,12 +240,14 @@ each successful reply with `instance` added.
 - Focal length and other camera-model EXIF, once a camera calibration block exists.
 - Pitch and roll in XMP (e.g. Pix4D's `Camera:Yaw/Pitch/Roll`) for photogrammetry tools.
 - A lossless 16-bit output (PNG/TIFF) for radiometric thermal frames.
-- The Jetson hardware JPEG encoder.
+- The hardware encoder has not been run on a Jetson yet: its CI coverage uses `jpegenc` standing in
+  for `nvjpegenc` (same I420 input, crop, probe and fallback logic).
 
 ## Testing
 
 `core-driver/tests/test_capture_*.py`: time normalization, the buffer and selection, request
-parsing and GPS extrapolation, EXIF parsed back, the encoder on every input shape, the reader
+parsing and GPS extrapolation, EXIF parsed back, the encoder on every input shape and the hardware
+path's selection, probe and fallback (with a stand-in element), the reader
 against real shm and unixfd producers (including a producer restart), the request pipeline and
 sinks, and the Zenoh adapter against fakes and against a real Zenoh session with a subscriber
 standing in for the store. `core-driver/config/capture-fake.yaml` runs the plugin on the Aravis

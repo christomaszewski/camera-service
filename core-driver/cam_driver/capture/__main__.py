@@ -73,7 +73,7 @@ def build(config_path: str, plugin: str):
                         max_age_ns=int(s.max_latency_ms * 1e6),
                         playback=cfg.camera.type in ("replay", "pcap"))
     service = CaptureService(s, FrameRing(s.buffer_s, int(s.buffer_max_mb * 1024 * 1024)), timebase,
-                             JpegEncoder(s.quality, s.max_width, s.mono16), sinks,
+                             JpegEncoder(s.quality, s.max_width, s.mono16, encoder=s.jpeg_encoder), sinks,
                              instance=instance, vehicle=vehicle, run_id=run_id)
     reader = TransportReader(cfg.transport.plugin_endpoint.socket_path, service.on_delivery,
                              prefer=s.transport, bayer_hint=bayer_hint(cfg, s.bayer_pattern))
@@ -81,8 +81,9 @@ def build(config_path: str, plugin: str):
     control = ZenohCapture(service, capture_key(vehicle, instance),
                            zenoh_connect_endpoints(cfg.control.zenoh_connect), queue_size=s.queue,
                            store_sinks=store_sinks)
-    log.info("frame-capture: instance=%s run=%s sinks=%s buffer=%gs time=%s/%s",
-             instance, run_id or "-", [x.describe() for x in sinks], s.buffer_s, s.time_basis, s.time_scale)
+    log.info("frame-capture: instance=%s run=%s sinks=%s buffer=%gs time=%s/%s encoder=%s",
+             instance, run_id or "-", [x.describe() for x in sinks], s.buffer_s, s.time_basis, s.time_scale,
+             service.encoder.backend)
     return service, reader, control
 
 

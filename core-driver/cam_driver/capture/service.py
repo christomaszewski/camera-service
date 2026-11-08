@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
 from . import exif
+from .encode import JPEG_ENCODERS
 from .frames import Frame, FrameRing
 from .reader import TRANSPORTS, Delivered
 from .request import CaptureRequest, RequestError, fix_at, parse_request
@@ -47,6 +48,7 @@ class CaptureSettings:
     wait_ms: float = 250.0
     quality: int = 90
     max_width: int = 0
+    jpeg_encoder: str = "auto"             # auto | hw | cpu (encode.JPEG_ENCODERS)
     mono16: str = "stretch"
     bayer_pattern: str = "auto"            # auto | none | rggb | grbg | gbrg | bggr
     time_basis: str = "auto"               # auto | capture | arrival
@@ -81,6 +83,9 @@ class CaptureSettings:
             raise ValueError(f"frame-capture params.tolerance_ms: expected >= 0, got {s.tolerance_ms!r}")
         if not isinstance(s.queue, int) or isinstance(s.queue, bool) or s.queue < 1:
             raise ValueError(f"frame-capture params.queue: expected an integer >= 1, got {s.queue!r}")
+        if s.jpeg_encoder not in JPEG_ENCODERS:
+            raise ValueError(f"frame-capture params.jpeg_encoder: expected one of {JPEG_ENCODERS}, "
+                             f"got {s.jpeg_encoder!r}")
         if s.transport not in TRANSPORTS:
             raise ValueError(f"frame-capture params.transport: expected one of {TRANSPORTS}, got {s.transport!r}")
         s.bayer_pattern = str(s.bayer_pattern or "auto").lower()
@@ -193,7 +198,8 @@ class CaptureService:
                       "stamp_ns": frame.stamp_ns, "stamp_source": frame.source, "arrival_ns": frame.arrival_ns,
                       "format": frame.fmt, "bayer": frame.bayer, "width": frame.width, "height": frame.height},
             "image": {"file": base + ".jpg", "width": enc.width, "height": enc.height,
-                      "quality": getattr(self.encoder, "quality", None), "bytes": len(jpeg)},
+                      "quality": getattr(self.encoder, "quality", None),
+                      "encoder": getattr(self.encoder, "backend", None), "bytes": len(jpeg)},
             "request": req.to_dict(),
             "match": {"dt_ms": dt_ms},
             "gps": None if req.gps is None else {
@@ -223,6 +229,7 @@ class CaptureService:
                        "interval_ms": (round(self.ring.interval_ns() / 1e6, 3)
                                        if self.ring.interval_ns() else None)},
             "reader": self.reader.describe() if self.reader is not None else None,
+            "encoder": self.encoder.describe() if hasattr(self.encoder, "describe") else None,
             "time": {"basis": self.timebase.basis, "scale": self.timebase.scale,
                      "tai_offset_s": self.timebase.tai_offset_ns // 1_000_000_000},
             "defaults": {"tolerance_ms": round(self.default_tolerance_ns() / 1e6, 3),
