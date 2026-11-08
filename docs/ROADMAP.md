@@ -135,6 +135,12 @@ shm both work.
   Compose projects; shm shared as an external named volume + `ipc:host` (not pod-scoped). No generated
   compose. Podman/pods rejected (would wall off the shm). `service:` tag reserved for a future fleet launcher.
 - Zenoh kept as the future data-fabric transport (swappable in).
+- Triggered keyframe capture = an in-image `frame-capture` plugin (docs/CAPTURE.md), not core code:
+  a short buffer of transport frames, `fleet/<vehicle>/svc/<instance>/capture/request` picks the frame
+  nearest a UTC time and writes JPEG + GPS EXIF + JSON sidecar into the run (and, opt-in, the vehicle
+  store's `fleet/<vehicle>/store/<run>/**` keys). WHEN to capture (overlap, distance) is a separate
+  policy node's job. Frames are matched per frame by plausibility -- UTC, TAI, or (an unlocked GigE
+  counter) the plugin's receipt time -- because neither endpoint carries the PTP lock state.
 - Lifecycle = `inactive`/`active` (ROS-lifecycle naming); the recorder is a per-SESSION `Gst.Pipeline`
   (private appsrc, own prefix/sidecar, delta drop counters; process PTS base untouched; H.26x sessions
   gate on a keyframe) — never a removable tee bin. Synchronous bounded finalize inside the stop budget.

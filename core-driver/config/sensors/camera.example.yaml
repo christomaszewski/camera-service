@@ -194,3 +194,16 @@ plugins:
   #   params:
   #     topic: image_raw
   #     # frame_id: my_frame
+
+  # - name: frame-capture  # JPEG (+ GPS EXIF + JSON sidecar) of the frame nearest a requested time, on a
+  #   enabled: true        #   trigger over zenoh at fleet/<vehicle>/svc/<instance>/capture/request
+  #   isolation: process   #   (docs/CAPTURE.md). Runs in this image beside the core; no extra container.
+  #   params:
+  #     buffer_s: 2.0          # recent video kept to choose from (also capped by buffer_max_mb: 256)
+  #     # tolerance_ms: 40     # nearest frame must be within this; default = one frame interval
+  #     # wait_ms: 250         # how long a trigger may wait for its frame to come through
+  #     # quality: 90          # JPEG quality; max_width: 0 = full size (else downscale to this width)
+  #     # mono16: stretch      # 16-bit -> 8-bit: stretch (0.5-99.5 percentile) | shift (high byte)
+  #     # time_basis: auto     # auto | capture | arrival -- see docs/CAPTURE.md "Time"
+  #     # time_scale: auto     # auto | utc | tai -- what PTP-sourced stamps are
+  #     sinks: [file]          # file = <recordings>/keyframes/ in the run; zenoh = the vehicle store
