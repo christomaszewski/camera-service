@@ -88,3 +88,16 @@ plugins:
       # NO GST_PLUGIN_FEATURE_RANK here on purpose: at 640x512 software x264 is trivial, and forcing the
       # JP6 NVENC path (unvalidated on this host) buys nothing. Add the rank only on big streams (cam_rtsp).
       VIDEO_CAPS: video/x-h264
+
+  # - name: frame-capture  # georeferenced keyframes on a zenoh trigger (docs/CAPTURE.md), for mapping
+  #   enabled: true        #   tools like Pix4D: a radiometric 16-bit TIFF (raw values, unscaled) plus a
+  #   isolation: process   #   fixed-range JPEG preview, both with GPS EXIF + Pix4D XMP
+  #   params:
+  #     formats: [tiff, jpeg]
+  #     mono16: fixed            # the same raw value -> the same grey in every JPEG (a mosaic needs that)
+  #     mono16_range: [27315, 32315]   # e.g. 0..50 C if the core outputs kelvin x 100 (TLinear)
+  #     camera_make: FLIR        # <-- your core
+  #     camera_model: Boson 640
+  #     focal_length_mm: 9.1     # <-- your lens
+  #     pixel_pitch_um: 12.0
+  #     band_name: LWIR

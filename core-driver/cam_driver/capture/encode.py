@@ -2,8 +2,10 @@
 
 JPEG is 8-bit, so frames are brought to 8 bits first:
   * 16-bit mono (GRAY16_LE/BE, e.g. a thermal core's Y16) -> GRAY8 by `mono16`: `stretch` (default;
-    the 0.5-99.5 percentile range mapped to 0-255 -- a raw thermal frame's narrow band would
-    otherwise be black) or `shift` (the high byte, a fixed linear map);
+    each frame's 0.5-99.5 percentile range mapped to 0-255 -- a raw thermal frame's narrow band would
+    otherwise be black), `fixed` (one configured raw range for every frame, so frames stay
+    comparable) or `shift` (the high byte). The values themselves survive only in the TIFF
+    format (tiff.py);
   * a CFA mosaic (8-bit, or 16-bit scaled as above) -> demosaiced by `bayer2rgb`;
   * everything else -> `videoconvert` into whatever the encoder takes.
 Optionally downscaled to `max_width`. One small pipeline per input shape is built on first use and
@@ -34,7 +36,7 @@ from .frames import Frame
 
 log = logging.getLogger(__name__)
 
-MONO16_MODES = ("stretch", "shift")
+MONO16_MODES = ("stretch", "shift", "fixed")
 JPEG_ENCODERS = ("auto", "hw", "cpu")
 HW_ELEMENT = "nvjpegenc"
 CPU_ELEMENT = "jpegenc"
@@ -53,20 +55,28 @@ class Encoded:
     height: int
 
 
-def to_8bit(data: bytes, fmt: str, width: int, height: int, mode: str = "stretch") -> bytes:
+def to_8bit(data: bytes, fmt: str, width: int, height: int, mode: str = "stretch",
+            value_range: Optional[Tuple[int, int]] = None) -> bytes:
     """A 16-bit mono plane as tightly packed 8-bit samples (also used for a 16-bit CFA mosaic, where
-    one global map keeps the colour balance)."""
+    one global map keeps the colour balance). `stretch` maps each frame's own 0.5-99.5 percentile
+    range, so brightness is NOT comparable between frames; `fixed` maps `value_range` the same way
+    for every frame (what a mosaic of several frames needs); `shift` keeps the high byte."""
     import numpy as np
     dtype = "<u2" if fmt == "GRAY16_LE" else ">u2"
     stride = len(data) // (2 * height) if height else width
     arr = np.frombuffer(data, dtype=dtype, count=stride * height).reshape(height, stride)[:, :width]
     if mode == "shift":
         return (arr >> 8).astype(np.uint8).tobytes()
-    lo, hi = np.percentile(arr, (0.5, 99.5))
+    if mode == "fixed":
+        if value_range is None:
+            raise ValueError("mono16: fixed needs mono16_range [lo, hi]")
+        lo, hi = value_range
+    else:
+        lo, hi = np.percentile(arr, (0.5, 99.5))
     if hi <= lo:
         hi = lo + 1
     scaled = (arr.astype(np.float32) - lo) * (255.0 / (hi - lo))
-    return np.clip(scaled, 0, 255).astype(np.uint8).tobytes()
+    return np.clip(np.rint(scaled), 0, 255).astype(np.uint8).tobytes()
 
 
 def _round4(n: int) -> int:
@@ -93,18 +103,22 @@ def scaled_size(width: int, height: int, max_width: int) -> Tuple[int, int]:
 
 class JpegEncoder:
     def __init__(self, quality: int = 90, max_width: int = 0, mono16: str = "stretch",
-                 timeout_s: float = 5.0, encoder: str = "auto", hw_element: str = HW_ELEMENT):
+                 timeout_s: float = 5.0, encoder: str = "auto", hw_element: str = HW_ELEMENT,
+                 mono16_range: Optional[Tuple[int, int]] = None):
         if not 1 <= int(quality) <= 100:
             raise ValueError(f"quality: expected 1..100, got {quality!r}")
         if int(max_width) < 0:
             raise ValueError(f"max_width: must be >= 0, got {max_width!r}")
         if mono16 not in MONO16_MODES:
             raise ValueError(f"mono16: expected one of {MONO16_MODES}, got {mono16!r}")
+        if mono16 == "fixed" and not mono16_range:
+            raise ValueError("mono16: fixed needs mono16_range [lo, hi]")
         if encoder not in JPEG_ENCODERS:
             raise ValueError(f"jpeg_encoder: expected one of {JPEG_ENCODERS}, got {encoder!r}")
         self.quality = int(quality)
         self.max_width = int(max_width)
         self.mono16 = mono16
+        self.mono16_range = tuple(mono16_range) if mono16_range else None
         self.timeout_ns = int(timeout_s * Gst.SECOND)
         self.requested = encoder
         self.hw_element = hw_element      # injectable so the hardware path is testable off-Jetson
@@ -158,7 +172,7 @@ class JpegEncoder:
         if w <= 0 or h <= 0 or len(data) < need:
             raise EncodeError(f"truncated frame: {len(data)} bytes for {fmt} {w}x{h} (needs {need})")
         if fmt in ("GRAY16_LE", "GRAY16_BE"):
-            data, fmt = to_8bit(data, fmt, w, h, self.mono16), "GRAY8"
+            data, fmt = to_8bit(data, fmt, w, h, self.mono16, self.mono16_range), "GRAY8"
         if frame.bayer:
             if fmt != "GRAY8":
                 raise EncodeError(f"a {frame.bayer} mosaic must be 8 or 16 bit mono, got {fmt}")

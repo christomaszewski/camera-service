@@ -59,8 +59,8 @@ class _Sink:
     def describe(self):
         return {"name": self.name}
 
-    def write(self, base, jpeg, sidecar):
-        self.writes.append((base, jpeg, json.loads(sidecar)))
+    def write(self, base, files, sidecar):
+        self.writes.append((base, {ext: data for ext, data, _mime in files}, json.loads(sidecar)))
         return {"ok": True, "where": base} if self.ok else {"ok": False, "error": "write_failed"}
 
 
@@ -83,7 +83,12 @@ def test_settings_defaults_and_validation():
                        ({"buffer_s": 0}, "buffer_s"), ({"wait_ms": -1}, "wait_ms"), ({"wait_ms": True}, "wait_ms"),
                        ({"queue": 0}, "queue"), ({"transport": "tcp"}, "transport"),
                        ({"bayer_pattern": "rgbg"}, "bayer_pattern"), ({"tolerance_ms": -1}, "tolerance_ms"),
-                       ({"jpeg_encoder": "gpu"}, "jpeg_encoder")]:
+                       ({"jpeg_encoder": "gpu"}, "jpeg_encoder"), ({"formats": ["png"]}, "formats"),
+                       ({"formats": []}, "formats"), ({"mono16": "log"}, "mono16"),
+                       ({"mono16": "fixed"}, "mono16_range"), ({"mono16_range": [5, 5]}, "mono16_range"),
+                       ({"mono16_range": [0, 70000]}, "mono16_range"), ({"camera_make": "Fl\u00efr"}, "camera_make"),
+                       ({"camera_model": ""}, "camera_model"), ({"focal_length_mm": 0}, "focal_length_mm"),
+                       ({"pixel_pitch_um": "12"}, "pixel_pitch_um"), ({"exif_altitude": "agl"}, "exif_altitude")]:
         with pytest.raises(ValueError, match=match):
             svc.CaptureSettings.from_params(bad)
 
@@ -100,12 +105,15 @@ def test_a_timed_capture_with_gps_writes_jpeg_with_exif_and_a_sidecar():
         "orientation": {"yaw_deg": 45, "pitch_deg": 1}}).encode())
     assert reply["ok"] and reply["id"] == "r1" and reply["frame_id"] == 106 and reply["dt_ms"] == -3.0
     assert reply["gps"] == "extrapolated" and reply["basis"] == "capture" and reply["stamp_source"] == "system"
-    base, jpeg, side = sink.writes[0]
+    base, files, side = sink.writes[0]
+    jpeg = files["jpg"]
     assert base == f"{reply['frame_stamp_ns']:019d}" and jpeg.startswith(b"\xFF\xD8\xFF\xE1")
     assert jpeg.endswith(_JPEG[2:])                       # the image itself is untouched
+    assert reply["formats"] == ["jpeg"] and "warnings" not in reply
     assert side["run_id"] == "run1" and side["instance"] == "cam_test" and side["vehicle_id"] == "7"
-    assert side["frame"]["frame_id"] == 106 and side["image"]["quality"] == 77
-    assert side["image"]["encoder"] == "fake-jpeg"
+    assert side["frame"]["frame_id"] == 106 and side["images"]["jpeg"]["quality"] == 77
+    assert side["images"]["jpeg"]["encoder"] == "fake-jpeg" and side["camera"] is None
+    assert b"pix4d.com/camera/1.0/" in jpeg and b'Camera:Yaw="45"' in jpeg and b'Camera:Pitch="1"' in jpeg
     assert side["request"]["meta"] == {"leg": 2} and side["orientation"] == {"yaw_deg": 45, "pitch_deg": 1}
     assert side["gps"]["method"] == "extrapolated" and side["gps"]["msl_alt_m"] == 5.0
     assert side["gps"]["applied"]["lat"] < 10.0           # moved 3 ms south (the frame is earlier)
@@ -168,15 +176,74 @@ def test_descriptor_and_observers():
     assert d["encoder"] == {"backend": "fake-jpeg", "hardware": False}
 
 
+def _service16(formats, fmt="GRAY16_LE", bayer=None, **settings):
+    """A service holding one 16-bit (or `fmt`) frame, configured for `formats`."""
+    import numpy as np
+    sink = _Sink()
+    st = svc.CaptureSettings(wait_ms=0, formats=formats, **settings)
+    s = svc.CaptureService(st, FrameRing(2.0), TimeBase(), _Encoder(), [sink], instance="cam_thermal",
+                           vehicle="7", run_id="run1")
+    now = time.time_ns()
+    if fmt.startswith("GRAY16"):
+        data = (np.arange(8 * 4) + 29000).astype("<u2" if fmt.endswith("LE") else ">u2").tobytes()
+    else:
+        data = bytes(8 * 4 * 3)
+    s.on_delivery(Delivered(1, now - 5 * MS, "sof", fmt, 8, 4, bayer, data, now))
+    return s, sink
+
+
+def test_thermal_frames_can_be_written_as_a_radiometric_tiff_beside_the_jpeg():
+    s, sink = _service16(["jpeg", "tiff"], camera_make="FLIR", camera_model="Boson 640",
+                         focal_length_mm=9.1, pixel_pitch_um=12.0, band_name="LWIR")
+    reply = s.handle_payload(json.dumps({"gps": {"lat": 1.0, "lon": 2.0, "h_acc_m": 0.5, "v_acc_m": 0.8},
+                                         "orientation": {"yaw_deg": 10, "pitch_deg": 0}}).encode())
+    assert reply["ok"] and reply["formats"] == ["jpeg", "tiff"]
+    _base, files, side = sink.writes[0]
+    tif = files["tif"]
+    assert tif[:4] == b"II*\x00" and b"Boson 640" in tif and b"pix4d.com/camera/1.0/" in tif
+    assert tif[8:8 + 64] == (__import__("numpy").arange(32, dtype="<u2") + 29000).tobytes()   # raw values
+    assert side["images"]["tiff"] == {"file": side["images"]["jpeg"]["file"][:-3] + "tif", "width": 8,
+                                      "height": 4, "bits": 16, "bytes": len(tif)}
+    assert side["camera"] == {"make": "FLIR", "model": "Boson 640", "focal_length_mm": 9.1, "pixel_pitch_um": 12.0}
+    assert b"Camera:GPSXYAccuracy=\"0.5\"" in files["jpg"] and b"<rdf:li>LWIR</rdf:li>" in files["jpg"]
+
+
+def test_a_big_endian_16_bit_frame_is_stored_little_endian():
+    s, sink = _service16(["tiff"], fmt="GRAY16_BE")
+    assert s.handle_payload(None)["ok"]
+    tif = sink.writes[0][1]["tif"]
+    assert tif[8:10] == (29000).to_bytes(2, "little") and "jpg" not in sink.writes[0][1]
+
+
+def test_tiff_needs_a_mono_plane():
+    s, sink = _service16(["jpeg", "tiff"], fmt="RGB")
+    reply = s.handle_payload(None)
+    assert reply["ok"] and reply["formats"] == ["jpeg"] and "tiff skipped" in reply["warnings"][0]
+    s, sink = _service16(["tiff"], fmt="RGB")
+    reply = s.handle_payload(None)
+    assert not reply["ok"] and reply["error"] == "unsupported_format" and not sink.writes
+    s, sink = _service16(["tiff"], fmt="GRAY16_LE", bayer="rggb")
+    assert s.handle_payload(None)["error"] == "unsupported_format"     # a mosaic is not a radiometric image
+
+
+def test_ellipsoid_altitude_mode_reaches_the_exif_and_the_sidecar():
+    s, sink = _service16(["jpeg"], exif_altitude="ellipsoid")
+    assert s.handle_payload(json.dumps({"gps": {"lat": 1.0, "lon": 2.0, "alt_m": 100.0}}).encode())["ok"]
+    side = sink.writes[0][2]
+    assert side["gps"]["exif_altitude"] == "ellipsoid" and side["gps"]["ellipsoid_alt_m"] == 100.0
+    assert side["gps"]["msl_alt_m"] is None
+
+
 # ---- sinks ---------------------------------------------------------------------------------
 def test_file_sink_writes_both_files_atomically():
     with tempfile.TemporaryDirectory() as d:
         sink = FileSink(os.path.join(d, "rec", "keyframes"))
-        r = sink.write("0001", b"jpeg", b"{}")
+        r = sink.write("0001", [("jpg", b"jpeg", "image/jpeg"), ("tif", b"tiff", "image/tiff")], b"{}")
         assert r["ok"] and open(r["jpg"], "rb").read() == b"jpeg" and open(r["json"], "rb").read() == b"{}"
-        assert sorted(os.listdir(sink.directory)) == ["0001.jpg", "0001.json"]       # no temp files left
+        assert open(r["tif"], "rb").read() == b"tiff"
+        assert sorted(os.listdir(sink.directory)) == ["0001.jpg", "0001.json", "0001.tif"]   # no temp files
         blocked = FileSink(os.path.join(r["jpg"], "sub"))                            # a FILE in the way
-        assert blocked.write("x", b"", b"")["error"] == "write_failed"
+        assert blocked.write("x", [], b"")["error"] == "write_failed"
 
 
 def test_run_id_and_store_prefix():
@@ -226,20 +293,22 @@ class _StoreSession:
 
 
 def test_zenoh_sink_states_and_puts():
-    assert ZenohStoreSink(None).write("b", b"j", b"m")["error"] == "no_run"
+    jpg = [("jpg", b"j", "image/jpeg")]
+    assert ZenohStoreSink(None).write("b", jpg, b"m")["error"] == "no_run"
     sink = ZenohStoreSink("fleet/7/store/run1/cam/keyframes")
-    assert sink.describe()["store"] == "no_session" and sink.write("b", b"j", b"m")["error"] == "no_session"
+    assert sink.describe()["store"] == "no_session" and sink.write("b", jpg, b"m")["error"] == "no_session"
     sess = _StoreSession(matched=False)
     sink.attach(sess, None)
     assert sess.probe_key == "fleet/7/store/run1/cam/keyframes"
-    assert sink.write("b", b"j", b"m")["error"] == "store_absent" and not sess.puts
+    assert sink.write("b", jpg, b"m")["error"] == "store_absent" and not sess.puts
     sess.probe.matched = True
-    r = sink.write("b", b"j", b"m")
+    r = sink.write("b", jpg + [("tif", b"t", "image/tiff")], b"m")
     assert r == {"ok": True, "jpg": "fleet/7/store/run1/cam/keyframes/b.jpg",
+                 "tif": "fleet/7/store/run1/cam/keyframes/b.tif",
                  "json": "fleet/7/store/run1/cam/keyframes/b.json"}
-    assert [p[0] for p in sess.puts] == [r["jpg"], r["json"]]           # the image first, then the sidecar
+    assert [p[0] for p in sess.puts] == [r["jpg"], r["tif"], r["json"]]   # images first, the sidecar last
     sess.fail = True
-    assert sink.write("c", b"j", b"m")["error"] == "put_failed"
+    assert sink.write("c", jpg, b"m")["error"] == "put_failed"
     sink.detach()
     assert sess.probe.undeclared and sink.describe()["store"] == "no_session"
 

@@ -141,6 +141,9 @@ shm both work.
   store's `fleet/<vehicle>/store/<run>/**` keys). WHEN to capture (overlap, distance) is a separate
   policy node's job. Frames are matched per frame by plausibility -- UTC, TAI, or (an unlocked GigE
   counter) the plugin's receipt time -- because neither endpoint carries the PTP lock state.
+- Captures are photogrammetry inputs (Pix4D): EXIF camera identity + focal tags from config, Pix4D's
+  XMP `Camera:` namespace for orientation/accuracy/band, and a 16-bit single-band TIFF that keeps
+  thermal values unscaled (JPEG stays 8-bit; R-JPEG is FLIR-proprietary and not produced).
 - Lifecycle = `inactive`/`active` (ROS-lifecycle naming); the recorder is a per-SESSION `Gst.Pipeline`
   (private appsrc, own prefix/sidecar, delta drop counters; process PTS base untouched; H.26x sessions
   gate on a keyframe) — never a removable tee bin. Synchronous bounded finalize inside the stop budget.

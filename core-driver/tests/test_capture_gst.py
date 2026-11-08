@@ -63,6 +63,16 @@ def test_pure_helpers():
     assert stretched[0] == 0 and stretched[3] == 255
     flat = np.full((2, 2), 500, dtype=">u2").tobytes()
     assert to_8bit(flat, "GRAY16_BE", 2, 2) == bytes(4)
+    # fixed: the same raw value maps to the same grey in every frame, whatever else is in it
+    frame_a = np.array([[29000, 30000], [31000, 29000]], dtype="<u2").tobytes()
+    frame_b = np.array([[29000, 40000], [20000, 29000]], dtype="<u2").tobytes()
+    a = to_8bit(frame_a, "GRAY16_LE", 2, 2, "fixed", (28000, 32000))
+    b = to_8bit(frame_b, "GRAY16_LE", 2, 2, "fixed", (28000, 32000))
+    assert a[0] == b[0] == 64 and b[1] == 255 and b[2] == 0
+    with pytest.raises(ValueError, match="mono16_range"):
+        to_8bit(frame_a, "GRAY16_LE", 2, 2, "fixed")
+    with pytest.raises(ValueError, match="mono16_range"):
+        JpegEncoder(mono16="fixed")
 
 
 @pytest.mark.parametrize("fmt, w, h, nbytes, bayer, expect_fmt", [
@@ -106,6 +116,9 @@ def test_bad_settings_and_bad_frames_are_refused():
         JpegEncoder(max_width=-1)
     with pytest.raises(ValueError, match="mono16"):
         JpegEncoder(mono16="log")
+    fixed = JpegEncoder(mono16="fixed", mono16_range=(28000, 32000))
+    assert _decode(fixed.encode(_frame("GRAY16_LE", 8, 8, bytes(128))).jpeg)[:2] == (8, 8)
+    fixed.close()
     enc = JpegEncoder()
     with pytest.raises(EncodeError, match="mosaic"):
         enc.encode(_frame("RGB", 4, 4, bytes(48), "rggb"))

@@ -1,10 +1,10 @@
-"""Where a capture goes (docs/CAPTURE.md "Outputs"). Each sink writes the JPEG first and the JSON
-sidecar second, so a reader can treat the sidecar as the "capture complete" marker.
+"""Where a capture goes (docs/CAPTURE.md "Outputs"). Each sink writes the image file(s) first and the
+JSON sidecar last, so a reader can treat the sidecar as the "capture complete" marker.
 
-  file   <camera recording dir>/keyframes/<utc_ns>.{jpg,json} -- the camera's own directory in the
+  file   <camera recording dir>/keyframes/<utc_ns>.{jpg,tif,json} -- the camera's own directory in the
          run (resolve_recording_dir, pinned at process start like the core), so the run is
          self-contained and `rig fleet sync` carries it. Written via a temp file + rename.
-  zenoh  a put per file on <store_prefix>/<utc_ns>.{jpg,json} (default
+  zenoh  a put per file on <store_prefix>/<utc_ns>.{jpg,tif,json} (default
          fleet/<vehicle>/store/<run>/<instance>/keyframes), for the vehicle store: a Zenoh storage on
          fleet/<vehicle>/store/<run>/** keeps every put. Nothing stores a put nobody subscribes to,
          so the sink watches whether a storage matches (a publisher's matching status on its prefix)
@@ -50,14 +50,16 @@ class FileSink:
             f.write(data)
         os.replace(tmp, path)
 
-    def write(self, base: str, jpeg: bytes, sidecar: bytes) -> dict:
+    def write(self, base: str, files, sidecar: bytes) -> dict:
+        """`files` = [(extension, bytes, mime)]; returns {"ok": True, <ext>: path, ..., "json": path}."""
         try:
             os.makedirs(self.directory, exist_ok=True)
-            jpg = os.path.join(self.directory, base + ".jpg")
-            meta = os.path.join(self.directory, base + ".json")
-            self._atomic(jpg, jpeg)
-            self._atomic(meta, sidecar)
-            return {"ok": True, "jpg": jpg, "json": meta}
+            out = {"ok": True}
+            for ext, data, _mime in list(files) + [("json", sidecar, "application/json")]:
+                path = os.path.join(self.directory, f"{base}.{ext}")
+                self._atomic(path, data)
+                out[ext] = path
+            return out
         except OSError as e:
             log.warning("file sink: write failed: %s", e)
             return {"ok": False, "error": "write_failed", "detail": str(e)}
@@ -116,7 +118,7 @@ class ZenohStoreSink:
     def describe(self) -> dict:
         return {"name": self.name, "prefix": self.prefix, "store": self.store_state()}
 
-    def write(self, base: str, jpeg: bytes, sidecar: bytes) -> dict:
+    def write(self, base: str, files, sidecar: bytes) -> dict:
         state = self.store_state()
         if state != "present":
             return {"ok": False, "error": "store_absent" if state == "absent" else state}
@@ -124,11 +126,13 @@ class ZenohStoreSink:
         opts = {}
         if z is not None:
             opts = {"congestion_control": z.CongestionControl.BLOCK, "priority": z.Priority.DATA_LOW}
-        jpg, meta = f"{self.prefix}/{base}.jpg", f"{self.prefix}/{base}.json"
         try:
-            self._session.put(jpg, jpeg, encoding=z.Encoding.IMAGE_JPEG if z else None, **opts)
-            self._session.put(meta, sidecar, encoding=z.Encoding.APPLICATION_JSON if z else None, **opts)
-            return {"ok": True, "jpg": jpg, "json": meta}
+            out = {"ok": True}
+            for ext, data, mime in list(files) + [("json", sidecar, "application/json")]:
+                key = f"{self.prefix}/{base}.{ext}"
+                self._session.put(key, data, encoding=(z.Encoding(mime) if z else None), **opts)
+                out[ext] = key
+            return out
         except Exception as e:   # noqa: BLE001
             log.warning("zenoh sink: put failed: %s", e)
             return {"ok": False, "error": "put_failed", "detail": str(e)}

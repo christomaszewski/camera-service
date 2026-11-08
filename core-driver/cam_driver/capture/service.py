@@ -23,8 +23,8 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
-from . import exif
-from .encode import JPEG_ENCODERS
+from . import exif, tiff
+from .encode import JPEG_ENCODERS, MONO16_MODES
 from .frames import Frame, FrameRing
 from .reader import TRANSPORTS, Delivered
 from .request import CaptureRequest, RequestError, fix_at, parse_request
@@ -36,6 +36,7 @@ SCHEMA_VERSION = 1
 SERVICE = "frame-capture"
 DEFAULT_TOLERANCE_MS = 50.0       # until the frame interval is known
 SINK_NAMES = ("file", "zenoh")
+IMAGE_FORMATS = ("jpeg", "tiff")
 _DEDUPE = 256
 
 
@@ -49,7 +50,17 @@ class CaptureSettings:
     quality: int = 90
     max_width: int = 0
     jpeg_encoder: str = "auto"             # auto | hw | cpu (encode.JPEG_ENCODERS)
-    mono16: str = "stretch"
+    formats: List[str] = field(default_factory=lambda: ["jpeg"])   # jpeg | tiff (16-bit radiometric)
+    mono16: str = "stretch"                # stretch | shift | fixed (16-bit -> the JPEG's 8 bits)
+    mono16_range: Optional[List[int]] = None   # [lo, hi] raw values mapped to 0..255 for mono16: fixed
+    camera_make: Optional[str] = None      # EXIF Make / Model: what photogrammetry tools key cameras on
+    camera_model: Optional[str] = None
+    focal_length_mm: Optional[float] = None    # EXIF FocalLength
+    pixel_pitch_um: Optional[float] = None     # sensor pixel size -> EXIF FocalPlaneX/YResolution
+    band_name: Optional[str] = None        # XMP Camera:BandName (e.g. LWIR for a thermal core)
+    central_wavelength_nm: Optional[float] = None
+    wavelength_fwhm_nm: Optional[float] = None
+    exif_altitude: str = "msl"             # msl | ellipsoid: what EXIF GPSAltitude holds
     bayer_pattern: str = "auto"            # auto | none | rggb | grbg | gbrg | bggr
     time_basis: str = "auto"               # auto | capture | arrival
     time_scale: str = "auto"               # auto | utc | tai
@@ -88,6 +99,32 @@ class CaptureSettings:
                              f"got {s.jpeg_encoder!r}")
         if s.transport not in TRANSPORTS:
             raise ValueError(f"frame-capture params.transport: expected one of {TRANSPORTS}, got {s.transport!r}")
+        s.formats = [s.formats] if isinstance(s.formats, str) else list(s.formats or [])
+        if not s.formats or any(f not in IMAGE_FORMATS for f in s.formats):
+            raise ValueError(f"frame-capture params.formats: expected a non-empty subset of {IMAGE_FORMATS}, "
+                             f"got {s.formats!r}")
+        if s.mono16 not in MONO16_MODES:
+            raise ValueError(f"frame-capture params.mono16: expected one of {MONO16_MODES}, got {s.mono16!r}")
+        if s.mono16 == "fixed" or s.mono16_range is not None:
+            r = s.mono16_range
+            if (not isinstance(r, (list, tuple)) or len(r) != 2
+                    or not all(isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 65535 for v in r)
+                    or r[0] >= r[1]):
+                raise ValueError("frame-capture params.mono16_range: expected [lo, hi], integers 0..65535 "
+                                 f"with lo < hi (required by mono16: fixed), got {r!r}")
+            s.mono16_range = [int(r[0]), int(r[1])]
+        for name in ("camera_make", "camera_model", "band_name"):
+            v = getattr(s, name)
+            if v is not None and (not isinstance(v, str) or not v or len(v) > 64
+                                  or not all(32 <= ord(c) < 127 for c in v)):
+                raise ValueError(f"frame-capture params.{name}: expected printable ASCII (<= 64 chars), got {v!r}")
+        for name in ("focal_length_mm", "pixel_pitch_um", "central_wavelength_nm", "wavelength_fwhm_nm"):
+            v = getattr(s, name)
+            if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0):
+                raise ValueError(f"frame-capture params.{name}: expected a positive number, got {v!r}")
+        if s.exif_altitude not in exif.ALT_MODES:
+            raise ValueError(f"frame-capture params.exif_altitude: expected one of {exif.ALT_MODES}, "
+                             f"got {s.exif_altitude!r}")
         s.bayer_pattern = str(s.bayer_pattern or "auto").lower()
         if s.bayer_pattern not in ("auto", "none", "rggb", "grbg", "gbrg", "bggr"):
             raise ValueError(f"frame-capture params.bayer_pattern: got {s.bayer_pattern!r}")
@@ -176,19 +213,60 @@ class CaptureService:
             self.failures += 1
         return reply
 
+    def _camera(self) -> exif.CameraInfo:
+        st = self.settings
+        return exif.CameraInfo(st.camera_make, st.camera_model, st.focal_length_mm, st.pixel_pitch_um)
+
+    def _xmp(self, req: CaptureRequest, fix) -> Optional[bytes]:
+        st, o = self.settings, req.orientation
+        return exif.build_xmp(
+            yaw=o.yaw_deg if o else None, pitch=o.pitch_deg if o else None, roll=o.roll_deg if o else None,
+            xy_acc=fix.h_acc_m if fix else None, z_acc=fix.v_acc_m if fix else None,
+            yaw_acc=o.yaw_acc_deg if o else None, pitch_acc=o.pitch_acc_deg if o else None,
+            roll_acc=o.roll_acc_deg if o else None, band_name=st.band_name,
+            central_wavelength_nm=st.central_wavelength_nm, wavelength_fwhm_nm=st.wavelength_fwhm_nm)
+
+    def _images(self, frame: Frame, req: CaptureRequest, fix):
+        """[(ext, bytes, mime)], {format: description}, [warnings] -- one entry per configured format
+        this frame can be written as. Raises on an encode failure."""
+        yaw = req.orientation.yaw_deg if req.orientation is not None else None
+        gps_ns = fix.stamp_ns if fix is not None else None
+        camera, xmp, alt = self._camera(), self._xmp(req, fix), self.settings.exif_altitude
+        files, images, warnings = [], {}, []
+        base = f"{frame.utc_ns:019d}"
+        if "jpeg" in self.settings.formats:
+            enc = self.encoder.encode(frame)
+            app1 = exif.build_exif(frame.utc_ns, enc.width, enc.height, gps=fix, gps_utc_ns=gps_ns,
+                                   yaw_deg=yaw, camera=camera, scale=enc.width / frame.width, alt_mode=alt)
+            jpeg = exif.insert_exif(enc.jpeg, app1, xmp)
+            files.append(("jpg", jpeg, "image/jpeg"))
+            images["jpeg"] = {"file": base + ".jpg", "width": enc.width, "height": enc.height,
+                              "quality": getattr(self.encoder, "quality", None),
+                              "encoder": getattr(self.encoder, "backend", None), "bytes": len(jpeg)}
+        if "tiff" in self.settings.formats:
+            if frame.fmt not in tiff.TIFF_FORMATS or frame.bayer:
+                warnings.append(f"tiff skipped: needs a mono plane ({', '.join(tiff.TIFF_FORMATS)}), "
+                                f"got {frame.fmt}{' ' + frame.bayer + ' mosaic' if frame.bayer else ''}")
+            else:
+                ifd0, ex, gps = exif.exif_ifds(frame.utc_ns, frame.width, frame.height, fix, gps_ns, yaw,
+                                               camera, 1.0, alt, container="tiff")
+                tif = tiff.build_tiff(frame.fmt, frame.width, frame.height, frame.data, ifd0, ex, gps, xmp)
+                files.append(("tif", tif, "image/tiff"))
+                images["tiff"] = {"file": base + ".tif", "width": frame.width, "height": frame.height,
+                                  "bits": tiff.TIFF_FORMATS[frame.fmt][0], "bytes": len(tif)}
+        return files, images, warnings
+
     def _write(self, frame: Frame, req: CaptureRequest) -> dict:
         fix, gps_method, gps_dt_ms = (None, "none", None)
         if req.gps is not None:
             fix, gps_method, gps_dt_ms = fix_at(req.gps, frame.utc_ns, req.stamp_ns)
         try:
-            enc = self.encoder.encode(frame)
-            yaw = req.orientation.yaw_deg if req.orientation is not None else None
-            app1 = exif.build_exif(frame.utc_ns, enc.width, enc.height, gps=fix,
-                                   gps_utc_ns=fix.stamp_ns if fix is not None else None, yaw_deg=yaw)
-            jpeg = exif.insert_exif(enc.jpeg, app1)
+            files, images, warnings = self._images(frame, req, fix)
         except Exception as e:   # noqa: BLE001 -- refuse this capture, keep serving
             log.warning("capture: encode failed for frame %s: %s", frame.frame_id, e)
             return {"ok": False, "error": "encode_failed", "detail": str(e)}
+        if not files:
+            return {"ok": False, "error": "unsupported_format", "detail": "; ".join(warnings)}
         base = f"{frame.utc_ns:019d}"
         dt_ms = round((frame.utc_ns - req.stamp_ns) / 1e6, 3) if req.stamp_ns is not None else None
         sidecar = {
@@ -197,24 +275,26 @@ class CaptureService:
             "frame": {"frame_id": frame.frame_id, "utc_ns": frame.utc_ns, "basis": frame.basis,
                       "stamp_ns": frame.stamp_ns, "stamp_source": frame.source, "arrival_ns": frame.arrival_ns,
                       "format": frame.fmt, "bayer": frame.bayer, "width": frame.width, "height": frame.height},
-            "image": {"file": base + ".jpg", "width": enc.width, "height": enc.height,
-                      "quality": getattr(self.encoder, "quality", None),
-                      "encoder": getattr(self.encoder, "backend", None), "bytes": len(jpeg)},
+            "images": images,
+            "camera": {k: v for k, v in vars(self._camera()).items() if v is not None} or None,
             "request": req.to_dict(),
             "match": {"dt_ms": dt_ms},
             "gps": None if req.gps is None else {
                 "given": req.gps.to_dict(), "method": gps_method, "dt_ms": gps_dt_ms,
-                "applied": fix.to_dict(), "msl_alt_m": fix.msl_alt_m()},
+                "applied": fix.to_dict(), "msl_alt_m": fix.msl_alt_m(),
+                "ellipsoid_alt_m": fix.ellipsoid_alt_m(), "exif_altitude": self.settings.exif_altitude},
             "orientation": req.orientation.to_dict() if req.orientation is not None else None,
             "written_unix_ns": self._clock(),
         }
         side_bytes = json.dumps(sidecar, indent=1, sort_keys=True).encode("utf-8")
-        results = {s.name: s.write(base, jpeg, side_bytes) for s in self.sinks}
+        results = {s.name: s.write(base, files, side_bytes) for s in self.sinks}
         ok = any(r.get("ok") for r in results.values())
         reply = {"ok": ok, "frame_id": frame.frame_id, "frame_stamp_ns": frame.utc_ns, "basis": frame.basis,
                  "raw_stamp_ns": frame.stamp_ns, "stamp_source": frame.source, "dt_ms": dt_ms,
-                 "gps": gps_method, "gps_dt_ms": gps_dt_ms, "bytes": len(jpeg), "duplicate": False,
-                 "sinks": results}
+                 "gps": gps_method, "gps_dt_ms": gps_dt_ms, "formats": sorted(images),
+                 "bytes": sum(len(f[1]) for f in files), "duplicate": False, "sinks": results}
+        if warnings:
+            reply["warnings"] = warnings
         if not ok:
             reply["error"] = next(iter(results.values())).get("error", "write_failed")
         return reply

@@ -5,7 +5,7 @@ A trigger is a JSON object on `fleet/<vehicle>/svc/<instance>/capture/request`:
     {"v": 1, "stamp_ns": 1762610400123456789, "tolerance_ms": 30, "wait_ms": 200,
      "gps": {"lat": 40.44, "lon": -79.94, "alt_m": 310.2, "alt_ref": "ellipsoid", "geoid_sep_m": -33.9,
              "stamp_ns": 1762610400120000000, "vel_enu": [1.2, 4.8, 0.0], "h_acc_m": 0.02, "v_acc_m": 0.03},
-     "orientation": {"yaw_deg": 84.0, "pitch_deg": -2.1, "roll_deg": 0.4},
+     "orientation": {"yaw_deg": 84.0, "pitch_deg": 2.1, "roll_deg": 0.4, "yaw_acc_deg": 1.5},
      "tag": "overlap", "id": "req-17", "meta": {...}}
 
 Only `stamp_ns` matters for choosing the frame, and it is optional: without it the newest frame is
@@ -47,6 +47,14 @@ class GpsFix:
              "h_acc_m": self.h_acc_m, "v_acc_m": self.v_acc_m}
         return {k: v for k, v in d.items() if v is not None}
 
+    def ellipsoid_alt_m(self) -> Optional[float]:
+        """Height above the WGS-84 ellipsoid when it can be known; else None."""
+        if self.alt_m is None:
+            return None
+        if self.alt_ref == "ellipsoid":
+            return self.alt_m
+        return self.alt_m + self.geoid_sep_m if self.geoid_sep_m is not None else None
+
     def msl_alt_m(self) -> Optional[float]:
         """Height above mean sea level when it can be known (EXIF's GPSAltitude); else None."""
         if self.alt_m is None:
@@ -58,12 +66,20 @@ class GpsFix:
 
 @dataclass(frozen=True)
 class Orientation:
-    yaw_deg: Optional[float] = None     # heading, degrees clockwise from TRUE north
+    """The CAMERA's orientation, in Pix4D's convention (written verbatim to Camera:Yaw/Pitch/Roll):
+    yaw = where the top of the image points, degrees clockwise from TRUE north; pitch = 0 looking
+    straight down (nadir), 90 looking at the horizon; roll = 0 level. Accuracies are 1-sigma degrees."""
+    yaw_deg: Optional[float] = None
     pitch_deg: Optional[float] = None
     roll_deg: Optional[float] = None
+    yaw_acc_deg: Optional[float] = None
+    pitch_acc_deg: Optional[float] = None
+    roll_acc_deg: Optional[float] = None
 
     def to_dict(self) -> dict:
-        d = {"yaw_deg": self.yaw_deg, "pitch_deg": self.pitch_deg, "roll_deg": self.roll_deg}
+        d = {"yaw_deg": self.yaw_deg, "pitch_deg": self.pitch_deg, "roll_deg": self.roll_deg,
+             "yaw_acc_deg": self.yaw_acc_deg, "pitch_acc_deg": self.pitch_acc_deg,
+             "roll_acc_deg": self.roll_acc_deg}
         return {k: v for k, v in d.items() if v is not None}
 
 
@@ -148,8 +164,10 @@ def _parse_orientation(o) -> Orientation:
     if not isinstance(o, dict):
         raise RequestError("'orientation' must be an object")
     try:
-        return Orientation(yaw_deg=_num(o, "yaw_deg"), pitch_deg=_num(o, "pitch_deg", lo=-90, hi=90),
-                           roll_deg=_num(o, "roll_deg", lo=-180, hi=180))
+        return Orientation(yaw_deg=_num(o, "yaw_deg"), pitch_deg=_num(o, "pitch_deg", lo=-180, hi=180),
+                           roll_deg=_num(o, "roll_deg", lo=-180, hi=180),
+                           yaw_acc_deg=_num(o, "yaw_acc_deg", lo=0), pitch_acc_deg=_num(o, "pitch_acc_deg", lo=0),
+                           roll_acc_deg=_num(o, "roll_acc_deg", lo=0))
     except RequestError as e:
         raise RequestError(f"orientation: {e}") from None
 

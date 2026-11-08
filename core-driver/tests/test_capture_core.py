@@ -185,6 +185,10 @@ def test_a_full_request_parses():
     assert (r.stamp_ns, r.tolerance_ms, r.wait_ms, r.tag, r.id) == (NOW, 30, 100, "overlap", "17")
     assert r.gps.alt_ref == "msl" and r.gps.vel_enu == (1.0, 2.0, 0.0) and r.gps.msl_alt_m() == 300
     assert r.orientation.yaw_deg == 90 and r.meta == {"leg": 3}
+    r2 = _req({"orientation": {"pitch_deg": 95, "yaw_acc_deg": 2, "pitch_acc_deg": 0.5, "roll_acc_deg": 0.5}})
+    assert r2.orientation.pitch_deg == 95                       # Pix4D: 90 = horizon; obliques beyond are fine
+    assert r2.orientation.to_dict() == {"pitch_deg": 95, "yaw_acc_deg": 2, "pitch_acc_deg": 0.5,
+                                        "roll_acc_deg": 0.5}
     assert r.to_dict()["meta"] == {"leg": 3} and "gps" not in r.to_dict()
 
 
@@ -208,7 +212,8 @@ def test_an_empty_request_is_a_manual_snapshot_and_selector_parameters_work():
     (json.dumps({"gps": {"lat": 0, "lon": 0, "vel_enu": [1, 2]}}).encode(), "vel_enu"),
     (json.dumps({"gps": {"lat": 0, "lon": 0, "vel_enu": [1, "a", 2]}}).encode(), "vel_enu"),
     (json.dumps({"gps": 5}).encode(), "'gps' must be an object"),
-    (json.dumps({"orientation": {"pitch_deg": 100}}).encode(), "pitch_deg"),
+    (json.dumps({"orientation": {"pitch_deg": 200}}).encode(), "pitch_deg"),
+    (json.dumps({"orientation": {"yaw_acc_deg": -1}}).encode(), "yaw_acc_deg"),
     (json.dumps({"orientation": []}).encode(), "'orientation' must be an object"),
     (json.dumps({"meta": [1]}).encode(), "meta"),
     (json.dumps({"tag": ""}).encode(), "tag"),
@@ -239,6 +244,13 @@ def test_a_fix_without_velocity_or_too_far_away_is_written_as_given():
     assert fix_at(fix, NOW + 5 * MS, NOW) == (fix, "as_given", 5.0)  # the request's stamp is the fix's
     fast = GpsFix(lat=1.0, lon=2.0, stamp_ns=NOW, vel_enu=(1.0, 1.0, 0.0))
     assert fix_at(fast, NOW + 3 * S, None)[1] == "as_given"
+
+
+def test_ellipsoid_altitude_from_either_reference():
+    assert GpsFix(lat=0, lon=0, alt_m=50.0).ellipsoid_alt_m() == 50.0
+    assert GpsFix(lat=0, lon=0, alt_m=80.0, alt_ref="msl", geoid_sep_m=-30.0).ellipsoid_alt_m() == 50.0
+    assert GpsFix(lat=0, lon=0, alt_m=80.0, alt_ref="msl").ellipsoid_alt_m() is None
+    assert GpsFix(lat=0, lon=0).ellipsoid_alt_m() is None
 
 
 def test_mean_sea_level_altitude_needs_msl_or_a_geoid_separation():
