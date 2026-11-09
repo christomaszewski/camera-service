@@ -26,8 +26,8 @@ from cam_driver import transport  # noqa: E402
 from cam_driver.capture.encode import (CPU_ELEMENT, EncodeError, JpegEncoder, pad_rows,  # noqa: E402
                                        scaled_size, to_8bit)
 from cam_driver.capture.frames import Frame  # noqa: E402
-from cam_driver.capture.reader import (TransportReader, from_caps, from_header_bytes,  # noqa: E402
-                                       select_endpoint, unixfd_socket)
+from cam_driver.capture.reader import (Decimator, TransportReader, from_caps,  # noqa: E402
+                                       from_header_bytes, select_endpoint, unixfd_socket)
 
 HAVE_UNIXFD = Gst.ElementFactory.find("unixfdsink") is not None
 
@@ -248,6 +248,51 @@ def test_endpoint_selection_prefers_unixfd():
         assert select_endpoint(frames, "shm") == ("shm", frames)
     with pytest.raises(ValueError, match="transport"):
         TransportReader("/tmp/x", lambda d: None, prefer="tcp")
+
+
+# ---- buffer_fps ----------------------------------------------------------------------------
+def _kept(src_fps, cap, seconds=3, jitter_ns=0):
+    d, step = Decimator(cap), int(1e9 / src_fps)
+    import random
+    rnd = random.Random(1)
+    return [t for t in (i * step + (rnd.randint(-jitter_ns, jitter_ns) if jitter_ns else 0)
+                        for i in range(int(src_fps * seconds))) if d.keep(t)]
+
+
+def test_decimator_keeps_an_even_grid_at_the_cap():
+    kept = _kept(60, 10)
+    assert len(kept) == 30 and {round((b - a) / 1e6, 1) for a, b in zip(kept, kept[1:])} == {100.0}
+    assert len(_kept(25, 10)) == 30                              # 80/120 ms alternation, 10 a second
+    assert len(_kept(10, 30)) == 30                              # a slower source keeps every frame
+    assert len(_kept(60, None)) == 180 and len(_kept(60, 0)) == 180
+
+
+def test_decimator_tolerates_jitter_and_restarts_after_a_gap():
+    assert 29 <= len(_kept(60, 10, jitter_ns=2_000_000)) <= 31   # +-2 ms receipt jitter skips no slot
+    d = Decimator(10)
+    assert d.keep(0) and not d.keep(50_000_000) and d.keep(100_000_000)
+    assert d.keep(5_000_000_000)                                 # after a 5 s gap: kept at once ...
+    assert not d.keep(5_050_000_000) and d.keep(5_100_000_000)   # ... and the grid restarts there
+    for bad in (-1, True, "10"):
+        with pytest.raises(ValueError, match="buffer_fps"):
+            Decimator(bad)
+
+
+def test_the_reader_drops_frames_before_copying_them():
+    with tempfile.TemporaryDirectory() as d:
+        frames_sock = os.path.join(d, "frames")
+        got = []
+        prod = _Producer("shm", frames_sock)                     # ~50 frames a second
+        reader = TransportReader(frames_sock, got.append, prefer="shm", retry_s=0.2, max_fps=10)
+        reader.start()
+        try:
+            assert _wait(lambda: reader.skipped >= 40), reader.describe()
+            ratio = reader.frames / (reader.frames + reader.skipped)
+            assert 0.1 < ratio < 0.35 and len(got) == reader.frames
+            assert reader.describe()["max_fps"] == 10
+        finally:
+            reader.stop()
+            prod.stop()
 
 
 # ---- reader: live producers ----------------------------------------------------------------

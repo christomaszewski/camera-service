@@ -28,6 +28,7 @@ All parameters, with defaults:
 |---|---|---|
 | `buffer_s` | `2.0` | Seconds of recently received frames kept to choose from |
 | `buffer_max_mb` | `256` | Byte cap on that buffer; the oldest frames go first (a 12 MP camera at 20 fps needs ~480 MB for 2 s) |
+| `buffer_fps` | every frame | Keep at most this many frames a second, evenly spaced; the rest are dropped before they are copied (see [Choosing the frame](#choosing-the-frame)) |
 | `tolerance_ms` | one frame interval | How far the chosen frame may be from the requested time (measured from the stream; 50 ms until known) |
 | `wait_ms` | `250` | How long a request may wait for its frame to come through the pipeline |
 | `formats` | `[jpeg]` | Any of `jpeg`, `tiff` (see [TIFF](#tiff)); both are written when both are listed |
@@ -149,6 +150,21 @@ Frames are copied out of the transport into a buffer holding what was received i
 `buffer_s` (and at most `buffer_max_mb`). A request names a UTC time; the plugin waits until a
 frame at or after that time has arrived (up to `wait_ms`), then takes the nearest one within the
 tolerance. With frames every 40 ms the chosen frame is at most ~20 ms from the requested time.
+
+Copying every frame is the plugin's standing cost, paid whether or not anything asks for a capture.
+`buffer_fps` keeps fewer: a frame outside the rate is dropped before its pixels are touched, so CPU
+and memory fall with it. Measured on a 2.1 GHz Xeon core with the plugin's reader and buffer (an
+Orin core is slower; measure there):
+
+| Camera | Every frame | With `buffer_fps` |
+|---|---|---|
+| Thermal 640×512 16-bit @ 60 fps | 3.5% of a core, 79 MB | `10`: 1.7%, 14 MB |
+| 5 MP mono @ 20 fps | 5.5%, 201 MB | `5`: 1.9%, 50 MB |
+| 12 MP mono @ 10 fps | 6.2%, 246 MB | `2`: 1.3%, 49 MB |
+
+The trade is precision: at `buffer_fps: 10` the chosen frame can be up to ~50 ms from the requested
+time (the default tolerance follows the kept frames' spacing). The GPS fix is still moved to the
+chosen frame's own time, so the geotag stays right; what moves is which instant the image shows.
 
 ## Time
 
@@ -302,7 +318,7 @@ Checklist for a dataset:
 ## Descriptor and events
 
 The descriptor (`get .../capture`) reports the buffer (frames, bytes, oldest/newest match time,
-measured frame interval, current basis), the reader (transport, connected, frames, errors), the
+measured frame interval, current basis), the reader (transport, connected, frames kept and skipped by `buffer_fps`, errors), the
 encoder (backend, hardware, requested, fallback), the time settings, the default tolerance and
 wait, each sink (with the store's state: `present`, `absent`, `no_run`, `no_session`), and counts
 with the last successful reply. `.../capture/events` publishes

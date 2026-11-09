@@ -200,6 +200,7 @@ plugins:
   #   isolation: process   #   (docs/CAPTURE.md). Runs in this image beside the core; no extra container.
   #   params:
   #     buffer_s: 2.0          # recent video kept to choose from (also capped by buffer_max_mb: 256)
+  #     # buffer_fps: 10       # keep at most N frames/s (dropped before the copy: less CPU + memory)
   #     # tolerance_ms: 40     # nearest frame must be within this; default = one frame interval
   #     # wait_ms: 250         # how long a trigger may wait for its frame to come through
   #     # quality: 90          # JPEG quality; max_width: 0 = full size (else downscale to this width)

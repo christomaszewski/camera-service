@@ -45,6 +45,7 @@ class CaptureSettings:
     """The plugin's `params:` (plugins: - name: frame-capture), validated with the key named."""
     buffer_s: float = 2.0
     buffer_max_mb: float = 256.0
+    buffer_fps: Optional[float] = None     # keep at most this many frames a second (None = every frame)
     tolerance_ms: Optional[float] = None   # None = one frame interval (measured), else 50 ms
     wait_ms: float = 250.0
     quality: int = 90
@@ -90,6 +91,9 @@ class CaptureSettings:
             if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0 or \
                     (name in ("buffer_s", "buffer_max_mb") and v == 0):
                 raise ValueError(f"frame-capture params.{name}: expected a positive number, got {v!r}")
+        if s.buffer_fps is not None and (isinstance(s.buffer_fps, bool) or not isinstance(s.buffer_fps, (int, float))
+                                         or s.buffer_fps <= 0):
+            raise ValueError(f"frame-capture params.buffer_fps: expected a positive number, got {s.buffer_fps!r}")
         if s.tolerance_ms is not None and (isinstance(s.tolerance_ms, bool) or float(s.tolerance_ms) < 0):
             raise ValueError(f"frame-capture params.tolerance_ms: expected >= 0, got {s.tolerance_ms!r}")
         if not isinstance(s.queue, int) or isinstance(s.queue, bool) or s.queue < 1:

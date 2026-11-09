@@ -84,6 +84,7 @@ def test_settings_defaults_and_validation():
                        ({"queue": 0}, "queue"), ({"transport": "tcp"}, "transport"),
                        ({"bayer_pattern": "rgbg"}, "bayer_pattern"), ({"tolerance_ms": -1}, "tolerance_ms"),
                        ({"jpeg_encoder": "gpu"}, "jpeg_encoder"), ({"formats": ["png"]}, "formats"),
+                       ({"buffer_fps": 0}, "buffer_fps"), ({"buffer_fps": True}, "buffer_fps"),
                        ({"formats": []}, "formats"), ({"mono16": "log"}, "mono16"),
                        ({"mono16": "fixed"}, "mono16_range"), ({"mono16_range": [5, 5]}, "mono16_range"),
                        ({"mono16_range": [0, 70000]}, "mono16_range"), ({"camera_make": "Fl\u00efr"}, "camera_make"),
@@ -518,6 +519,7 @@ def test_build_wires_everything_from_the_sensor_config(monkeypatch):
         assert reader.bayer_hint == "rggb" and reader.plugin_socket.endswith("sock/frames")
         assert control.key_base == "fleet/9/svc/cam_a/capture" and service.ring.span_ns == 1_500_000_000
         assert service.encoder.quality == 70 and service.encoder.requested == "auto"
+        assert reader.max_fps is None                            # every frame unless buffer_fps is set
         service.encoder.close()
 
 

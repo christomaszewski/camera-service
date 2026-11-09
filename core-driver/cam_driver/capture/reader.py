@@ -9,6 +9,10 @@
 `auto` picks whichever socket exists, the same rule as tools/shm_probe.py. The reader runs on its
 own thread with no main loop (appsink pulls), copies each frame out of the transport (see frames),
 and survives the core restarting: an error or EOS tears the pipeline down and it re-dials.
+
+Copying every frame is the plugin's standing cost (a few % of a core for a 5-12 MP camera, plus the
+buffer's memory). `buffer_fps` keeps at most that many frames a second (Decimator): a skipped frame
+is dropped BEFORE its pixels are copied, so CPU and memory fall with the rate.
 """
 from __future__ import annotations
 
@@ -80,12 +84,40 @@ def from_caps(structure_name: str, fmt: str, width: int, height: int, frame_id: 
     return Delivered(frame_id, stamp_ns, None, fmt, width, height, bayer, data, arrival_ns)
 
 
+class Decimator:
+    """Keeps at most `max_fps` frames a second, evenly spaced by receipt time; falsy keeps every frame.
+
+    Frames are kept on a grid one interval apart; a frame up to a tenth of an interval early still
+    counts (receipt jitter must not skip a whole slot), and after a gap the grid restarts at the next
+    frame. With a source slower than `max_fps` every frame is kept."""
+
+    def __init__(self, max_fps: Optional[float]):
+        if max_fps is not None and (isinstance(max_fps, bool) or not isinstance(max_fps, (int, float))
+                                    or max_fps < 0):
+            raise ValueError(f"buffer_fps: expected a positive number, got {max_fps!r}")
+        self.interval_ns = int(1e9 / max_fps) if max_fps else 0
+        self._next: Optional[int] = None
+
+    def keep(self, now_ns: int) -> bool:
+        if not self.interval_ns:
+            return True
+        if self._next is not None and now_ns < self._next - self.interval_ns // 10:
+            return False
+        on_grid = self._next is not None and now_ns - self._next < self.interval_ns
+        self._next = (self._next if on_grid else now_ns) + self.interval_ns
+        return True
+
+
 class TransportReader:
     def __init__(self, plugin_socket: str, on_frame: Callable[[Delivered], None], prefer: str = "auto",
                  bayer_hint: Optional[str] = None, retry_s: float = 1.0, pull_timeout_s: float = 0.5,
-                 clock: Callable[[], int] = time.time_ns):
+                 clock: Callable[[], int] = time.time_ns, max_fps: Optional[float] = None,
+                 monotonic: Callable[[], int] = time.monotonic_ns):
         if prefer not in TRANSPORTS:
             raise ValueError(f"transport: expected one of {TRANSPORTS}, got {prefer!r}")
+        self.max_fps = max_fps
+        self._decimator = Decimator(max_fps)
+        self._monotonic = monotonic
         self.plugin_socket = plugin_socket
         self.on_frame = on_frame
         self.prefer = prefer
@@ -97,7 +129,8 @@ class TransportReader:
         self._thread: Optional[threading.Thread] = None
         self.kind: Optional[str] = None
         self.connected = False
-        self.frames = 0
+        self.frames = 0            # kept (copied into the buffer)
+        self.skipped = 0           # dropped by buffer_fps before any copy
         self.errors = 0
         self.last_error: Optional[str] = None
 
@@ -112,7 +145,8 @@ class TransportReader:
 
     def describe(self) -> dict:
         return {"transport": self.kind, "connected": self.connected, "frames": self.frames,
-                "errors": self.errors, "last_error": self.last_error}
+                "skipped": self.skipped, "max_fps": self.max_fps, "errors": self.errors,
+                "last_error": self.last_error}
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -144,7 +178,10 @@ class TransportReader:
             log.info("reader: attached to %s endpoint %s", kind, path)
             while not self._stop.is_set():
                 sample = sink.emit("try-pull-sample", self.pull_timeout_ns)
-                if sample is not None:
+                if sample is not None and not self._decimator.keep(self._monotonic()):
+                    self.skipped += 1          # dropped before its pixels are touched
+                    sample = None
+                elif sample is not None:
                     try:
                         self._deliver(kind, sample)
                     except Exception as e:   # noqa: BLE001 -- one bad frame is dropped, not the endpoint

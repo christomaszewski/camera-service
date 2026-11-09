@@ -94,6 +94,7 @@ plugins:
   #   isolation: process   #   fixed-range JPEG preview, both with GPS EXIF + Pix4D XMP
   #   params:
   #     formats: [tiff, jpeg]
+  #     buffer_fps: 10           # of the core's 60: a sixth of the copying, ~14 MB instead of ~79 MB
   #     mono16: fixed            # the same raw value -> the same grey in every JPEG (a mosaic needs that)
   #     mono16_range: [27315, 32315]   # e.g. 0..50 C if the core outputs kelvin x 100 (TLinear)
   #     camera_make: FLIR        # <-- your core

@@ -77,13 +77,15 @@ def build(config_path: str, plugin: str):
                                          mono16_range=s.mono16_range), sinks,
                              instance=instance, vehicle=vehicle, run_id=run_id)
     reader = TransportReader(cfg.transport.plugin_endpoint.socket_path, service.on_delivery,
-                             prefer=s.transport, bayer_hint=bayer_hint(cfg, s.bayer_pattern))
+                             prefer=s.transport, bayer_hint=bayer_hint(cfg, s.bayer_pattern),
+                             max_fps=s.buffer_fps)
     service.reader = reader
     control = ZenohCapture(service, capture_key(vehicle, instance),
                            zenoh_connect_endpoints(cfg.control.zenoh_connect), queue_size=s.queue,
                            store_sinks=store_sinks)
-    log.info("frame-capture: instance=%s run=%s sinks=%s buffer=%gs time=%s/%s encoder=%s",
-             instance, run_id or "-", [x.describe() for x in sinks], s.buffer_s, s.time_basis, s.time_scale,
+    log.info("frame-capture: instance=%s run=%s sinks=%s buffer=%gs@%s time=%s/%s encoder=%s",
+             instance, run_id or "-", [x.describe() for x in sinks], s.buffer_s,
+             f"{s.buffer_fps:g}fps" if s.buffer_fps else "every frame", s.time_basis, s.time_scale,
              service.encoder.backend)
     return service, reader, control
 
