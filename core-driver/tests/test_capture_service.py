@@ -23,7 +23,7 @@ from cam_driver.capture.__main__ import bayer_hint, build, plugin_params  # noqa
 from cam_driver.capture.encode import Encoded  # noqa: E402
 from cam_driver.capture.frames import FrameRing  # noqa: E402
 from cam_driver.capture.reader import Delivered  # noqa: E402
-from cam_driver.capture.sinks import (FileSink, ZenohStoreSink, run_id_from_recording_dir,  # noqa: E402
+from cam_driver.capture.sinks import (FileSink, ZenohStoreSink, run_id_from_recording_dir, store_root,  # noqa: E402
                                       store_prefix)
 from cam_driver.capture.timebase import TimeBase  # noqa: E402
 from cam_driver.config import parse_config  # noqa: E402
@@ -521,6 +521,56 @@ def test_build_wires_everything_from_the_sensor_config(monkeypatch):
         assert service.encoder.quality == 70 and service.encoder.requested == "auto"
         assert reader.max_fps is None                            # every frame unless buffer_fps is set
         service.encoder.close()
+
+
+def test_file_root_settings():
+    s = svc.CaptureSettings.from_params({"file_root": "store"})
+    assert s.file_root == "store" and s.file_dir == "keyframes"
+    assert svc.CaptureSettings.from_params({"file_root": "store", "sinks": ["zenoh"]}).sinks == ["zenoh"]
+    for bad, match in [({"file_root": "run"}, "file_root"),
+                       ({"file_root": "store", "file_dir": "/abs/keyframes"}, "relative"),
+                       ({"file_root": "store", "file_dir": "../escape"}, "relative"),
+                       ({"file_root": "store", "file_dir": "key*frames"}, "relative"),
+                       ({"file_root": "store", "sinks": ["file", "zenoh"]}, "keep one")]:
+        with pytest.raises(ValueError, match=match):
+            svc.CaptureSettings.from_params(bad)
+
+
+def test_store_root_resolution(tmp_path):
+    assert store_root("") == ("/data/store", None)
+    data = tmp_path / "data"
+    data.mkdir()
+    assert store_root(str(data)) == (str(data / "store"), None)                   # no registry: flat
+    (data / "runs" / "R1").mkdir(parents=True)
+    assert store_root(str(data)) == (str(data / "store"), None)                   # registry, no open run
+    (data / "current").symlink_to("runs/R1")
+    real = os.path.realpath(data)
+    assert store_root(str(data)) == (os.path.join(real, "runs", "R1", "store"), "R1")
+    (data / "current").unlink()
+    (data / "current").symlink_to(str(tmp_path))                                  # outside runs/: ignored
+    assert store_root(str(data)) == (str(data / "store"), None)
+
+
+def test_build_with_file_root_store(monkeypatch):
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, "data", "runs", "R1"))
+        os.symlink("runs/R1", os.path.join(d, "data", "current"))
+        cfg = os.path.join(d, "cam.yaml")
+        with open(cfg, "w") as f:
+            f.write((_CFG % os.path.join(d, "sock", "frames")).replace(
+                "sinks: [file, zenoh]", "sinks: [file], file_root: store"))
+        monkeypatch.setenv("RIG_DATA_DIR", os.path.join(d, "data"))
+        monkeypatch.setenv("CAM_INSTANCE", "cam_a")
+        monkeypatch.setenv("VEHICLE_ID", "9")
+        service, _reader, _control = build(cfg, "frame-capture")
+        (sink,) = service.sinks
+        assert sink.directory == os.path.join(os.path.realpath(os.path.join(d, "data")), "runs", "R1",
+                                              "store", "cam_a", "keyframes")
+        assert service.run_id == "R1"
+        service.encoder.close()
+        monkeypatch.setenv("CAM_INSTANCE", "cam#a")
+        with pytest.raises(ValueError, match="key-safe"):
+            build(cfg, "frame-capture")
 
 
 def test_bayer_hint_and_plugin_lookup():

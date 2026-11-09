@@ -35,6 +35,27 @@ def run_id_from_recording_dir(recording_dir: str, rig_data_dir: str) -> Optional
     return None
 
 
+def store_root(rig_data_dir: str) -> tuple:
+    """(directory, run id) of the vehicle store's folder for the open run, resolved once at start
+    like the recording directory: <root>/runs/<id>/store under a run registry (rig-infra's
+    zenoh-store serves it as fleet/<vehicle>/store/<id>/...), <root>/store with no registry (served
+    as the run `flat`) or no open run (written but not served), /data/store with no data root."""
+    root = (rig_data_dir or "").strip().rstrip("/")
+    if not root:
+        return "/data/store", None
+    current = os.path.join(root, "current")
+    if os.path.exists(current):
+        run = os.path.realpath(current)
+        if os.path.dirname(run) == os.path.join(os.path.realpath(root), "runs"):
+            return os.path.join(run, "store"), os.path.basename(run)
+        log.warning("run registry ignored: %s resolves outside %s/runs; keyframes go to %s/store",
+                    current, root, root)
+    elif os.path.isdir(os.path.join(root, "runs")):
+        log.warning("no open run (%s/current is missing): keyframes go to %s/store, which the vehicle "
+                    "store does not serve until a run is open", root, root)
+    return os.path.join(root, "store"), None
+
+
 class FileSink:
     name = "file"
 

@@ -213,4 +213,6 @@ plugins:
   #     # mono16: stretch      # 16-bit -> JPEG: stretch (per frame) | fixed (+ mono16_range: [lo, hi]) | shift
   #     # time_basis: auto     # auto | capture | arrival -- see docs/CAPTURE.md "Time"
   #     # time_scale: auto     # auto | utc | tai -- what PTP-sourced stamps are
-  #     sinks: [file]          # file = <recordings>/keyframes/ in the run; zenoh = the vehicle store
+  #     sinks: [file]          # file = <recordings>/keyframes/ in the run; zenoh = put to the vehicle store
+  #     # file_root: store     # write into the run's store/<instance>/keyframes/ instead, which rig-infra's
+  #     #                      #   zenoh-store serves to the ground (no zenoh sink needed on the same disk)

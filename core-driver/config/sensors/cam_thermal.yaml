@@ -102,3 +102,4 @@ plugins:
   #     focal_length_mm: 9.1     # <-- your lens
   #     pixel_pitch_um: 12.0
   #     band_name: LWIR
+  #     file_root: store         # keyframes into the run's store/: zenoh-store serves them to the ground

@@ -49,7 +49,8 @@ All parameters, with defaults:
 | `max_latency_ms` | `5000` | Capture → plugin receipt budget used by the plausibility check |
 | `queue` | `4` | Requests waiting to be served; one more is refused with `busy` |
 | `sinks` | `[file]` | Any of `file`, `zenoh` (see [Outputs](#outputs)) |
-| `file_dir` | `keyframes` | `file` sink directory, relative to the camera's recording directory (or absolute) |
+| `file_dir` | `keyframes` | `file` sink directory, relative to `file_root` (or absolute, with `file_root: recordings` only) |
+| `file_root` | `recordings` | `recordings`: under the camera's recording directory. `store`: under the run's `store/<instance>/`, which the vehicle store serves (see [Outputs](#outputs)) |
 | `store_prefix` | `fleet/{vehicle}/store/{run}/{instance}/keyframes` | `zenoh` sink key prefix |
 | `transport` | `auto` | `auto`, `unixfd` or `shm` |
 
@@ -257,12 +258,23 @@ in time order.
   core's own (`resolve_recording_dir`, pinned at process start the same way), so under rig the captures
   land in `<data_dir>/runs/<run>/recordings/<instance>/keyframes/` and `rig fleet sync` carries
   them. Each file is written to a temp name and renamed into place.
+  - With **`file_root: store`** the same files go to `<data_dir>/runs/<run>/store/<instance>/keyframes/`
+    instead: the run's `store/` folder, which rig-infra's
+    [zenoh-store](https://github.com/christomaszewski/rig-infra/tree/main/zenoh-store) serves as
+    `fleet/<vehicle>/store/<run>/<instance>/keyframes/<utc_ns>.{jpg,tif,json}` (the keys the
+    `zenoh` sink uses), indexes, announces, and lets a ground station fetch mid-run. Its fetch rules
+    decide which of them cross the link on their own (by default sidecars and JPEGs; TIFFs on
+    request). The plugin does not depend on the store being up: the files are on disk either way,
+    and `rig fleet sync` carries `store/` with the run. This is the setting for a camera on the same
+    disk as the store; it cannot be combined with the `zenoh` sink (they would write the same keys).
+    Without a run registry the folder is `<data_dir>/store/` (served as the run `flat`).
 - **`zenoh`**: one put per file on `<store_prefix>/<utc_ns>.{jpg,tif,json}` (default
   `fleet/<vehicle>/store/<run>/<instance>/keyframes`), image/jpeg, image/tiff and application/json, with
-  congestion control BLOCK and low priority. This is for the vehicle store, a Zenoh storage on
-  `fleet/<vehicle>/store/<run>/**`. A put nobody subscribes to is lost silently, so the sink checks
-  whether a storage matches its prefix (a publisher's matching status) and refuses with
-  `store_absent` instead. Without an open run there is no key to use: `no_run`.
+  congestion control BLOCK and low priority. This is for a producer that does not share the store's
+  disk: zenoh-store subscribes to `fleet/<vehicle>/store/**` and writes puts into the open run. A put
+  nobody subscribes to is lost silently, so the sink checks whether a store matches its prefix (a
+  publisher's matching status) and refuses with `store_absent` instead. Without an open run there
+  is no key to use: `no_run`.
 
 The sidecar:
 

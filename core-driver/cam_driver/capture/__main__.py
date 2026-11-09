@@ -49,7 +49,7 @@ def build(config_path: str, plugin: str):
     from .frames import FrameRing
     from .reader import TransportReader
     from .service import CaptureService, CaptureSettings, ZenohCapture, capture_key
-    from .sinks import FileSink, ZenohStoreSink, run_id_from_recording_dir, store_prefix
+    from .sinks import FileSink, ZenohStoreSink, run_id_from_recording_dir, store_prefix, store_root
     from .timebase import TimeBase, resolve_tai_offset_s
 
     cfg = load_config(config_path)
@@ -61,7 +61,13 @@ def build(config_path: str, plugin: str):
     run_id = run_id_from_recording_dir(rec_dir, rig_data)
 
     sinks, store_sinks = [], []
-    if "file" in s.sinks:
+    if "file" in s.sinks and s.file_root == "store":
+        root, store_run = store_root(rig_data)
+        if not instance or any(c in instance for c in "/*$?#@") or instance.startswith("."):
+            raise ValueError(f"file_root: store needs a Zenoh-key-safe instance name, got {instance!r}")
+        sinks.append(FileSink(os.path.join(root, instance, *s.file_dir.strip("/").split("/"))))
+        run_id = store_run           # where the files are is what the sidecars record
+    elif "file" in s.sinks:
         sinks.append(FileSink(s.file_dir if os.path.isabs(s.file_dir) else os.path.join(rec_dir, s.file_dir)))
     if "zenoh" in s.sinks:
         z = ZenohStoreSink(store_prefix(s.store_prefix, vehicle, run_id, instance))

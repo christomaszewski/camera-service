@@ -36,6 +36,7 @@ SCHEMA_VERSION = 1
 SERVICE = "frame-capture"
 DEFAULT_TOLERANCE_MS = 50.0       # until the frame interval is known
 SINK_NAMES = ("file", "zenoh")
+FILE_ROOTS = ("recordings", "store")
 IMAGE_FORMATS = ("jpeg", "tiff")
 _DEDUPE = 256
 
@@ -70,6 +71,7 @@ class CaptureSettings:
     queue: int = 4
     sinks: List[str] = field(default_factory=lambda: ["file"])
     file_dir: str = "keyframes"
+    file_root: str = "recordings"          # recordings: <recording dir>/<file_dir>; store: <run>/store/<instance>/<file_dir>
     store_prefix: str = "fleet/{vehicle}/store/{run}/{instance}/keyframes"
     transport: str = "auto"
 
@@ -86,6 +88,17 @@ class CaptureSettings:
         if bad or not s.sinks:
             raise ValueError(f"frame-capture params.sinks: expected a non-empty subset of {SINK_NAMES}, "
                              f"got {s.sinks!r}")
+        if s.file_root not in FILE_ROOTS:
+            raise ValueError(f"frame-capture params.file_root: expected one of {FILE_ROOTS}, got {s.file_root!r}")
+        if s.file_root == "store" and "file" in s.sinks:
+            parts = str(s.file_dir or "").strip("/").split("/")
+            if str(s.file_dir).startswith("/") or any(not p or p.startswith((".", "@")) or set(p) & set("*$?#\\")
+                                                      for p in parts):
+                raise ValueError(f"frame-capture params.file_dir: with file_root: store it must be a relative "
+                                 f"path of Zenoh-key-safe names (no '..', '*', '$', '?', '#'), got {s.file_dir!r}")
+            if "zenoh" in s.sinks:
+                raise ValueError("frame-capture params.sinks: with file_root: store the file sink already "
+                                 "feeds the vehicle store (the same keys the zenoh sink would put); keep one")
         for name in ("buffer_s", "buffer_max_mb", "wait_ms", "max_latency_ms"):
             v = getattr(s, name)
             if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0 or \
