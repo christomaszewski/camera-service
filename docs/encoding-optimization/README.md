@@ -18,7 +18,7 @@ preview streams, and to fix slow WebRTC recovery after the radio link drops.
   crates are given as e.g. `webrtcsink/imp.rs:983`.
 - **Related review:** `docs/review-v1.13.0/` on the same branch. Findings it numbers (DP-1, PB-11, BR-9 …)
   are cited where they bear on this work.
-- **Scripts:** `scripts/` holds two measurement scripts that run today on the software path and take
+- **Scripts:** `scripts/` holds three measurement scripts that run today on the software path and take
   `--encoder hw-hevc-lossless` on a Jetson. See section 5.
 
 ### Decisions the owner has already made
@@ -174,6 +174,44 @@ rework before it can merge: see BR-9, BR-10 and BR-11 in `docs/review-v1.13.0/07
    `core-driver/tools/nvenc_lossless_test.py`, the hardware qualification tool.
 3. Implement R1 regardless if disk allows; it is small and independent.
 4. Repeat step 1 on JetPack 6 if those vehicles carry thermal cameras.
+
+### 1.6 Bayer mosaics on the hardware path — which knobs matter
+
+This is the path 8-bit Bayer cameras already use (`hw-hevc-lossless`). The repo's own Orin measurement
+(`docs/recording-tuning.md`, R39 Orin, MAXN, 2448×2048, noise frames) puts the **whole recorder path at
+67 ms of CPU per frame, of which the colour step is 7.9 ms**. So most of the CPU is spent after the colour
+step — copying into encoder memory, the encoder's CPU side, parsing and muxing a large lossless bitstream,
+and writing it — and nobody has measured how that remainder splits.
+
+Knobs that exist (`recording:` in the sensor YAML):
+
+| Knob | Effect on load |
+|---|---|
+| `nvenc_preset`, `nvenc_maxperf`, `bframes` | **None in lossless mode**, by the repo's own Orin sweep: neither file size nor encode speed changed. `maxperf-enable` is deprecated and B-frames are a no-op on Orin |
+| `videoconvert_threads` (default 4) | Spreads the colour step over cores. Faster wall-clock, not less total CPU, and that step is the small part |
+| `bayer_tile` (`off` / `plain` / `green_diff` / `rct`) | Tiling runs in numpy on the capture thread: 5 / 7 / 10 ms per 5 MP frame on x86 (more on ARM). It also shrinks the bitstream, which is what the parse, mux and disk work scale with. The net effect on the Orin is unmeasured |
+| `keyframe_interval_s` | Only helps if this encoder does temporal prediction in lossless mode, which is firmware-dependent (`core-driver/tools/probe_temporal.py`). If it does, a longer window shrinks the bitstream |
+| Camera frame rate and ROI | Everything scales with pixels per second |
+
+There is no hardware *lossy* recorder mode; the lossy option (`x264`) runs on the CPU.
+
+Changes that would cut CPU but are not knobs today:
+
+1. **Feed NV24 straight from the feeder and drop `videoconvert`.** The mosaic is the luma plane as it is; the
+   chroma is a constant that can be one shared read-only block appended to every buffer. Measured on x86 at
+   5 MP: `videoconvert` 2.8–3.5 ms per frame against roughly zero for the shared-chroma buffer. Worth up to
+   the 7.9 ms the Orin spends on that step. Needs a bit-exact check through `nvvidconv` and the encoder.
+2. **Find where the other ~59 ms goes.** Run the recorder on the Orin with `top -H` (or the per-thread CPU
+   line from PR #65) and split it between `nvvidconv`, the encoder, `h265parse`, the muxer and the feeder.
+   This decides whether anything below is worth doing.
+3. **Skip the unused main-pipeline copy** when there is no preview and no raw endpoint (the default). Every
+   frame is still wrapped and pushed through a pipeline that ends in a `fakesink` — about 120 MB/s of copying
+   at 5 MP and 24 fps (review, `02-core-data-path.md`, improvement 1).
+4. **Try `nvvidconv` for the GRAY8 → NV24 step** so the conversion happens off the CPU. Unverified: whether
+   it accepts GRAY8 for this conversion and whether it keeps the plane exact.
+
+`scripts/bayer_hw_path_cpu.py` measures the CPU-side steps anywhere and the full hardware fragment, with and
+without tiling, on a Jetson.
 
 ---
 
@@ -339,7 +377,8 @@ bridge keeps running but nobody can connect).
 
 ## 3. Suggested order
 
-1. W1 on a real link, and step 1 of section 1.5 on the Orin. Both are measurements and decide the rest.
+1. W1 on a real link, step 1 of section 1.5 on the Orin, and the per-thread CPU split of the Bayer hardware
+   path (section 1.6, item 2). All three are measurements and decide the rest.
 2. W2 (reaper), then R1 (uncompressed) — small, independent, low risk.
 3. R2 (byte split) if the Orin numbers justify it.
 4. W3 (encode once, opt-in), with W4 alongside since both touch `run.sh`.
@@ -369,10 +408,13 @@ python3 docs/encoding-optimization/scripts/recording_cpu_bench.py
 
 # Either script on real footage: headerless little-endian 16-bit frames
 python3 … --raw-file thermal.gray16 --width 640 --height 512
+
+# CPU-side steps of the 8-bit Bayer hardware path; on a Jetson also the full fragment, with and without tiling
+python3 docs/encoding-optimization/scripts/bayer_hw_path_cpu.py
 ```
 
 On a host without the Jetson elements the first script refuses `--encoder hw-hevc-lossless` with a clear
-message and the second skips its hardware row; both were run that way on 2026-11-11.
+message and the other two skip their hardware rows; all three were run that way on 2026-11-11.
 
 ## 6. External sources
 
