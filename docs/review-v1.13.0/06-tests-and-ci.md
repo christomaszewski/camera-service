@@ -709,10 +709,10 @@ on:
   the release branch — #98 cf3fe39 **failure**, #99 f36f633 success (14 min later; then tagged v1.11.0), #100 6316f7a
   success (v1.12.0), #102 6d3af8b success (v1.13.0, all six jobs green) — plus one `pull_request` run for PR #70's
   head (c5b862b, a PR *into* the release branch). No PR from the release branch to `main` exists.
-- 18 commits separate `main` from v1.13.0. CI ran on 4 of those SHAs. **13 commits were never built or tested as
+- 18 commits separate `main` from v1.13.0. CI ran on 4 of those SHAs. **14 commits were never built or tested as
   pushed**, including `4a9daa6` "preserve FFV1 frames at end of replay", `59d36eb`/`71fd741`/`789f013` (the whole
-  export feature), `2c2dde7`, `9610e54` "keep mono/Bayer codes exact through the YUV step" and `c1864b4`; the merge
-  commit of PR #70 (`6fa5dcf`) was also never tested as merged.
+  export feature), `2c2dde7`, `9610e54` "keep mono/Bayer codes exact through the YUV step" and `c1864b4`; and the merge
+  commit of PR #70 (`6fa5dcf`; only the PR's head was tested).
 
 Consequences: (a) a release can be tagged from a commit that never ran CI — nothing prevents it; (b) when a manual
 run is red there is no per-commit history to bisect with; (c) required status checks cannot protect a branch that
