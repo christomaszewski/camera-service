@@ -210,8 +210,88 @@ Changes that would cut CPU but are not knobs today:
 4. **Try `nvvidconv` for the GRAY8 → NV24 step** so the conversion happens off the CPU. Unverified: whether
    it accepts GRAY8 for this conversion and whether it keeps the plane exact.
 
-`scripts/bayer_hw_path_cpu.py` measures the CPU-side steps anywhere and the full hardware fragment, with and
-without tiling, on a Jetson.
+### 1.7 Bayer hardware path — the investigation to run on the Orin
+
+`scripts/bayer_hw_path_cpu.py` is the tool. It has two parts:
+
+- **Part 1** times each CPU-side step on its own: the push into GStreamer, the `videoconvert` colour step,
+  each `bayer_tile` mode, and building the NV24 buffer in the feeder.
+- **Part 2** records whole variants, decodes them with the service's own read path, and compares every
+  frame with the input. It reports CPU per frame, size and the bit-exact count for each:
+
+  | Variant | Input | What it tests |
+  |---|---|---|
+  | A | GRAY8 | The recorder fragment exactly as shipped |
+  | B | NV24 built in the feeder | The shipped fragment with its `videoconvert` stage removed (change 1 in 1.6) |
+  | C | GRAY8 | GRAY8 straight into `nvvidconv`, no `videoconvert` (change 4 in 1.6) |
+  | A + tile | tiled GRAY8 | Variant A fed `bayer_tile=plain` frames |
+
+`--print-fragments` prints the exact hardware pipelines for A, B and C without running anything.
+
+**What was already established on x86 (software x265 in place of the hardware encoder), 2448×2048:**
+
+- Variant A is bit-exact, 12/12.
+- The two-block NV24 buffer of variant B (mosaic, then one shared constant chroma block) is read correctly by
+  GStreamer: recorded through a 4:4:4 software encode and decoded, the luma is bit-exact, 12/12. This proves
+  the buffer layout only. It says nothing about `nvvidconv` or the hardware encoder.
+- Tiling shrank the lossless output from 54.7% to 45.6% of raw on a synthetic mosaic, and stays bit-exact.
+- Variant C cannot run without the Jetson elements.
+
+**Setup.** Run inside the `cam-core` image with the encoder exposed, from a checkout of this branch mounted
+into the container (the script imports `cam_driver` from the checkout, not from the image). On JetPack 7:
+
+```
+docker run --rm --device nvidia.com/gpu=all -v "$PWD":/repo -w /repo --entrypoint python3 <cam-core image> \
+    docs/encoding-optimization/scripts/bayer_hw_path_cpu.py --encoder hw-hevc-lossless \
+    --width <sensor width> --height <sensor height> --fps <camera fps> --frames 600
+```
+
+On JetPack 6 use `--runtime nvidia` in place of the `--device` flag. Note the power mode (`nvpmodel -q`) with
+every result; the documented 67 ms figure was taken in MAXN.
+
+**Steps, in order.**
+
+1. **Baseline and per-thread split.** Run the command above. In a second shell run
+   `top -H -b -d 2 -p $(pgrep -f bayer_hw_path_cpu)` and `tegrastats --interval 1000` for the duration.
+   Record variant A's CPU per frame and size, and the per-thread CPU of the feeder (the Python main thread),
+   `videoconvert`, `nvvidconv`, the encoder, `h265parse` and the muxer. Compare with the documented 67 ms.
+   Then repeat `top -H` on the real core process while the service records from the camera, to add the
+   capture thread, the main-pipeline copy and the transport publish to the picture.
+   *Decides:* which of the steps below can matter. If one thread dominates, start there.
+2. **NV24 from the feeder (variant B).** Pass = bit-exact on every frame, and CPU per frame lower than A by
+   about the `videoconvert` cost from Part 1.
+   *If it passes:* build the two-block buffer where the recorder wraps frames (`session.py:61`,
+   `_wrap_buffer`) when the encoder is `hw-hevc-lossless` and the source is 8-bit mono or Bayer; give the
+   recorder appsrc NV24 caps and start the fragment at `nvvidconv` (`recorder.py:195-217`). The sidecar's
+   `recording_colorimetry` pin does not change. Keep the qualification tool in step
+   (`core-driver/tools/nvenc_lossless_test.py`; review finding TQ-18) and mind review finding DP-1: a row
+   that is not a multiple of 4 bytes needs explicit plane offsets or a refusal.
+3. **`nvvidconv` does the colour step (variant C).** Three outcomes: it fails to negotiate (drop the idea);
+   it runs but is not bit-exact (drop the idea); it runs bit-exact. In the last case compare its CPU with B
+   and take the cheaper one. C is the smaller code change: only the fragment changes, not the feeder.
+4. **Tiling, net effect (A against A + tile).** Add the `bayer_tile=plain` time from Part 1 to the A + tile
+   row, then compare total CPU and size with A. Follow with real footage through
+   `core-driver/tools/tiling_benchmark.py` (usage in `docs/recording-tuning.md`), which reports size and
+   encode rate per mode.
+   *Decides:* whether to recommend `bayer_tile: plain` for load, for disk, or not at all.
+5. **Temporal prediction.** Run `core-driver/tools/probe_temporal.py` on a real hardware recording. If
+   delta frames are clearly smaller than keyframes, re-run the tiling benchmark with `--gop-seconds` to see
+   what `keyframe_interval_s` buys. If every frame is a keyframe, that knob is moot on this firmware.
+6. **The unused main-pipeline copy.** With no preview and no raw endpoint, `_on_frame` still pushes every
+   frame into `camsrc`, which ends in a `fakesink` (`pipeline.py:599-601`, `:323`). Replay already skips
+   this push through `_discard_replay_main` (`pipeline.py:315`). Extend that condition to live sources in a
+   test build and compare the core's per-thread CPU before and after while recording.
+
+**Record the results in this shape** (one row per variant, per geometry, per JetPack):
+
+| Variant | CPU ms/frame (script) | Per-thread CPU (`top -H`) | Size vs raw | Bit-exact | Power mode | Notes |
+|---|---|---|---|---|---|---|
+| A as shipped | | | | | | |
+| B NV24 from the feeder | | | | | | |
+| C `nvvidconv` colour step | | | | | | |
+| A + `bayer_tile=plain` | | | | | | |
+
+Add the measured rows to `docs/recording-tuning.md` when done, next to the existing Orin table.
 
 ---
 
@@ -377,8 +457,8 @@ bridge keeps running but nobody can connect).
 
 ## 3. Suggested order
 
-1. W1 on a real link, step 1 of section 1.5 on the Orin, and the per-thread CPU split of the Bayer hardware
-   path (section 1.6, item 2). All three are measurements and decide the rest.
+1. W1 on a real link, step 1 of section 1.5 on the Orin, and the Bayer hardware-path investigation in
+   section 1.7. All three are measurements and decide the rest.
 2. W2 (reaper), then R1 (uncompressed) — small, independent, low risk.
 3. R2 (byte split) if the Orin numbers justify it.
 4. W3 (encode once, opt-in), with W4 alongside since both touch `run.sh`.
@@ -409,8 +489,10 @@ python3 docs/encoding-optimization/scripts/recording_cpu_bench.py
 # Either script on real footage: headerless little-endian 16-bit frames
 python3 … --raw-file thermal.gray16 --width 640 --height 512
 
-# CPU-side steps of the 8-bit Bayer hardware path; on a Jetson also the full fragment, with and without tiling
-python3 docs/encoding-optimization/scripts/bayer_hw_path_cpu.py
+# 8-bit Bayer hardware path: CPU-side steps, then whole variants recorded, decoded and compared (section 1.7)
+python3 docs/encoding-optimization/scripts/bayer_hw_path_cpu.py --frames 12              # software stand-in
+python3 docs/encoding-optimization/scripts/bayer_hw_path_cpu.py --encoder hw-hevc-lossless  # on a Jetson
+python3 docs/encoding-optimization/scripts/bayer_hw_path_cpu.py --print-fragments         # show the hardware pipelines
 ```
 
 On a host without the Jetson elements the first script refuses `--encoder hw-hevc-lossless` with a clear
