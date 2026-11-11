@@ -19,7 +19,7 @@ everything ran from a copy of the tracked files under
 - **No automated test at all:** `bridge_stream.py`, `zenoh_advertiser.py`, `ros2-source/node.py`, every C++ bridge
   (never compiled in CI); `sources/usb.py`, `sources/rtsp.py` and `main.py` only through log-grepping smokes;
   `supervisor.py` at 37 %.
-- **CI:** the release branch is not push-triggered (13 of 18 commits since v1.10.0 never ran CI; the three tags were
+- **CI:** the release branch is not push-triggered (14 of 18 commits since v1.10.0 never ran CI as pushed; the three tags were
   covered by manual dispatch), and `registry-release.yml` publishes without requiring a green run.
 
 ---
