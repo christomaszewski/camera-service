@@ -11,7 +11,7 @@ This directory holds the summary (this file) and seven area reports with the evi
 | [01-launcher-and-rig-contract.md](01-launcher-and-rig-contract.md) | `cam-up`, `rigging.yaml`, compose files, release process, contract conformance | RP-1…3, LC-1…12 |
 | [02-core-data-path.md](02-core-data-path.md) | capture → record / transport pipeline, sidecars, timestamps | DP-1…17 |
 | [03-control-plane-config-health.md](03-control-plane-config-health.md) | lifecycle, Zenoh control, signals, supervisor, config schema, health | CH-1…23 |
-| [04-sources-replay-export.md](04-sources-replay-export.md) | live sources, replay, pcap, coordinated startup, proxy export | SR-1…17 |
+| [04-sources-replay-export.md](04-sources-replay-export.md) | live sources, replay, pcap, coordinated startup, proxy export | SR-1…18 |
 | [05-plugins-and-image-builds.md](05-plugins-and-image-builds.md) | ROS 2 / ROS 1 / WebRTC bridges, `ros2-source`, Dockerfiles, build scripts | PB-1…25 |
 | [06-tests-and-ci.md](06-tests-and-ci.md) | test suite quality, coverage, CI, tests to add | TQ-1…20, CI-1…12, TA-1…41 |
 | [07-branches-and-open-prs.md](07-branches-and-open-prs.md) | every remote branch and open PR against the release | BR-1…12 |
@@ -35,7 +35,8 @@ The problems cluster where nothing exercises the code:
    multiple of 4 bytes records blank or crashes the core (DP-1); pixel formats the parser does not know become
    8-bit mono without a word (DP-6, SR-15).
 2. **Encoded (stream-copy) sources**, which have the least test coverage: sessions that never start recording
-   (DP-2), do not survive a reconnect (DP-9), and cannot be replayed in the normal orchestrated shape (SR-9, SR-10).
+   (DP-2), do not survive a reconnect (DP-9), and cannot be replayed faithfully in the normal orchestrated
+   shape (SR-9, SR-10, SR-18).
 3. **Failure and restart paths**: a stop that lands during a transition, a recorder error with the control
    plane off, a stalled consumer, a stale socket after an unclean stop (CH-1, CH-2, DP-5, PB-1, PB-2).
 4. **Release mechanics**: three releases cut from a branch that is not `main`, published without a CI gate (RP-1, RP-2).
@@ -48,9 +49,9 @@ No finding was rated critical. Counts for the release tree, by area:
 | Launcher / rig contract (LC) | – | 4 | 8 |
 | Core data path (DP) | 3 | 7 | 7 |
 | Control plane, config, health (CH) | 3 | 5 | 15 |
-| Sources, replay, export (SR) | 3 | 9 | 5 |
+| Sources, replay, export (SR) | 4 | 9 | 5 |
 | Plugins and image builds (PB) | 2 | 12 | 11 |
-| **Total** | **12** | **39** | **46** |
+| **Total** | **13** | **39** | **46** |
 
 Separately: 12 findings in unmerged branches (BR), 20 test-quality problems (TQ), 12 CI gaps (CI) and 41
 proposed tests (TA).
@@ -61,7 +62,7 @@ proposed tests (TA).
 
 - The seven areas were reviewed in parallel passes, each reading its files in full and running what it could.
   The top findings of every pass were then re-checked independently, by re-running the experiment or by
-  re-reading the cited code: DP-1, DP-5 and SR-9 were re-run; LC-1, LC-2, LC-5, LC-6 and LC-8 were found by
+  re-reading the cited code: DP-1, DP-5, SR-9 and SR-18 were re-run; LC-1, LC-2, LC-5, LC-6 and LC-8 were found by
   experiment in the first place; BR-1 and the two unmerged-work claims were re-derived with git; DP-2, DP-3,
   DP-6, CH-1, CH-2, CH-8, CH-10, PB-1 to PB-3, PB-8, PB-11, PB-16, PB-17, TQ-1, TQ-5 and TQ-14 were re-read
   at the cited lines. Findings not in that list rest on the area report's own evidence, which states for each
@@ -111,9 +112,10 @@ proposed tests (TA).
 
 | ID | What happens | Trigger | Evidence |
 |---|---|---|---|
-| SR-9 | Replay of a stream-copy H.264/H.265 recording hangs: 0 frames delivered, state `playing`, never finishes | The replay window or bag epoch starts after the session's first frames (`--from`, or a camera that started before the bag), or `speed: 0`. FFV1 and MJPEG recordings are unaffected | re-run (synthetic H.264 session, GStreamer 1.24.2) |
+| SR-9 | Replay of a stream-copy H.264/H.265 recording hangs: 0 frames delivered, state `playing`, never finishes | The replay window or bag epoch starts after the session's first frames (`--from`, or a camera that started before the bag), or `speed: 0`. FFV1 recordings are unaffected; MJPEG does not hang but see SR-18 | re-run (synthetic H.264 session, GStreamer 1.24.2) |
+| SR-18 | Replay of a stream-copy MJPEG recording hands consumers (ROS, WebRTC) each image under an earlier frame's id and timestamp — every delivered frame, off by 14 to 23 frames in two runs. The re-recorded stream stays exact | Same trigger as SR-9: pre-window frames or `speed: 0` make the best-effort decode queue drop, and the stamp lookup by PTS then hits the wrong frame | re-run |
 | SR-10 | Under `--startup coordinated`, a low-frame-rate stream-copy H.26x session never reports `held`; the whole startup times out | Frame rate + 2 below the decoder's thread count: ≤ 13 fps on a 16-core replay host | run (thread count emulated) |
-| SR-1 | With `retime: wall`, every stamp is stale by the hold duration (20 s by default) and shifted by `from_s` | `rig replay --wall-clock` | run |
+| SR-1 | With `retime: wall`, every stamp is stale by the hold duration (rig's legacy start delay, 20 s by default) and shifted by `from_s` | `rig replay --wall-clock` | run |
 | SR-11, SR-12 | Pause/resume or a speed change during a gap, or a release gate already in the past, shifts the camera's timeline for the rest of the run | Operator control during a lead-in; a slow container start | run |
 | LC-3 | `rig standby` / `rig activate` / the `OP` column / `rig up --standby` do nothing for cameras, although the service implements standby/active | Always (the three state verbs are not implemented or declared) | read |
 | TQ-14 | Whether FFV1 recordings made on GStreamer 1.20 (JP6) can be exported is unobserved: 1.20 snaps FFV1 PTS to the frame-rate grid, export rejects a mismatch above 1 ms, and the test fixture rewrites PTS after the encoder so CI cannot see it | Any JP6 FFV1 recording with ordinary jitter or a non-25 fps rate | read (the commit tagged v1.11.0 changed only tests and docs to turn that lane green) |
@@ -152,17 +154,19 @@ Aravis tarball has no checksum; the WebRTC build fetches six undeclared git repo
 | D1 / D2 — data directory and run registry | Met; `output_dir` can move data out of rig's view (LC-9) |
 | §13 image pins and inventories (P2–P4) | Met by reading and by the existing tests |
 | §15 operational states | **Not implemented** (LC-3) |
-| §16.5 replay source (R6–R9) | R6 met (input mounted read-only); R7 not met for `retime: wall` and late gates (SR-1, SR-12); R8 met for explicit session lists, `[]` rejected (LC-8); stream-copy H.26x replay blocked by SR-9 |
-| §16.6 coordinated startup (R10–R11) | Implemented and labelled; SR-10 and SR-13 are the gaps |
-| §17 export (X3–X5) | Profile shape and write-only-under-destination hold by reading and tests; provenance hash issue SR-14; JP6 input question TQ-14 |
+| §16.5 replay source (R6–R9) | R6 met (recordings opened and mounted read-only). R7 partly: epoch and window are implemented, but `retime: wall` is anchored at open (SR-1), a late gate or operator control in a gap shifts the timeline (SR-11, SR-12), the legacy gate lets one preview frame out before release, and stream-copy recordings are blocked or mis-stamped (SR-9, SR-18). R8 partly: explicit session lists work in place under any instance name; an empty list is rejected (LC-8). R9 met |
+| §16.6 coordinated startup (R10–R11) | Met in form: every operation and rejection of session protocol v1 is implemented and the image is labelled. Gaps: SR-10 (never `held` for low-rate stream-copy H.26x) and SR-13 (after release, any control-directory hiccup ends the replay; status rewritten with fsync 10–46 times a second where the contract asks for once per 2 s) |
+| §17 export (X3–X5) | X3 and X5 met (profile shape; writes only under `destination`, source hashed before and after, request paths cannot escape). X4 partly: `required_bytes` is never reported, so rig falls back to twice the input size; SR-14 (provenance hash). Open question on JP6 input: TQ-14 |
 | §12 builds (B1–B4) | `build-no-cache` check passes; `build.sources` undeclared, so no offline build (PB-16, PB-17); edge cases PB-19 |
 | Optional declarations | `replay.sim_time`, `interface:` and `build.sources` are not declared (LC-11) |
 
-Row-by-row evidence for sections 16 and 17 is in `04-sources-replay-export.md`.
+Row-by-row evidence for sections 16 and 17 is in `04-sources-replay-export.md`, section 2.
 
-Two observations for rig itself: descriptors are loaded with `yaml.safe_load`, which accepts duplicate keys
-silently (that is what makes BR-1 dangerous — a strict loader would refuse the file); and the contract's "an
-empty `replay_input_sessions` means all" is not what the one first-party source service accepts.
+Three observations for rig itself: descriptors are loaded with `yaml.safe_load`, which accepts duplicate keys
+silently (that is what makes BR-1 dangerous — a strict loader would refuse the file); the contract's "an
+empty `replay_input_sessions` means all" is not what this source service accepts; and X4 says result
+files are "relative to the recording directory" while rig's verifier requires them relative to the request root
+(which is what the exporter returns).
 
 ---
 
@@ -200,7 +204,11 @@ Ordered by value. Defect fixes are in section 3; these are capabilities.
     Bayer pattern and 16-bit Bayer labels on the JP6 header transport (PB-9).
 13. **Decide the parked RTSP egress plugin** (`rtsp-bridge`, commit `4ec9e74`): 1,899 lines with passing unit
     tests on a branch with no PR. Merge it or drop it knowingly — that branch is the only copy.
-14. **Performance:** skip the unused `camsrc` copy when there is no preview or raw endpoint (about 120 MB/s
+14. **Start a windowed replay at the right fragment.** Every frame before `from_s` is decoded and discarded
+    today, on every start, restart and loop wrap; the CSV and fragment headers already say where to begin.
+    That removes the unpaced pre-window burst behind SR-9 and SR-18 and a start-up cost that grows with `from_s`.
+    Also report `required_bytes` from export preflight (X4).
+15. **Performance:** skip the unused `camsrc` copy when there is no preview or raw endpoint (about 120 MB/s
     of copying at 5 MP / 24 fps), and avoid the double copy on the shm+header publish path.
 
 ---
@@ -254,6 +262,7 @@ certify on 2 of 7 examples against unpinned rig (CI-5); no lint, shellcheck or t
 | new (S) | Recorder round trip at widths not divisible by 4, every encoder; `bytes_per_frame` against `GstVideoInfo.size` | DP-1 — fails today |
 | new (S) | Mono14 / RGB8 / unknown format names; GigE payload size against the device format | DP-6, SR-15 |
 | new (M) | H.264 stream-copy session: sync point never arrives; reconnect with changed caps; replay with `from_s` and with an epoch after the session start | DP-2, DP-9, SR-9 — the replay case fails today |
+| new (S) | Stream-copy MJPEG replay with a window: every consumer image carries its own frame id and stamp | SR-18 — fails today |
 | TA-2 (M) | Real recorder with jittered stamps → export, asserted per GStreamer lane, no PTS-rewriting probe | TQ-14 |
 | TA-6, TA-7 (M) | Supervisor with real child processes; `main.py` exit codes, signal finalize, stop during a transition | CH-1, CH-2, CH-4, CH-11 |
 | TA-8 (M) | SIGKILL mid-session: closed fragments decode, the tail is flagged, never replayed as complete | crash consistency |
@@ -290,7 +299,7 @@ Add a duplicate-key check on `rigging.yaml` to the launcher tests so a BR-1-styl
 2. **Recorded-data fidelity.** DP-1 (and the same convention in PB-4, PB-5, PB-25), DP-6 + SR-15, DP-3, DP-2,
    CH-1, CH-2, DP-7, then the attestations DP-4, DP-8, DP-17. Each with its regression test from section 6.
 3. **Availability.** DP-5, PB-1, PB-2, PB-3, CH-4, LC-1, LC-4, PB-11.
-4. **Replay.** SR-9, SR-10, SR-1, SR-11 to SR-13, LC-8, and settle TQ-14 on the 1.20 lane.
+4. **Replay.** SR-9, SR-18, SR-10, SR-1, SR-11 to SR-13, LC-8, and settle TQ-14 on the 1.20 lane.
 5. **Contract features and hardening.** LC-3 state verbs, LC-2, strict config, CH-7 / PB-13 / SR-4, build
    reproducibility.
 6. **Test suite and CI.** The tier-1 tests and TA-41, then the untested components (bridges, `ros2-source`,
