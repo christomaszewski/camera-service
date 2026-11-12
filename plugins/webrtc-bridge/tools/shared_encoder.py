@@ -31,14 +31,18 @@ this container's encoders (it prints the fragment, or explains on stderr and exi
 import os
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from h264_level import LEVELS, level_for_bitrate  # noqa: E402
+
 BITRATE_DEFAULT = 4_000_000
-PROFILES = ("constrained-baseline", "baseline", "main", "high")
+PROFILES = ("constrained-baseline", "main", "high")
 _CODEC_OF = {"video/x-h264": "h264", "video/x-h265": "h265"}
 # Fields h26Xparse adds to its caps only after parsing the stream headers. Declared up front (the
 # pipelines here are 8-bit 4:2:0 progressive by construction: I420 or NVMM NV12 into the encoder).
 _PARSED_FIELDS = ("coded-picture-structure=(string)frame,chroma-format=(string)4:2:0,"
                   "bit-depth-luma=(uint)8,bit-depth-chroma=(uint)8")
 QUEUE = "queue name=shared_enc_q leaky=downstream max-size-buffers=2"
+NVENC_MIN_LEVEL = "2.1"         # the lowest H.264 level nvv4l2h264enc writes into a stream (measured, R39)
 
 
 def wanted(value):
@@ -69,40 +73,106 @@ def parse_bitrate(value, start_bitrate=None):
 def parse_profile(value):
     """H.264 profile for the shared encoder. Unlike the per-viewer mode -- where webrtcsink forces
     constrained-baseline whatever is asked -- any of PROFILES is honoured; the default stays
-    constrained-baseline, which every browser decodes."""
+    constrained-baseline, which every browser decodes. `baseline` means that too: it is what WebRTC
+    negotiates under that name and what x264enc emits for it."""
     p = str(value or "").strip().lower()
     return p if p in PROFILES else "constrained-baseline"
 
 
+def encoder_profile(encoder, profile, x264_preset=None):
+    """The profile to pin for `encoder`: the one asked for, where the encoder will really produce it.
+
+    x264enc at its `ultrafast` preset uses none of the tools above constrained-baseline (no CABAC, no
+    8x8 transform), so that is what its stream is whatever it is asked for -- and asked for `high` it
+    still LABELS its caps `high`. The parser then reads the real profile from the SPS, and a second,
+    different announcement is what webrtcsink refuses; that this goes well today rests on the parser
+    quietly keeping the label. Pinning what the encoder will produce leaves nothing to rescue.
+    `superfast` and slower produce main and high as asked (measured: profile-level-id 4d40.. / 6400..)."""
+    asked = parse_profile(profile)
+    if encoder == "x264enc" and str(x264_preset or "ultrafast").strip().lower() == "ultrafast":
+        return "constrained-baseline"
+    return asked
+
+
+_RANK_USABLE = 64      # GST_RANK_MARGINAL: below it webrtcsink does not consider an encoder either
+
+
 def select_encoder(codec, available):
-    """The encoder element for `codec` among the element names in `available`: the Jetson hardware
-    encoder when its pieces are there, else software for H.264, else None."""
+    """The encoder element for `codec`: the Jetson hardware encoder when its pieces are there, else
+    software for H.264, else None.
+
+    `available` is {element name: rank} (or just the names, all of one rank). The ranks are honoured
+    the way per-viewer encoding honours them, so GST_PLUGIN_FEATURE_RANK remains the one lever: an
+    encoder ranked NONE is not used, and the hardware encoder ranked BELOW x264enc gives way to it --
+    for a deployment that keeps NVENC for the recorder. By default it outranks x264enc (257 to 256 on
+    L4T), and it is the only H.265 encoder shared."""
+    ranks = available if isinstance(available, dict) else {name: 256 for name in available}
+    usable = lambda name: ranks.get(name, 0) >= _RANK_USABLE        # noqa: E731
     hw = "nvv4l2h264enc" if codec == "h264" else "nvv4l2h265enc"
-    if hw in available and "nvvidconv" in available:
+    hw_ok = usable(hw) and "nvvidconv" in ranks
+    sw_ok = codec == "h264" and usable("x264enc")
+    if hw_ok and not (sw_ok and ranks["x264enc"] > ranks[hw]):
         return hw
-    if codec == "h264" and "x264enc" in available:
-        return "x264enc"
-    return None
+    return "x264enc" if sw_ok else None
 
 
 def pin_caps(encoder, codec, profile=None, level=None):
     """Caps for the capsfilter after the encoder, so the parser's FIRST announcement is its last.
     nvv4l2h264enc leaves profile and level out of its caps and takes both from downstream: pin both
     (the level must be the one the geometry needs -- h264_level). x264enc announces its own level and
-    takes only the profile. H.265 encoders announce everything themselves."""
+    takes only the profile. H.265 encoders announce everything themselves.
+
+    The level to pin for nvv4l2h264enc is hardware_level()'s: the one it will really write. It then
+    announces SOME whole-number levels with a trailing ".0": asked for level 3 it encodes level 3 and
+    announces "3.0" (level 4 comes back as "4"). A filter pinned to "3" refused that, and every
+    SD-sized preview -- 640x480, a 5 MP camera scaled to 640 -- died not-negotiated. So a whole-number
+    level is pinned in both spellings, and level_caps() puts the canonical one back in front of the
+    parser (which will announce "3" once it has read the SPS)."""
     base = f"video/x-{codec},stream-format=byte-stream,alignment=au"
     if codec != "h264":
         return base
-    caps = base + f",profile={parse_profile(profile)}"
+    caps = base + f",profile={parse_profile(profile)}"          # the caller's encoder_profile()
     if encoder == "nvv4l2h264enc" and level:
-        caps += f",level=(string){level}"
+        level = str(level)
+        caps += ",level=(string)" + ("{ %s, %s.0 }" % (level, level) if level.isdigit() else level)
     return caps
+
+
+def hardware_level(level, bitrate):
+    """The level nvv4l2h264enc will WRITE into the stream when asked for `level` at `bitrate` bit/s.
+
+    It is not always the one asked for, and the difference is fatal here: the encoder announces the
+    level it was asked for, the parser then reads the real one from the SPS and announces again, and
+    webrtcsink refuses the second announcement. Measured on an R39 Orin (asked -> written):
+
+        320x266  at 0.5 Mbit/s   1.3 -> 2.1      it writes nothing below 2.1
+        480x400  at   6 Mbit/s   2.1 -> 3        level 2.1 carries 4 Mbit/s
+        640x534  at  20 Mbit/s   3   -> 3.2      level 3 carries 10, 3.1 carries 14
+        1280x1070 at 30 Mbit/s   4   -> 4.1      level 4 carries 20
+
+    i.e. the lowest level that is at least the one asked for, at least 2.1, and whose bitrate limit
+    (h264_level's table) covers the configured bitrate. Asking for exactly that level makes the encoder
+    write it and announce it, so nothing changes afterwards. Erring upwards is harmless (it writes what
+    it is asked for when that is more than it needs); erring downwards is the failure above. A level
+    the table does not know is returned as it is."""
+    if level not in LEVELS:
+        return level
+    floor = level if LEVELS.index(level) >= LEVELS.index(NVENC_MIN_LEVEL) else NVENC_MIN_LEVEL
+    return level_for_bitrate(floor, int(bitrate or 0) / 1000.0)
+
+
+def level_caps(codec, level=None):
+    """Caps for the capssetter between the hardware encoder's filter and the parser (shared_enc_level):
+    the level in the spelling the parser itself will use, whatever the encoder wrote. Without a level
+    it changes nothing."""
+    return f"video/x-{codec}" + (f",level=(string){level}" if level else "")
 
 
 def chain(codec, encoder, bitrate, x264_preset="ultrafast"):
     """The launch fragment from raw I420 to the encoded stream webrtcsink takes: a queue, the encoder
-    (named shared_enc), the capsfilter bridge_stream completes at run time (shared_enc_caps), the
-    parser and the capssetter that declares what the parser would otherwise add later.
+    (named shared_enc), the capsfilter bridge_stream completes at run time (shared_enc_caps), for the
+    hardware H.264 encoder the capssetter that respells its level (shared_enc_level, see pin_caps),
+    the parser and the capssetter that declares what the parser would otherwise add later.
 
     The queue gives the upload and the encode their own thread, as webrtcsink's per-viewer pipelines
     have: without it they run on the thread that debayers and converts, and a 5 MP Bayer stream came
@@ -119,6 +189,8 @@ def chain(codec, encoder, bitrate, x264_preset="ultrafast"):
     else:
         raise ValueError(f"no shared encoder for {encoder!r}")
     parser = "h264parse" if codec == "h264" else "h265parse"
+    if encoder == "nvv4l2h264enc":
+        parser = f'capssetter name=shared_enc_level join=true caps="{level_caps(codec)}" ! {parser}'
     return (f'{QUEUE} ! {head} ! capsfilter name=shared_enc_caps caps="{pin_caps(encoder, codec)}" ! '
             f'{parser} config-interval=-1 ! capssetter join=true caps="video/x-{codec},{_PARSED_FIELDS}"')
 
@@ -154,12 +226,15 @@ class KeyframeLimiter:
 
 
 def _available():
+    """{element name: rank} for the elements a shared chain can use that this container has. The rank
+    is the registry's, so it carries GST_PLUGIN_FEATURE_RANK."""
     import gi
     gi.require_version("Gst", "1.0")
     from gi.repository import Gst
     Gst.init(None)
     names = ("nvvidconv", "nvv4l2h264enc", "nvv4l2h265enc", "x264enc", "h264parse", "h265parse", "capssetter")
-    return {n for n in names if Gst.ElementFactory.find(n) is not None}
+    found = {n: Gst.ElementFactory.find(n) for n in names}
+    return {n: int(f.get_rank()) for n, f in found.items() if f is not None}
 
 
 def main():
@@ -176,6 +251,10 @@ def main():
               + (f" (missing {', '.join(missing)})" if missing else
                  " (H.265 needs the Jetson hardware encoder)" if codec == "h265" else ""), file=sys.stderr)
         return 3
+    hw = "nvv4l2h264enc" if codec == "h264" else "nvv4l2h265enc"
+    if encoder != hw and hw in have:
+        print(f"shared encoder: {encoder} (rank {have[encoder]}) instead of {hw} (rank {have[hw]}): "
+              "GST_PLUGIN_FEATURE_RANK decides, as it does for per-viewer encoding", file=sys.stderr)
     print(chain(codec, encoder, parse_bitrate(env("CAM_WEBRTC_BITRATE"), env("CAM_WEBRTC_START_BITRATE")),
                 env("CAM_WEBRTC_X264_PRESET")))
     return 0

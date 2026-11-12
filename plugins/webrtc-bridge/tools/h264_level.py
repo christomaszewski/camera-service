@@ -68,6 +68,18 @@ def h264_level_for(width, height, fps, bitrate_kbps=None, max_level="5.2"):
     return _LEVELS[cap][0]                            # beyond 5.2 entirely -> the clamp (caller warns)
 
 
+def level_for_bitrate(level, bitrate_kbps):
+    """The lowest level at or above `level` whose bitrate ceiling (Baseline/Main; High allows 1.25x, so
+    for High this only ever answers higher than needed) covers `bitrate_kbps`; the highest level when
+    none does. Raises ValueError for a level this table does not know."""
+    if level not in _INDEX:
+        raise ValueError("unknown level %r (want one of %s)" % (level, LEVELS))
+    for lvl, _maxfs, _maxmbps, maxbr in _LEVELS[_INDEX[level]:]:
+        if maxbr >= (bitrate_kbps or 0):
+            return lvl
+    return LEVELS[-1]
+
+
 def level_covers(level, width, height, fps, bitrate_kbps=None):
     """Does `level` actually cover width x height @ fps[ + bitrate]? Lets the caller detect when a
     max_level clamp (or the 5.2 ceiling) is BELOW what the resolution needs and warn -- the advertised

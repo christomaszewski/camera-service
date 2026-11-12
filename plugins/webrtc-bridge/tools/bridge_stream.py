@@ -40,7 +40,8 @@ from header_transport import (HeaderError, PtsTracker, TS_SOURCE_SHORT,
 from idle_gate import IdleGate, parse_grace_s, parse_idle_fps
 from session_reaper import (SessionReaper, flatten_stats, parse_max_sessions, parse_stale_s,
                             receiver_key)
-from shared_encoder import KeyframeLimiter, parse_profile, pin_caps
+from shared_encoder import (KeyframeLimiter, encoder_profile, hardware_level, level_caps, parse_profile,
+                            pin_caps)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bridge_stream")
@@ -354,6 +355,7 @@ class Bridge:
         self._keyframes = KeyframeLimiter(1.0)
         self._own_keyframe_thread = None
         self._shared_keyframes = 0      # keyframes the shared encoder has actually produced
+        self._shared_said = set()       # what has been explained about the shared encoder, once each
 
     def build(self):
         Gst.init(None)
@@ -822,14 +824,47 @@ class Bridge:
             if level is not None and not level_covers(level, w, h, fps):
                 log.warning("h264: %dx%d@%d needs a level above the clamp %s -- the stream may not decode; "
                             "lower the resolution or raise CAM_WEBRTC_MAX_LEVEL", w, h, fps, maxlvl)
-        caps = pin_caps(self._shared_name, self._shared_codec, parse_profile(_env("CAM_WEBRTC_PROFILE")), level)
+            if level is not None and self._shared_name == "nvv4l2h264enc":
+                # the geometry's level is only what to ASK for; the hardware encoder writes the one its
+                # bitrate needs, and never less than 2.1 -- pin that one, or the parser announces twice
+                written = hardware_level(level, self._shared_bitrate())
+                if written != level and (level, written) not in self._shared_said:
+                    self._shared_said.add((level, written))
+                    log.info("shared encoder: %dx%d@%d fits level %s; at %d bit/s the hardware encoder writes "
+                             "level %s, so that is the level pinned and offered", w, h, fps, level,
+                             self._shared_bitrate(), written)
+                level = written
+        asked = parse_profile(_env("CAM_WEBRTC_PROFILE"))
+        profile = encoder_profile(self._shared_name, asked, self._shared_preset())
+        if profile != asked and "profile" not in self._shared_said:
+            self._shared_said.add("profile")
+            log.warning("shared encoder: x264enc at its ultrafast preset produces %s, not %s (CAM_WEBRTC_PROFILE); "
+                        "set CAM_WEBRTC_X264_PRESET=superfast or slower for it", profile, asked)
+        caps = pin_caps(self._shared_name, self._shared_codec, profile, level)
         pin = self.pipeline.get_by_name("shared_enc_caps")
         if pin is not None:
             pin.set_property("caps", Gst.Caps.from_string(caps))
+        respell = self.pipeline.get_by_name("shared_enc_level")
+        if respell is not None:                       # the hardware H.264 encoder: see pin_caps
+            respell.set_property("caps", Gst.Caps.from_string(level_caps(self._shared_codec, level)))
         if self._shared_name != "x264enc":            # the hardware encoders read their GOP when they
             _configure_live_encoder(self._shared, fps=fps)   # take these caps: set it from the real rate
         log.info("shared encoder: %dx%d@%d -> %s", w, h, fps, caps)
         return Gst.PadProbeReturn.OK
+
+    def _shared_preset(self):
+        """x264enc's speed preset as the element has it; None for an encoder without one."""
+        try:
+            return self._shared.get_property("speed-preset").value_nick
+        except Exception:                             # noqa: BLE001
+            return None
+
+    def _shared_bitrate(self):
+        """The shared encoder's bitrate in bit/s, as the element has it (nvv4l2h26Xenc: bit/s)."""
+        try:
+            return int(self._shared.get_property("bitrate"))
+        except Exception:                             # noqa: BLE001 -- no such property: nothing to add
+            return 0
 
     def _on_shared_buffer(self, _pad, info):
         buf = info.get_buffer()

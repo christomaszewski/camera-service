@@ -4,7 +4,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from h264_level import h264_level_for, level_covers  # noqa: E402
+from h264_level import LEVELS, h264_level_for, level_covers, level_for_bitrate  # noqa: E402
 
 
 def test_worked_examples():
@@ -45,6 +45,24 @@ def test_max_level_clamp():
 def test_optional_bitrate_gate():
     assert h264_level_for(1280, 720, 30) == "3.1"                       # no bitrate -> FS/MBPS only
     assert h264_level_for(1280, 720, 30, bitrate_kbps=20000) == "3.2"   # 3.1 MaxBR 14000 < 20000 -> bump
+
+
+def test_level_for_bitrate_only_ever_goes_up_from_the_level_given():
+    # the ceilings are inclusive: 10 Mbit/s is still level 3, one bit more is 3.1
+    assert level_for_bitrate("3", 10000) == "3" and level_for_bitrate("3", 10000.001) == "3.1"
+    assert level_for_bitrate("2.1", 6000) == "3"            # 2.1 and 2.2 both stop at 4 Mbit/s
+    assert level_for_bitrate("3", 20000) == "3.2" and level_for_bitrate("4", 30000) == "4.1"
+    assert level_for_bitrate("1", 0) == level_for_bitrate("1", None) == "1"
+    assert level_for_bitrate("5", 100) == "5"               # never below the level asked for
+    assert level_for_bitrate("1", 10**9) == level_for_bitrate("5.2", 10**9) == "5.2"       # nothing above
+    for level in LEVELS:
+        assert level_for_bitrate(level, 1) == level
+    for bad in ("3.0", "6", None):
+        try:
+            level_for_bitrate(bad, 1)
+            raise AssertionError("an unknown level must be refused")
+        except ValueError:
+            pass
 
 
 def test_bad_input_raises():
