@@ -166,7 +166,7 @@ class CapturePipeline:
         self._tile_mode = "off"            # off | plain | green_diff | rct (recording.bayer_tile)
         self._tiler = None                 # closure: frame_bytes -> tiled bytes (lazy; needs numpy)
         self._stream_copy = False          # encoded source -> recorder muxes the delivered bitstream verbatim
-        self._discard_replay_main = False  # replay with neither local preview nor raw endpoint
+        self._discard_main = False         # neither local preview nor raw endpoint: nothing reads camsrc
         # A finite (playback) source at its end: exit 0 (the bare tool) or HOLD -- finalize the open
         # session, keep serving consumers + the control plane, accept `restart` (docs/PLAYBACK.md).
         # main sets it from config.hold_on_finish; the hook tells the lifecycle a session closed.
@@ -322,14 +322,17 @@ class CapturePipeline:
                 f"wait-for-connection=false sync=false")
             log.info("raw video endpoint -> %s (%d-byte shm)", raw.socket_path, shm)
 
-        self._discard_replay_main = (callable(getattr(self.source, "start_buffers", None))
-                                     and not raw.enabled and not self.cfg.preview.enabled)
+        # camsrc feeds the raw endpoint and the local preview, nothing else: the recorder has its own
+        # session pipeline and the plugin transport its own appsrc. With neither consumer (the default
+        # config) every frame used to be wrapped -- a full copy -- and pushed through the tee into a
+        # fakesink: about 1 ms per 5 MP frame on the capture thread, for nobody. Leave camsrc idle.
+        self._discard_main = not raw.enabled and not self.cfg.preview.enabled
         if self.cfg.preview.enabled:
             branches.append(f"t. ! queue leaky=downstream max-size-buffers=4 ! videoconvert ! {self.cfg.preview.sink}")
         else:
-            # A replay with no main consumers leaves camsrc idle. Do not wait for its first
-            # buffer to preroll: the separate plugin transport must still reach PLAYING.
-            async_prop = " async=false" if self._discard_replay_main else ""
+            # An idle camsrc never prerolls its sink. Do not wait for a first buffer that will not
+            # come: the separate plugin transport must still reach PLAYING.
+            async_prop = " async=false" if self._discard_main else ""
             branches.append("t. ! queue leaky=downstream max-size-buffers=4 ! fakesink sync=false" + async_prop)
 
         chains = [" ! ".join(main) + " " + " ".join(branches)]
@@ -606,7 +609,7 @@ class CapturePipeline:
 
         # camsrc feeds the consumer tee (raw endpoint / preview) -- best-effort now that the recorder
         # rides its own session pipeline, so a stall here is a publish drop, not a recording loss.
-        if not self._discard_replay_main and not self._queue_full(
+        if not self._discard_main and not self._queue_full(
                 self.appsrc, len(frame_bytes), "camsrc", publish=True):
             self._push_checked(self.appsrc, _new_buffer(frame_bytes, pts, stamp.frame_id), "camsrc",
                                publish=True)

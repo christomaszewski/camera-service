@@ -94,10 +94,40 @@ def test_existing_byte_buffer_metadata_and_live_start_contract():
     p = CapturePipeline(parse_config({}), source)
     p._start_source()
     assert calls == [(p._on_frame, p._on_encoded)]
-    assert p._discard_replay_main is False
+    assert p._discard_main is False
     b = _new_buffer(b"live pixels", 123, 456)
     assert _read(b) == b"live pixels" and b.pts == 123 and b.offset == 456
     assert b.dts == b.duration == Gst.CLOCK_TIME_NONE
+
+
+def test_camsrc_is_left_idle_for_any_source_when_nothing_reads_it():
+    """camsrc feeds the raw endpoint and the preview only. With neither, a LIVE source's frames used
+    to be wrapped and pushed into a fakesink all the same (replay already skipped it)."""
+    live = SimpleNamespace(encoded_caps=None, encoded_parser=None, delivered_frame_rate=25, finite=False,
+                           geometry=lambda: (0, 0, W, H), pixel_format=lambda: "Mono8",
+                           take_discontinuity=lambda: False)
+    for readers, idle in (({}, True),
+                          ({"preview": {"enabled": True, "sink": "fakesink sync=false"}}, False),
+                          ({"raw": True}, False)):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = parse_config({"recording": {"enabled": False},
+                                "preview": readers.get("preview", {"enabled": False}),
+                                "transport": {"plugin_endpoint": {"enabled": False},
+                                              "raw_endpoint": {"enabled": bool(readers.get("raw")),
+                                                               "socket_path": tmp + "/raw"}}})
+            p = CapturePipeline(cfg, live)
+            desc = p.build()
+            pushed = []
+            p._push_checked = lambda src, buf, what, publish=False: pushed.append(what) or True
+            try:
+                assert p._discard_main is idle, readers
+                # an idle camsrc never prerolls its sink, so the sink must not wait for a buffer
+                assert ("fakesink sync=false async=false" in desc) is idle, desc
+                p._on_frame(FrameStamp(1, T0, TimestampSource.SYSTEM, T0, T0, None), bytes(W * H))
+                assert pushed == ([] if idle else ["camsrc"]), (readers, pushed)
+                assert p.drops.frames == 1          # accounting does not depend on camsrc
+            finally:
+                p.pipeline.set_state(Gst.State.NULL)
 
 
 def test_recording_tiler_gets_bytes_from_a_buffer_frame():
@@ -133,7 +163,7 @@ def test_rate_limited_and_backpressured_frames_do_not_materialize_pixels():
 
     cfg = parse_config({"transport": {"plugin_endpoint": {"max_rate_hz": 12.5}}})
     p = CapturePipeline(cfg, SimpleNamespace(take_discontinuity=lambda: False))
-    p._discard_replay_main = True
+    p._discard_main = True
     p._fps, p._pub_seq = 25.0, 1  # every other frame; this one is skipped
     frame = GuardedFrame(Gst.Buffer.new_wrapped(bytes(W * H)))
     stamp = FrameStamp(frame_id=0, timestamp_ns=T0, source=TimestampSource.SYSTEM,
@@ -240,7 +270,7 @@ def _exercise_pipeline(recording, raw_endpoint=False, nv12=False, preview=False,
             on_frame(stamp, data)
 
         pipe._on_frame = observe_frame
-        assert pipe._discard_replay_main is (not raw_endpoint and not preview)
+        assert pipe._discard_main is (not raw_endpoint and not preview)
         consumer = None
         raw_consumer = None
         received, raw_frames, preview_frames = [], [], []
