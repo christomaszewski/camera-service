@@ -197,6 +197,9 @@ plugins:
       # CAM_WEBRTC_STALE_S: 20                 # end a session whose viewer sent no feedback this long (0 = off)
       # CAM_WEBRTC_MAX_SESSIONS: 3             # cap on viewer sessions; a newcomer ends the oldest (default off)
       # CAM_WEBRTC_IDLE_FPS: 1                 # frames/s prepared while nobody watches (off = every frame)
+      # CAM_WEBRTC_ENCODE: shared              # ONE encoder for all viewers at CAM_WEBRTC_BITRATE instead of
+      # CAM_WEBRTC_BITRATE: 4000000            #   one per viewer: cheaper, but no per-viewer bitrate adaptation
+      #                                          (plugins/webrtc-bridge/README.md "Viewer sessions")
 
   # - name: ros1-bridge    # legacy ROS 1 (Noetic) publisher — JP6-class hosts; needs the shared
   #   enabled: true        #   roscore (cam-up --roscore / tools/roscore.sh)

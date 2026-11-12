@@ -136,10 +136,16 @@ services:
       #                             (default 1; `off` = every frame, the old behaviour). The debayer and
       #                             convert of a 5 MP Bayer stream are 80% of an Orin core.
       #   CAM_WEBRTC_IDLE_GRACE_S   keep the full rate this long after the last viewer leaves (default 5)
+      #   CAM_WEBRTC_ENCODE         `shared` = one encoder for all viewers at CAM_WEBRTC_BITRATE (bit/s;
+      #                             default the start bitrate, else 4000000) instead of one per viewer:
+      #                             far cheaper with several viewers, honours CAM_WEBRTC_PROFILE, but a
+      #                             fixed bitrate with no adaptation. Default per-viewer.
       - CAM_WEBRTC_STALE_S=${CAM_WEBRTC_STALE_S:-}
       - CAM_WEBRTC_MAX_SESSIONS=${CAM_WEBRTC_MAX_SESSIONS:-}
       - CAM_WEBRTC_IDLE_FPS=${CAM_WEBRTC_IDLE_FPS:-}
       - CAM_WEBRTC_IDLE_GRACE_S=${CAM_WEBRTC_IDLE_GRACE_S:-}
+      - CAM_WEBRTC_ENCODE=${CAM_WEBRTC_ENCODE:-}
+      - CAM_WEBRTC_BITRATE=${CAM_WEBRTC_BITRATE:-}
       # Loss tolerance: nominal keyframe interval in seconds, converted to frames from negotiated
       # fps (default 2.0; 0 leaves the sink/encoder default). x264 retains webrtcsink's effective
       # ultrafast preset; choose a slower preset only when CPU headroom permits.

@@ -43,7 +43,8 @@
 # Viewer sessions (python launcher): CAM_WEBRTC_STALE_S (end a session whose viewer has sent no feedback
 # for this long; default 20, 0 = off), CAM_WEBRTC_MAX_SESSIONS (cap; a newcomer ends the oldest; default
 # off), CAM_WEBRTC_IDLE_FPS (frames per second prepared while NOBODY is watching; default 1, off = every
-# frame as before) + CAM_WEBRTC_IDLE_GRACE_S (default 5).
+# frame as before) + CAM_WEBRTC_IDLE_GRACE_S (default 5), CAM_WEBRTC_ENCODE=shared (one encoder for all
+# viewers at CAM_WEBRTC_BITRATE instead of one per viewer -- see below).
 # CAM_WEBRTC_KEYFRAME_S (IDR every N s on every encoder, default 2.0; 0 = encoder default) and
 # CAM_WEBRTC_X264_PRESET (x264enc speed-preset nick for the software fallback, default ultrafast).
 # H.264: CAM_WEBRTC_PROFILE (effectively FIXED at constrained-baseline -- webrtcsink forces it for raw
@@ -239,6 +240,27 @@ if [ "${RUN_SIGNALLING:-1}" = "1" ]; then
   sleep 1
 fi
 
+# One encoder for every viewer (CAM_WEBRTC_ENCODE=shared; default: webrtcsink encodes per viewer).
+# webrtcsink skips its encoders when the stream arrives already encoded, so the bridge puts ONE in front
+# of it: three viewers cost 58% of an Orin core at 1080p30 instead of ~145%, a vanished viewer no longer
+# holds an encoder, and H.264 is no longer pinned to constrained-baseline (CAM_WEBRTC_PROFILE is
+# honoured). The price: one fixed bitrate for everybody (CAM_WEBRTC_BITRATE, default the start bitrate
+# or 4 Mbit/s) with no back-off when a link degrades -- the MIN/MAX/START bounds and the sink's
+# downscaling have nothing to act on. tools/shared_encoder.py picks the encoder this container has
+# (the Jetson hardware one, else x264enc for H.264) and prints the fragment; the launcher completes its
+# caps and GOP from the stream and serves keyframe requests (bridge_stream.py). Not available with
+# CAM_LAUNCHER=gst-launch, nor for a codec other than H.264 / H.265.
+ENC_EL=""
+if [ "$(printf %s "${CAM_WEBRTC_ENCODE:-}" | tr '[:upper:]' '[:lower:]')" = shared ]; then
+  if [ "${CAM_LAUNCHER:-python}" = "gst-launch" ]; then
+    echo "webrtc-bridge: CAM_WEBRTC_ENCODE=shared needs the python launcher; encoding per viewer" >&2
+  elif ENC_OUT="$(python3 tools/shared_encoder.py)"; then
+    ENC_EL="$(printf '%s\n' "$ENC_OUT" | tail -n 1) ! "      # the fragment is the last line it prints
+  else
+    echo "webrtc-bridge: CAM_WEBRTC_ENCODE=shared is not available here (see above); encoding per viewer" >&2
+  fi
+fi
+
 SINK="webrtcsink name=cam_webrtcsink signaller::uri=ws://127.0.0.1:${PORT}"
 [ -n "$VCAPS" ] && SINK="$SINK video-caps=${VCAPS}"
 # Adaptive bitrate: webrtcsink runs Google Congestion Control (gcc) by default and scales the encoder
@@ -268,16 +290,16 @@ if [ -n "$NORM" ]; then
   # sync=false drop=true already says "hand me samples as they come, don't pace or block on me"), so the
   # pipeline reaches PLAYING, new-sample starts firing, and the pump feeds the sink. Verified in cam-dev:
   # baseline -> state=paused, 0 frames; +async=false -> state=playing, frames flow.
-  PIPELINE="${SRC} ! queue name=ingress_q leaky=downstream max-size-buffers=2 ! ${ADAPT_EL}${SCALE_EL}appsink name=norm_in emit-signals=true max-buffers=2 drop=true sync=false async=false   appsrc name=norm_out is-live=true format=time ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=I420 ! ${OVERLAY_EL}${SINK}"
+  PIPELINE="${SRC} ! queue name=ingress_q leaky=downstream max-size-buffers=2 ! ${ADAPT_EL}${SCALE_EL}appsink name=norm_in emit-signals=true max-buffers=2 drop=true sync=false async=false   appsrc name=norm_out is-live=true format=time ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=I420 ! ${OVERLAY_EL}${ENC_EL}${SINK}"
 else
-  PIPELINE="${SRC} ! queue name=ingress_q leaky=downstream max-size-buffers=2 ! ${ADAPT_EL}${DEBAYER_EL}${SCALE_EL}videoconvert name=fmt_next ! video/x-raw,format=I420 ! ${OVERLAY_EL}${SINK}"
+  PIPELINE="${SRC} ! queue name=ingress_q leaky=downstream max-size-buffers=2 ! ${ADAPT_EL}${DEBAYER_EL}${SCALE_EL}videoconvert name=fmt_next ! video/x-raw,format=I420 ! ${OVERLAY_EL}${ENC_EL}${SINK}"
 fi
 # `ingress_q` is the head of everything that costs CPU per frame (debayer, scale, stretch, convert,
-# overlay). The launcher gates it on there being a viewer: with none, only
+# overlay, a shared encoder). The launcher gates it on there being a viewer: with none, only
 # CAM_WEBRTC_IDLE_FPS frames a second go on (idle_gate.py) -- a 5 MP Bayer stream otherwise holds
 # 80% of an Orin core for an empty room.
 
-echo "webrtc-bridge: ${TRANSPORT} ${SOCK}${BAYER:+ bayer=${BAYER}}${DEBAYER_EL:+ (debayer->color)}${ADAPT_EL:+ (format-adaptive)}${NORM:+ normalize=${NORM}}${OVERLAY:+ (latency-overlay)}${MAXSZ:+ max-size=${MAXSZ}} -> webrtcsink (signalling :${PORT}, min-bitrate ${MINBR})"
+echo "webrtc-bridge: ${TRANSPORT} ${SOCK}${BAYER:+ bayer=${BAYER}}${DEBAYER_EL:+ (debayer->color)}${ADAPT_EL:+ (format-adaptive)}${NORM:+ normalize=${NORM}}${OVERLAY:+ (latency-overlay)}${MAXSZ:+ max-size=${MAXSZ}}${ENC_EL:+ (shared encoder)} -> webrtcsink (signalling :${PORT}, min-bitrate ${MINBR})"
 
 # Default launcher: a small Python process (tools/bridge_stream.py) that OWNS this pipeline and, once it
 # is streaming, advertises the stream over Zenoh for fleet discovery (docs/DISCOVERY.md). It shares this

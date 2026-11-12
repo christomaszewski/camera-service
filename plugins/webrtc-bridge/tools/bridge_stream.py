@@ -22,6 +22,7 @@ import os
 import signal
 import socket
 import sys
+import threading
 import time
 
 import gi
@@ -39,6 +40,7 @@ from header_transport import (HeaderError, PtsTracker, TS_SOURCE_SHORT,
 from idle_gate import IdleGate, parse_grace_s, parse_idle_fps
 from session_reaper import (SessionReaper, flatten_stats, parse_max_sessions, parse_stale_s,
                             receiver_key)
+from shared_encoder import KeyframeLimiter, parse_profile, pin_caps
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bridge_stream")
@@ -243,7 +245,7 @@ def _negotiated_caps(el, which):
             return None
 
 
-def _configure_live_encoder(encoder, fps=None):
+def _configure_live_encoder(encoder, fps=None, keyframe_s=None):
     """Force B-frames OFF (real-time) + a low-latency tune + a short GOP (and a cheap preset on the
     software fallback -- see live_encoder_props), DEFENSIVELY across encoders (x264enc /
     nvv4l2h264enc / openh264enc): only sets properties that exist, so it's a no-op on a non-H.264
@@ -280,8 +282,10 @@ def _configure_live_encoder(encoder, fps=None):
     elif name == "nvv4l2h264enc":
         setp("maxperf-enable", True)
         setp("insert-sps-pps", True)                  # mid-stream joiners get SPS/PPS at every IDR
-    for prop, val in live_encoder_props(name, fps, _env("CAM_WEBRTC_KEYFRAME_S"),
-                                        _env("CAM_WEBRTC_X264_PRESET")):
+    # keyframe_s overrides CAM_WEBRTC_KEYFRAME_S (0 = leave the encoder's own GOP: the shared software
+    # encoder keeps its keyframe interval on a wall-clock timer instead of a frame count)
+    for prop, val in live_encoder_props(name, fps, _env("CAM_WEBRTC_KEYFRAME_S") if keyframe_s is None
+                                        else keyframe_s, _env("CAM_WEBRTC_X264_PRESET")):
         setp(prop, val)
     log.info("encoder-setup: %s -> %s", name, ", ".join(done) or "(no matching low-latency props)")
 
@@ -342,6 +346,14 @@ class Bridge:
         self._looked_frames = 0         # _rx_frames at the previous look at the sessions
         gate_on, idle_fps = parse_idle_fps(_env("CAM_WEBRTC_IDLE_FPS"))
         self._gate = IdleGate(idle_fps, parse_grace_s(_env("CAM_WEBRTC_IDLE_GRACE_S")), enabled=gate_on)
+        # One encoder for every viewer (CAM_WEBRTC_ENCODE=shared; run.sh put it in the pipeline -- see
+        # shared_encoder): the element, its codec, and the limiter on the keyframes viewers ask for.
+        self._shared = None
+        self._shared_name = None
+        self._shared_codec = None
+        self._keyframes = KeyframeLimiter(1.0)
+        self._own_keyframe_thread = None
+        self._shared_keyframes = 0      # keyframes the shared encoder has actually produced
 
     def build(self):
         Gst.init(None)
@@ -413,6 +425,7 @@ class Bridge:
         # webrtcsink meta.name == producer_id, so discovery + signalling line up (one server, many producers).
         sink = self.pipeline.get_by_name("cam_webrtcsink")
         self._sink = sink
+        self._setup_shared_encoder()
         self._setup_sessions()
         if sink is not None:
             try:
@@ -443,7 +456,12 @@ class Bridge:
             # elements -- bayer2rgb/videoconvert/textoverlay -- copy offsets through). The sink pad
             # is a request pad, but parse_launch has already linked it, so it exists here.
             it = sink.iterate_sink_pads()
-            while True:
+            shared_q = self.pipeline.get_by_name("shared_enc_q")
+            if shared_q is not None:
+                # A shared encoder: what reaches the sink is encoded and carries byte offsets. The raw
+                # frames going INTO that encoder are the same point of the chain.
+                shared_q.get_static_pad("sink").add_probe(Gst.PadProbeType.BUFFER, self._on_enc_buffer)
+            while shared_q is None:
                 res, spad = it.next()
                 if res == Gst.IteratorResult.OK:
                     spad.add_probe(Gst.PadProbeType.BUFFER, self._on_enc_buffer)
@@ -613,6 +631,9 @@ class Bridge:
         mode = ""
         if self._gate.enabled and self._gate.idle(time.monotonic()):
             mode += " idle(%g fps)" % self._gate.idle_fps
+        if self._shared is not None:
+            mode += " shared-encoder(%d keyframes sent, %d forced for %d requests)" % (
+                self._shared_keyframes, self._keyframes.forced, self._keyframes.requests)
         log.info("status: state=%s%s in=%d frames (+%d/%ds, %.1f MB) caps=%s consumers=%d%s%s",
                  Gst.Element.state_get_name(state),
                  "->" + Gst.Element.state_get_name(pending)
@@ -679,7 +700,7 @@ class Bridge:
             log.info("session reaper: %s%s", "ends a session after %gs without receiver feedback" %
                      self._reaper.stale_s if self._reaper.stale_s > 0 else "liveness check off",
                      "; at most %d session(s)" % self._reaper.max_sessions if self._reaper.max_sessions else "")
-        if self._sink is not None and (self._gate.enabled or self._reaper.enabled):
+        if self._sink is not None and (self._gate.enabled or self._reaper.enabled or self._shared is not None):
             GLib.timeout_add_seconds(self._SESSION_TICK_S, self._session_tick)
 
     def _on_sink_ready(self):
@@ -751,6 +772,123 @@ class Bridge:
                 signaller.emit(sig, sid)
             except Exception as e:                    # noqa: BLE001
                 log.warning("could not emit %s for %s: %s", sig, sid, e)
+
+    # ---- one encoder for every viewer (CAM_WEBRTC_ENCODE=shared) -------------------------------
+    def _setup_shared_encoder(self):
+        enc = self.pipeline.get_by_name("shared_enc")
+        if enc is None:
+            return
+        fac = enc.get_factory()
+        self._shared, self._shared_name = enc, fac.get_name() if fac is not None else "?"
+        self._shared_codec = "h265" if "265" in self._shared_name else "h264"
+        # Ahead of the encoder's own negotiation: pin the caps its output needs and set its GOP from
+        # the frame rate the stream really has. Behind it: the keyframes viewers ask for.
+        enc.get_static_pad("sink").add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self._on_shared_caps)
+        src = enc.get_static_pad("src")
+        src.add_probe(Gst.PadProbeType.EVENT_UPSTREAM, self._on_shared_upstream)
+        src.add_probe(Gst.PadProbeType.BUFFER, self._on_shared_buffer)
+        if self._shared_name == "x264enc":
+            # x264enc takes its properties only before it starts ("setting property in wrong state"
+            # afterwards), and the frame rate is not known that early on the self-describing
+            # transports. So: the low-latency properties now, and the keyframe interval on the clock --
+            # a forced keyframe every CAM_WEBRTC_KEYFRAME_S while somebody is watching, and until the
+            # sink is ready -- instead of a frame count that would be wrong whenever the rate hint is.
+            _configure_live_encoder(enc, keyframe_s=0)
+            try:
+                period = float(_env("CAM_WEBRTC_KEYFRAME_S", "2.0"))
+            except ValueError:
+                period = 2.0
+            if period > 0:
+                GLib.timeout_add(int(period * 1000), self._periodic_keyframe)
+        log.info("shared encoder: %s encodes once for every viewer at a fixed bitrate (CAM_WEBRTC_BITRATE); "
+                 "CAM_WEBRTC_MIN/MAX/START_BITRATE and the sink's bitrate adaptation do not apply",
+                 self._shared_name)
+
+    def _on_shared_caps(self, _pad, info):
+        event = info.get_event()
+        if event is None or event.type != Gst.EventType.CAPS:
+            return Gst.PadProbeReturn.OK
+        whf = _wh_fps(event.parse_caps())
+        if whf is None:
+            return Gst.PadProbeReturn.OK
+        w, h, fps = whf
+        level = None
+        if self._shared_codec == "h264":
+            maxlvl = webrtc_max_level()
+            try:
+                level = h264_level_for(w, h, fps, max_level=maxlvl)
+            except ValueError as e:
+                log.warning("h264 level math failed (%s); leaving the encoder's own level", e)
+            if level is not None and not level_covers(level, w, h, fps):
+                log.warning("h264: %dx%d@%d needs a level above the clamp %s -- the stream may not decode; "
+                            "lower the resolution or raise CAM_WEBRTC_MAX_LEVEL", w, h, fps, maxlvl)
+        caps = pin_caps(self._shared_name, self._shared_codec, parse_profile(_env("CAM_WEBRTC_PROFILE")), level)
+        pin = self.pipeline.get_by_name("shared_enc_caps")
+        if pin is not None:
+            pin.set_property("caps", Gst.Caps.from_string(caps))
+        if self._shared_name != "x264enc":            # the hardware encoders read their GOP when they
+            _configure_live_encoder(self._shared, fps=fps)   # take these caps: set it from the real rate
+        log.info("shared encoder: %dx%d@%d -> %s", w, h, fps, caps)
+        return Gst.PadProbeReturn.OK
+
+    def _on_shared_buffer(self, _pad, info):
+        buf = info.get_buffer()
+        if buf is not None and not buf.has_flags(Gst.BufferFlags.DELTA_UNIT):
+            self._shared_keyframes += 1
+        return Gst.PadProbeReturn.OK
+
+    def _periodic_keyframe(self):
+        """The software shared encoder's keyframe interval, kept on the clock (see _setup_shared_encoder).
+        Through the same limiter as the viewers' requests, so the two never add up to a burst; nothing
+        is forced for an empty room. Until the sink is ready it is not empty: webrtcsink's discovery
+        of the encoded stream joins it mid-GOP and needs a keyframe to finish (measured: with x264's
+        own 250-frame GOP the bridge registered 10 s after the stream started, dropping every slice
+        until then)."""
+        if self._stopping or self._shared is None:
+            return False
+        if self._consumers > 0 or not self._sink_ready:
+            delay = self._keyframes.request(time.monotonic())
+            if delay is not None:
+                GLib.timeout_add(int(delay * 1000), self._force_keyframe)
+        return True
+
+    def _on_shared_upstream(self, _pad, info):
+        """webrtcsink asks for a keyframe (GstForceKeyUnit, upstream) when a session connects and on
+        every PLI -- dozens for one join -- and here every keyframe goes to every viewer. One per
+        second goes through (shared_encoder.KeyframeLimiter); the hardware encoders ignore the event
+        and are asked through their `force-IDR` action instead."""
+        event = info.get_event()
+        if event is None or event.type != Gst.EventType.CUSTOM_UPSTREAM:
+            return Gst.PadProbeReturn.OK
+        st = event.get_structure()
+        if st is None or st.get_name() != "GstForceKeyUnit":
+            return Gst.PadProbeReturn.OK
+        if self._own_keyframe_thread == threading.get_ident():
+            return Gst.PadProbeReturn.OK              # the one _force_keyframe is sending right now
+        delay = self._keyframes.request(time.monotonic())
+        if delay is not None:
+            GLib.timeout_add(int(delay * 1000), self._force_keyframe)
+        return Gst.PadProbeReturn.DROP
+
+    def _force_keyframe(self):
+        if self._stopping or self._shared is None:
+            return False
+        self._keyframes.fired(time.monotonic())
+        try:
+            if self._shared_name.startswith("nvv4l2"):
+                self._shared.emit("force-IDR")
+            else:
+                gi.require_version("GstVideo", "1.0")
+                from gi.repository import GstVideo
+                self._own_keyframe_thread = threading.get_ident()
+                try:
+                    self._shared.get_static_pad("src").send_event(
+                        GstVideo.video_event_new_upstream_force_key_unit(Gst.CLOCK_TIME_NONE, True, 0))
+                finally:
+                    self._own_keyframe_thread = None
+        except Exception as e:                        # noqa: BLE001 -- the periodic IDR still comes
+            log.debug("forced keyframe failed: %s", e)
+        return False                                  # one-shot
 
     @property
     def had_error(self):
@@ -909,8 +1047,8 @@ class Bridge:
         # this chain's output caps, so the pin must be present there for the advertised profile-level-id
         # to match the stream. Discovery feeds the encoder the REAL negotiated input caps, so the level
         # we derive from that same resolution matches.
-        if not _is_h264(codec_name, caps):
-            return None
+        if self._shared is not None or not _is_h264(codec_name, caps):
+            return None                               # shared encoder: its own capsfilter carries the pin
         caps_str = self._h264_output_caps()
         if not caps_str:
             return None

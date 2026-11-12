@@ -7,8 +7,8 @@
 #   3. shm-raw (legacy) + mono  (env geometry; also the two H.264 profile/level scenarios and
 #                                the CAM_WEBRTC_MAX_SIZE encode-side downscale)
 #   4. JP7 unixfd       + color (Bayer -> bayer2rgb; + the downscale behind the runtime seam)
-#   5. viewer sessions: the idle gate (a trickle with nobody watching, full rate for a viewer) and
-#      the reaper ending a viewer that went silent
+#   5. viewer sessions: the idle gate (a trickle with nobody watching, full rate for a viewer), one
+#      shared encoder for every viewer, and the reaper ending a viewer that went silent
 #
 # Each scenario:  core (fake cam) -> webrtc-bridge (webrtcsink + signalling) -> webrtcsrc consumer
 # (decode + count). shm is shared cross-container via a named volume (not a host bind mount --
@@ -298,6 +298,27 @@ EXPECT_BEFORE_VIEWER="idle(1 fps)" run_scenario "idle gate: a trickle with nobod
   -e CAM_PLATFORM=jp6 -e CAM_TRANSPORT=shm-raw -e CAM_SHM_SOCKET=/tmp/cam/raw \
   -e CAM_WIDTH=512 -e CAM_HEIGHT=512 -e CAM_FORMAT=GRAY8 -e CAM_FPS=25 -e CAM_WEBRTC_STATUS=2 \
   || FAILED=1
+
+# One encoder for every viewer. The launcher has to complete the encoder's caps from the stream (the
+# parser must announce them once: webrtcsink refuses a second announcement) and serve the keyframe the
+# joining viewer asks for; a consumer decoding 30 frames proves both. The log must show the encoder it
+# shared and the geometry it took from the stream, and that keyframes were forced on request (the
+# sink's own discovery of the stream needs one before the bridge even registers).
+if run_scenario "shared encoder (CAM_WEBRTC_ENCODE=shared): one encode for every viewer" \
+    config/webrtc-fake.yaml \
+    -e CAM_PLATFORM=jp6 -e CAM_TRANSPORT=shm-raw -e CAM_SHM_SOCKET=/tmp/cam/raw \
+    -e CAM_WIDTH=512 -e CAM_HEIGHT=512 -e CAM_FORMAT=GRAY8 -e CAM_FPS=25 \
+    -e CAM_WEBRTC_ENCODE=shared -e CAM_WEBRTC_BITRATE=1500000 -e CAM_WEBRTC_STATUS=2; then
+  if bridge_log_has "shared encoder: 512x512@25 -> video/x-h264" \
+      && [[ "$(docker logs "$BRIDGE" 2>&1)" =~ [1-9][0-9]*\ forced\ for ]]; then
+    echo "-- one shared encoder, caps completed from the stream, keyframes forced on request --"
+  else
+    echo "-- FAIL: the shared encoder did not take its caps from the stream / force a keyframe --"
+    FAILED=1
+  fi
+else
+  FAILED=1
+fi
 
 run_reaper_scenario || FAILED=1
 
