@@ -132,8 +132,14 @@ services:
       #                             keeps its session and encoder until the signalling TCP times out
       #                             (measured: 15 min 40 s).
       #   CAM_WEBRTC_MAX_SESSIONS   at most this many sessions; a newcomer ends the oldest (default off)
+      #   CAM_WEBRTC_IDLE_FPS       frames per second prepared for the encoder while nobody is watching
+      #                             (default 1; `off` = every frame, the old behaviour). The debayer and
+      #                             convert of a 5 MP Bayer stream are 80% of an Orin core.
+      #   CAM_WEBRTC_IDLE_GRACE_S   keep the full rate this long after the last viewer leaves (default 5)
       - CAM_WEBRTC_STALE_S=${CAM_WEBRTC_STALE_S:-}
       - CAM_WEBRTC_MAX_SESSIONS=${CAM_WEBRTC_MAX_SESSIONS:-}
+      - CAM_WEBRTC_IDLE_FPS=${CAM_WEBRTC_IDLE_FPS:-}
+      - CAM_WEBRTC_IDLE_GRACE_S=${CAM_WEBRTC_IDLE_GRACE_S:-}
       # Loss tolerance: nominal keyframe interval in seconds, converted to frames from negotiated
       # fps (default 2.0; 0 leaves the sink/encoder default). x264 retains webrtcsink's effective
       # ultrafast preset; choose a slower preset only when CPU headroom permits.

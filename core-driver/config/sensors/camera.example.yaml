@@ -196,6 +196,7 @@ plugins:
       #                                          for a radio that really carries less)
       # CAM_WEBRTC_STALE_S: 20                 # end a session whose viewer sent no feedback this long (0 = off)
       # CAM_WEBRTC_MAX_SESSIONS: 3             # cap on viewer sessions; a newcomer ends the oldest (default off)
+      # CAM_WEBRTC_IDLE_FPS: 1                 # frames/s prepared while nobody watches (off = every frame)
 
   # - name: ros1-bridge    # legacy ROS 1 (Noetic) publisher — JP6-class hosts; needs the shared
   #   enabled: true        #   roscore (cam-up --roscore / tools/roscore.sh)

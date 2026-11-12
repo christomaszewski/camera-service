@@ -7,7 +7,8 @@
 #   3. shm-raw (legacy) + mono  (env geometry; also the two H.264 profile/level scenarios and
 #                                the CAM_WEBRTC_MAX_SIZE encode-side downscale)
 #   4. JP7 unixfd       + color (Bayer -> bayer2rgb; + the downscale behind the runtime seam)
-#   5. viewer sessions: the reaper ending a viewer that went silent
+#   5. viewer sessions: the idle gate (a trickle with nobody watching, full rate for a viewer) and
+#      the reaper ending a viewer that went silent
 #
 # Each scenario:  core (fake cam) -> webrtc-bridge (webrtcsink + signalling) -> webrtcsrc consumer
 # (decode + count). shm is shared cross-container via a named volume (not a host bind mount --
@@ -76,6 +77,16 @@ run_scenario() {
   echo "-- bridge transport line --"
   docker logs "$BRIDGE" 2>&1 | grep -E "webrtc-bridge:" | head -1 || true
   docker logs "$BRIDGE" 2>&1 | grep -E "h264 encode:" | head -1 || true   # auto profile/level (H.264 scenarios)
+  # A scenario that names EXPECT_BEFORE_VIEWER requires that text in the log before the consumer
+  # connects (the idle gate's heartbeat line, which appears a grace period after the bridge registered).
+  if [ -n "${EXPECT_BEFORE_VIEWER:-}" ]; then
+    if bridge_log_has "$EXPECT_BEFORE_VIEWER"; then
+      echo "-- before the viewer: '$EXPECT_BEFORE_VIEWER' --"
+    else
+      echo "-- scenario FAIL: no '$EXPECT_BEFORE_VIEWER' in the bridge log before a viewer connected --"
+      return 1
+    fi
+  fi
 
   echo "== headless webrtcsrc consumer (loopback in the bridge netns; need >= 30 frames / 40s) =="
   set +e
@@ -277,6 +288,16 @@ if run_scenario "shm-raw + CAM_WEBRTC_MAX_SIZE=256 (encode-side downscale)" \
 else
   FAILED=1
 fi
+
+# Viewer sessions. The idle gate: once registered and with nobody connected the heartbeat must say the
+# chain is idling (the trickle), and the consumer that then connects must still get its frames -- the
+# gate opens for it. The heartbeat is every 2 s here so the idle line is in the log by the time the
+# scenario looks.
+EXPECT_BEFORE_VIEWER="idle(1 fps)" run_scenario "idle gate: a trickle with nobody watching, full rate for a viewer" \
+  config/webrtc-fake.yaml \
+  -e CAM_PLATFORM=jp6 -e CAM_TRANSPORT=shm-raw -e CAM_SHM_SOCKET=/tmp/cam/raw \
+  -e CAM_WIDTH=512 -e CAM_HEIGHT=512 -e CAM_FORMAT=GRAY8 -e CAM_FPS=25 -e CAM_WEBRTC_STATUS=2 \
+  || FAILED=1
 
 run_reaper_scenario || FAILED=1
 

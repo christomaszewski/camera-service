@@ -121,6 +121,8 @@ Or via the per-sensor stack: `cam-up <sensor>.yaml up -d webrtc-bridge` (cam-up 
 | `CAM_WEBRTC_CONGESTION` | `gcc` | `gcc` \| `homegrown` \| `disabled` (a fixed `start-bitrate`) |
 | `CAM_WEBRTC_STALE_S` | `20` | end a viewer session whose **receiver has sent no feedback** for this many seconds (`0` / `off` = never). Needs the python launcher |
 | `CAM_WEBRTC_MAX_SESSIONS` | _(off)_ | at most this many viewer sessions: a newcomer beyond it **ends the oldest**. Set it to the number of operators who watch one camera |
+| `CAM_WEBRTC_IDLE_FPS` | `1` | frames per second the bridge prepares (debayer / scale / convert) while **nobody is watching**; `0` = none, `off` = every frame, as before this knob existed |
+| `CAM_WEBRTC_IDLE_GRACE_S` | `5` | how long after the last viewer leaves before the idle rate applies (a reconnect inside it never sees a throttled chain) |
 | `SIGNALLING_PORT` | `8443` | signalling server port |
 | `RUN_SIGNALLING` | `1` | run the bundled signalling server in-container |
 | `CAM_WEBRTC_STATUS` | `10` | seconds between status heartbeat lines — pipeline state, frames received from the core, negotiated caps, connected viewers, and per-interval **latency percentiles** (see Latency below) (`0` = off). Startup also logs an encoder **element inventory** and warns when `GST_PLUGIN_FEATURE_RANK` names an element the registry doesn't have |
@@ -190,6 +192,15 @@ link. What the bridge adds around that (measured on an R39 AGX Orin —
   Silence only counts while frames are going out: when the camera itself stalls (a reconnect, a
   paused replay) a live viewer has nothing to acknowledge, and keeps its session.
   `CAM_WEBRTC_MAX_SESSIONS` is the blunt companion: a hard cap, the oldest session giving way.
+- **Idle gate (`CAM_WEBRTC_IDLE_FPS`, default 1).** With no viewer `webrtcsink` encodes nothing, but
+  the chain in front of it ran on every frame: a 5 MP Bayer camera at 24 fps cost **83% of a core for
+  an empty room**. The gate drops frames at the bridge's ingress while there is no session — all but
+  `CAM_WEBRTC_IDLE_FPS` a second, which keep caps, the discovery descriptor and the latency heartbeat
+  alive — and that load is 6%. It opens when a session is created (first frame 1.4 s after connecting,
+  the same as ungated), stays open `CAM_WEBRTC_IDLE_GRACE_S` after the last one leaves, and holds
+  nothing back before the bridge has registered with the signalling server: `webrtcsink` discovers
+  its codecs by running real frames through real encoders, one second or ten of them. The
+  heartbeat shows ` idle(1 fps)` while it is closed.
 
 ## Latency (measure + display)
 
@@ -230,6 +241,8 @@ the `CAM_WEBRTC_MAX_SIZE` downscale, asserted off the auto-level line — the en
 scaled geometry), and unixfd on a gst ≥ 1.24 core (+ the downscale planned behind the runtime seam).
 A **stale-session** scenario freezes a consumer with `SIGSTOP`: the bridge must leave the live viewer
 alone, also while the camera stalls for 20 s, and end the silent one.
+An **idle gate** scenario requires the heartbeat to report `idle` before the consumer connects, and the
+consumer must still decode.
 Proves the whole egress path without a browser. PASS = each scenario decoded ≥30 frames. Each
 scenario waits for the bridge to register with the signalling server before it connects — codec
 discovery takes one second or ten depending on what the image carries.

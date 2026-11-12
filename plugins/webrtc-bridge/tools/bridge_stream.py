@@ -36,6 +36,7 @@ from format_adapt import adapt_for_input, debayer_enabled
 from scale_plan import fit_within, parse_max_size, scale_caps
 from header_transport import (HeaderError, PtsTracker, TS_SOURCE_SHORT,
                               caps_for_frame, parse_header)
+from idle_gate import IdleGate, parse_grace_s, parse_idle_fps
 from session_reaper import (SessionReaper, flatten_stats, parse_max_sessions, parse_stale_s,
                             receiver_key)
 
@@ -331,12 +332,16 @@ class Bridge:
         self._status_zero = 0           # consecutive heartbeats with zero frames received
         self._consumers = 0             # webrtcsink consumers currently connected
         self._warn_last = {}            # bus-warning throttle: message -> monotonic s
-        # Viewer sessions (see session_reaper): the sink, and the policy that ends sessions whose
-        # viewer vanished or that exceed the cap. _SESSION_TICK_S paces the look at the sink.
+        # Viewer sessions (see session_reaper / idle_gate): the sink, the policy that ends sessions
+        # whose viewer vanished or that exceed the cap, and the gate that holds the chain ahead of the
+        # sink to a trickle while nobody watches. _SESSION_TICK_S paces the look at the sink.
         self._sink = None
+        self._sink_ready = False        # webrtcsink finished codec discovery and went to the signaller
         self._reaper = SessionReaper(parse_stale_s(_env("CAM_WEBRTC_STALE_S")),
                                      parse_max_sessions(_env("CAM_WEBRTC_MAX_SESSIONS")))
         self._looked_frames = 0         # _rx_frames at the previous look at the sessions
+        gate_on, idle_fps = parse_idle_fps(_env("CAM_WEBRTC_IDLE_FPS"))
+        self._gate = IdleGate(idle_fps, parse_grace_s(_env("CAM_WEBRTC_IDLE_GRACE_S")), enabled=gate_on)
 
     def build(self):
         Gst.init(None)
@@ -605,12 +610,15 @@ class Bridge:
         if lat_seg and self._ts_source:
             lat_seg += " ts_src=" + self._ts_source
         _ok, state, pending = self.pipeline.get_state(0)
-        log.info("status: state=%s%s in=%d frames (+%d/%ds, %.1f MB) caps=%s consumers=%d%s",
+        mode = ""
+        if self._gate.enabled and self._gate.idle(time.monotonic()):
+            mode += " idle(%g fps)" % self._gate.idle_fps
+        log.info("status: state=%s%s in=%d frames (+%d/%ds, %.1f MB) caps=%s consumers=%d%s%s",
                  Gst.Element.state_get_name(state),
                  "->" + Gst.Element.state_get_name(pending)
                  if pending != Gst.State.VOID_PENDING else "",
                  self._rx_frames, delta, self._status_iv, self._rx_bytes / 1e6,
-                 capstr if capstr is not None else "(none yet)", self._consumers, lat_seg)
+                 capstr if capstr is not None else "(none yet)", self._consumers, mode, lat_seg)
         if self._rx_frames == 0:
             self._status_zero += 1
             if self._status_zero == 2:            # ~2 intervals with nothing: say where to look
@@ -635,23 +643,65 @@ class Bridge:
 
     def _on_consumer_added(self, _sink, peer_id, _webrtcbin):
         self._consumers += 1
+        self._gate.sessions(self._consumers, time.monotonic())    # open the gate before its first frame
         log.info("webrtc consumer connected: %s (%d total)", peer_id, self._consumers)
 
     def _on_consumer_removed(self, _sink, peer_id, _webrtcbin):
         self._consumers = max(0, self._consumers - 1)
+        self._gate.sessions(self._consumers, time.monotonic())
         log.info("webrtc consumer left: %s (%d total)", peer_id, self._consumers)
 
-    # ---- viewer sessions: the reaper -------------------------------------------------------------
+    # ---- viewer sessions: the idle gate and the reaper -----------------------------------------
     _SESSION_TICK_S = 2
 
     def _setup_sessions(self):
-        """Look at the sink's sessions every _SESSION_TICK_S and end the ones the reaper names."""
+        """Gate the chain ahead of the sink on there being a viewer, and look at the sink's sessions
+        every _SESSION_TICK_S: to resync the count the gate runs on, and to end the sessions the reaper
+        names. run.sh names the queue at the head of the chain `ingress_q`; the gst-launch hatch and a
+        pipeline without it (or without the sink whose sessions open the gate) simply have no gate."""
+        # webrtcsink goes to the signalling server once every stream's codec discovery has finished:
+        # the moment the bridge can take viewers, and so the earliest the idle gate may hold anything
+        # back (discovery runs on real frames). The session check below sees it as the signaller's
+        # `client-id`, the id the server hands out. (Not the signaller's `start` signal: its first
+        # handler REPLACES the default one, and the bridge then never registers.) A signaller without
+        # the property leaves the gate on its fixed warm-up.
+        if self._sink is not None and self._signaller_property("client-id") is not None:
+            self._gate.await_ready()
+        queue = self.pipeline.get_by_name("ingress_q") if self._gate.enabled and self._sink is not None else None
+        if queue is not None:
+            queue.get_static_pad("sink").add_probe(Gst.PadProbeType.BUFFER, self._on_ingress)
+            log.info("idle gate: %s while no viewer is connected (CAM_WEBRTC_IDLE_FPS; %gs grace after the "
+                     "last one leaves)", "%g fps" % self._gate.idle_fps if self._gate.idle_fps > 0
+                     else "no frames", self._gate.grace_s)
+        else:
+            self._gate.enabled = False
         if self._reaper.enabled:
             log.info("session reaper: %s%s", "ends a session after %gs without receiver feedback" %
                      self._reaper.stale_s if self._reaper.stale_s > 0 else "liveness check off",
                      "; at most %d session(s)" % self._reaper.max_sessions if self._reaper.max_sessions else "")
-        if self._sink is not None and self._reaper.enabled:
+        if self._sink is not None and (self._gate.enabled or self._reaper.enabled):
             GLib.timeout_add_seconds(self._SESSION_TICK_S, self._session_tick)
+
+    def _on_sink_ready(self):
+        if not self._sink_ready:
+            self._sink_ready = True
+            self._gate.ready(time.monotonic())
+            log.info("webrtcsink finished codec discovery and registered with the signalling server")
+
+    def _signaller_property(self, name):
+        """A property of the sink's signaller, None when it has no such property (a custom signaller)."""
+        try:
+            signaller = self._sink.get_property("signaller")
+            if signaller is None or signaller.find_property(name) is None:
+                return None
+            return signaller.get_property(name) or ""
+        except Exception:                             # noqa: BLE001
+            return None
+
+    def _on_ingress(self, _pad, _info):
+        """BUFFER probe at the head of the chain: with nobody watching, only the trickle goes on to the
+        debayer / scale / stretch / convert (idle_gate). A dropped buffer is success upstream."""
+        return Gst.PadProbeReturn.OK if self._gate.allow(time.monotonic()) else Gst.PadProbeReturn.DROP
 
     def _session_tick(self):
         if self._stopping:
@@ -668,7 +718,14 @@ class Bridge:
     def _look_at_sessions(self):
         now = time.monotonic()
         ids = list(self._sink.emit("get-sessions") or [])
-        self._consumers = len(ids)                    # the truth the consumer signals drift from
+        # The signals are the fast path (they open the gate at once); this is the truth they drift from
+        # if one is ever missed -- and a count stuck above zero would keep the gate open for good.
+        self._consumers = len(ids)
+        self._gate.sessions(len(ids), now)
+        if not self._sink_ready and (ids or self._signaller_property("client-id")):
+            self._on_sink_ready()                     # registered (or already serving): discovery is over
+        if not self._reaper.enabled:
+            return
         keys = {}
         if ids:
             stats = self._sink.get_property("stats")

@@ -42,7 +42,8 @@
 # defaults to 500 kbit/s here, see below), CAM_WEBRTC_CONGESTION ({gcc|homegrown|disabled}, default gcc).
 # Viewer sessions (python launcher): CAM_WEBRTC_STALE_S (end a session whose viewer has sent no feedback
 # for this long; default 20, 0 = off), CAM_WEBRTC_MAX_SESSIONS (cap; a newcomer ends the oldest; default
-# off).
+# off), CAM_WEBRTC_IDLE_FPS (frames per second prepared while NOBODY is watching; default 1, off = every
+# frame as before) + CAM_WEBRTC_IDLE_GRACE_S (default 5).
 # CAM_WEBRTC_KEYFRAME_S (IDR every N s on every encoder, default 2.0; 0 = encoder default) and
 # CAM_WEBRTC_X264_PRESET (x264enc speed-preset nick for the software fallback, default ultrafast).
 # H.264: CAM_WEBRTC_PROFILE (effectively FIXED at constrained-baseline -- webrtcsink forces it for raw
@@ -267,10 +268,14 @@ if [ -n "$NORM" ]; then
   # sync=false drop=true already says "hand me samples as they come, don't pace or block on me"), so the
   # pipeline reaches PLAYING, new-sample starts firing, and the pump feeds the sink. Verified in cam-dev:
   # baseline -> state=paused, 0 frames; +async=false -> state=playing, frames flow.
-  PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=2 ! ${ADAPT_EL}${SCALE_EL}appsink name=norm_in emit-signals=true max-buffers=2 drop=true sync=false async=false   appsrc name=norm_out is-live=true format=time ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=I420 ! ${OVERLAY_EL}${SINK}"
+  PIPELINE="${SRC} ! queue name=ingress_q leaky=downstream max-size-buffers=2 ! ${ADAPT_EL}${SCALE_EL}appsink name=norm_in emit-signals=true max-buffers=2 drop=true sync=false async=false   appsrc name=norm_out is-live=true format=time ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=I420 ! ${OVERLAY_EL}${SINK}"
 else
-  PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=2 ! ${ADAPT_EL}${DEBAYER_EL}${SCALE_EL}videoconvert name=fmt_next ! video/x-raw,format=I420 ! ${OVERLAY_EL}${SINK}"
+  PIPELINE="${SRC} ! queue name=ingress_q leaky=downstream max-size-buffers=2 ! ${ADAPT_EL}${DEBAYER_EL}${SCALE_EL}videoconvert name=fmt_next ! video/x-raw,format=I420 ! ${OVERLAY_EL}${SINK}"
 fi
+# `ingress_q` is the head of everything that costs CPU per frame (debayer, scale, stretch, convert,
+# overlay). The launcher gates it on there being a viewer: with none, only
+# CAM_WEBRTC_IDLE_FPS frames a second go on (idle_gate.py) -- a 5 MP Bayer stream otherwise holds
+# 80% of an Orin core for an empty room.
 
 echo "webrtc-bridge: ${TRANSPORT} ${SOCK}${BAYER:+ bayer=${BAYER}}${DEBAYER_EL:+ (debayer->color)}${ADAPT_EL:+ (format-adaptive)}${NORM:+ normalize=${NORM}}${OVERLAY:+ (latency-overlay)}${MAXSZ:+ max-size=${MAXSZ}} -> webrtcsink (signalling :${PORT}, min-bitrate ${MINBR})"
 
