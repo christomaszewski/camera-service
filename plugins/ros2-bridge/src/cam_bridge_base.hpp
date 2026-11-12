@@ -96,13 +96,17 @@ class CamBridgeBase : public rclcpp::Node {
   std::string encoding_;   // CAM_ROS_ENCODING hint: bayer_* for a CFA camera, "" for mono
   bool debayer_ = false;
   double publish_rate_ = 0.0;   // max publish rate in Hz; 0 = publish every frame
+  bool idle_gate_ = true;       // drop frames at the source while the topic has no subscriber
   std::vector<uint8_t> convert_buf_;   // scratch for YUV->rgb8 (reused per frame; single stream thread)
 
  private:
   static GstFlowReturn on_new_sample_static(GstAppSink* sink, gpointer self);
   GstFlowReturn on_new_sample(GstAppSink* sink);
-  // True = drop this frame to hold `publish_rate`. Called on the (single) appsink streaming thread
-  // BEFORE map/extract, so a dropped frame skips the YUV conversion and the message copy entirely.
+  // BUFFER probe on the transport source's src pad: drops a frame nobody is subscribed for (idle_gate_)
+  // or that the publish_rate throttle sheds, before anything in the pipeline has worked on it.
+  static GstPadProbeReturn on_source_buffer_static(GstPad* pad, GstPadProbeInfo* info, gpointer self);
+  // True = drop this frame to hold `publish_rate`. Called on the (single) source streaming thread, so a
+  // dropped frame skips the debayer, the YUV conversion and the message copy entirely.
   bool throttle_drop();
   void publish(const FrameMeta& m);
 

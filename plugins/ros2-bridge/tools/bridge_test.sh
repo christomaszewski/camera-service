@@ -64,6 +64,10 @@ BRIDGE_ID=$(docker run -d --rm --network "container:$ROUTER_ID" --ipc=host -v "$
   -e CAM_ROS_TOPIC=image_raw -e CAM_FRAME_ID=camera "$IMG")
 sleep 7
 docker logs "$BRIDGE_ID" 2>&1 | grep -iE "Instantiate|consuming|ERROR|exception" | tail -3
+# Nobody has subscribed yet: the bridge must be idling (frames dropped as they leave the transport),
+# and the subscriber below must still get every frame from the moment it matches.
+docker logs "$BRIDGE_ID" 2>&1 | grep -q "idle while unsubscribed" \
+  || { echo "BRIDGE TEST: FAIL (the bridge is not gating on subscribers)"; exit 1; }
 
 echo "== verify: typed subscriber on /camera/image_raw (count + encoding + capture stamp) =="
 # Host-level QUOTED heredoc -> zero shell escaping; docker cp into the bridge container; run there. Under

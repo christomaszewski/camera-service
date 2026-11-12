@@ -164,6 +164,7 @@ plugins:
       #                        (JP7: in-pipeline bayer2rgb -> rgb8; JP6: composed image_proc, zero-copy)
       # -- large-image tuning (plugins/ros2-bridge/README.md "Tuning zenoh for large images") --
       # publish_rate: 10     # cap the ROS publish rate (Hz), dropping BEFORE convert/copy; 0 = every frame
+      # CAM_ROS_IDLE_GATE: false   # work on every frame even with no subscriber (default: idle until one matches)
       # zenoh_shm: true      # zenoh shared-memory transport (subscriber sessions must enable it too;
       #                        mismatched peers fall back to the network path automatically)
       # zenoh_shm_pool_size: 268435456   # SHM segment bytes (default 48 MiB); docker shm_size follows it

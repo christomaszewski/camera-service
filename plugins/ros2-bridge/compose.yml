@@ -73,6 +73,8 @@ services:
       # Optional outbound throttle (Hz): cap the bridge's publish rate by dropping frames (the core
       # keeps its native rate for recording/preview). Empty/0 = publish every frame.
       - CAM_ROS_PUBLISH_RATE=${CAM_ROS_PUBLISH_RATE:-}
+      # false = debayer/convert/publish every frame even with no subscriber (default: idle until one matches)
+      - CAM_ROS_IDLE_GATE=${CAM_ROS_IDLE_GATE:-}
     # Compose the container per platform (env-driven). The launch file picks CamUnixfdBridge (JP7) or
     # CamHeaderBridge (JP6), namespaces it /<instance>, and on JP6+debayer also loads image_proc.
     command: ["ros2", "launch", "cam_ros2_bridge", "bridge.launch.py"]

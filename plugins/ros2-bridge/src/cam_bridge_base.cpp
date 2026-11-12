@@ -99,6 +99,11 @@ CamBridgeBase::CamBridgeBase(const std::string& node_name, const rclcpp::NodeOpt
   // frame_rate for recording/preview; only the ROS graph sees fewer frames). 0 = every frame.
   publish_rate_ = declare_parameter<double>("publish_rate", std::atof(env_or("CAM_ROS_PUBLISH_RATE", "0")));
   if (publish_rate_ > 0.0) min_period_ns_ = static_cast<int64_t>(1e9 / publish_rate_);
+  // Idle gate: with no subscriber on the topic (raw or compressed) frames are dropped as they leave
+  // the transport source, before the debayer / convert / message copy. Measured on an R39 Orin, 5 MP
+  // Bayer at 24 fps, nobody subscribed: 64% of a core with debayer on, 11% with it off. The first frame
+  // after a subscriber matches goes through. CAM_ROS_IDLE_GATE=false publishes regardless, as before.
+  idle_gate_ = declare_parameter<bool>("idle_gate", std::string(env_or("CAM_ROS_IDLE_GATE", "true")) != "false");
 
   // image_transport gives the raw topic + a lazy `<topic>/compressed` (JPEG/PNG via
   // compressed_image_transport) that only costs CPU when something subscribes.
@@ -153,6 +158,22 @@ void CamBridgeBase::start_pipeline() {
   if (!sink_) throw std::runtime_error("pipeline has no `appsink name=sink`");
   sample_handler_ = g_signal_connect(sink_, "new-sample",
                                      G_CALLBACK(&CamBridgeBase::on_new_sample_static), this);
+  // Frames nobody will receive are dropped where they ENTER the pipeline -- the idle gate and the
+  // publish_rate throttle both sit on the transport source's pad, ahead of any bayer2rgb/videoconvert.
+  // (The throttle used to sit at the appsink: a 5 MP Bayer camera capped to 5 Hz still debayered all
+  // of its frames.) Events pass, so caps are negotiated while idle and the first wanted frame flows.
+  GstIterator* sources = gst_bin_iterate_sources(GST_BIN(pipeline_));
+  GValue item = G_VALUE_INIT;
+  while (gst_iterator_next(sources, &item) == GST_ITERATOR_OK) {
+    GstElement* src = GST_ELEMENT(g_value_get_object(&item));
+    if (GstPad* pad = gst_element_get_static_pad(src, "src")) {
+      gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, &CamBridgeBase::on_source_buffer_static, this, nullptr);
+      gst_object_unref(pad);
+    }
+    g_value_reset(&item);
+  }
+  g_value_unset(&item);
+  gst_iterator_free(sources);
   if (gst_element_set_state(pipeline_, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
     throw std::runtime_error("pipeline failed to reach PLAYING (is the core up and serving " +
                              socket_path_ + "?)");
@@ -189,9 +210,16 @@ void CamBridgeBase::start_pipeline() {
       ::_exit(EXIT_FAILURE);
     }
   });
-  RCLCPP_INFO(get_logger(), "consuming %s -> publishing '%s' (frame_id=%s, debayer=%s, publish_rate=%.3g%s)",
+  RCLCPP_INFO(get_logger(), "consuming %s -> publishing '%s' (frame_id=%s, debayer=%s, publish_rate=%.3g%s, %s)",
               socket_path_.c_str(), topic_.c_str(), frame_id_.c_str(), debayer_ ? "true" : "false",
-              publish_rate_, min_period_ns_ ? " Hz" : " [unthrottled]");
+              publish_rate_, min_period_ns_ ? " Hz" : " [unthrottled]",
+              idle_gate_ ? "idle while unsubscribed" : "publishing with or without subscribers");
+}
+
+GstPadProbeReturn CamBridgeBase::on_source_buffer_static(GstPad*, GstPadProbeInfo*, gpointer self) {
+  auto* bridge = static_cast<CamBridgeBase*>(self);
+  if (bridge->idle_gate_ && bridge->pub_.getNumSubscribers() == 0) return GST_PAD_PROBE_DROP;
+  return bridge->throttle_drop() ? GST_PAD_PROBE_DROP : GST_PAD_PROBE_OK;
 }
 
 GstFlowReturn CamBridgeBase::on_new_sample_static(GstAppSink* sink, gpointer self) {
@@ -201,10 +229,6 @@ GstFlowReturn CamBridgeBase::on_new_sample_static(GstAppSink* sink, gpointer sel
 GstFlowReturn CamBridgeBase::on_new_sample(GstAppSink* sink) {
   GstSample* sample = gst_app_sink_pull_sample(sink);
   if (!sample) return GST_FLOW_OK;
-  if (throttle_drop()) {   // before map/extract: a dropped frame costs no conversion and no copy
-    gst_sample_unref(sample);
-    return GST_FLOW_OK;
-  }
   GstBuffer* buf = gst_sample_get_buffer(sample);
   GstMapInfo map;
   if (buf && gst_buffer_map(buf, &map, GST_MAP_READ)) {
@@ -220,7 +244,7 @@ GstFlowReturn CamBridgeBase::on_new_sample(GstAppSink* sink) {
 
 bool CamBridgeBase::throttle_drop() {
   if (min_period_ns_ == 0) return false;
-  // Single caller thread (the appsink streaming thread) -> plain int64 state, no lock.
+  // Single caller thread (the transport source's streaming thread) -> plain int64 state, no lock.
   const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::steady_clock::now().time_since_epoch()).count();
   if (now < next_pub_ns_) return true;

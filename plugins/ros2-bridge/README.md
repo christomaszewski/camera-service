@@ -77,6 +77,7 @@ params:
 | `encoding` | `""` (`$CAM_ROS_ENCODING`) | Bayer label / hint. **Auto-set by `cam-up`** from `camera.pixel_format` (e.g. `BayerRG8` → `bayer_rggb8`); empty = mono. On JP7 the format also comes off the caps. A `replay`/`pcap` source whose block names no format inherits the camera's live block's (what `rig replay` renders), so a replayed Bayer camera keeps its label. |
 | `debayer` | `false` (`$CAM_DEBAYER`) | turn an 8-bit Bayer mosaic into color. Set via the plugin's `params.debayer`. |
 | `publish_rate` | `0` (`$CAM_ROS_PUBLISH_RATE`) | max publish rate in **Hz**; frames above it are dropped *before* conversion/copy, so the throttle also saves the bridge CPU. `0` = publish every frame. The core keeps its native `frame_rate` for recording/preview — only the ROS graph sees fewer frames. Set via `params.publish_rate`. |
+| `idle_gate` | `true` (`$CAM_ROS_IDLE_GATE`) | drop frames as they leave the transport while the topic (raw or compressed) has **no subscriber**, before debayer/convert/copy — a 5 MP Bayer camera with debayer on otherwise costs 64% of an Orin core for nobody. The first frame after a subscriber matches is published. `false` = work on every frame regardless |
 
 ## Color (Bayer cameras)
 
