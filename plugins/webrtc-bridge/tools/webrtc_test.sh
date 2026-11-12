@@ -8,7 +8,8 @@
 #                                the CAM_WEBRTC_MAX_SIZE encode-side downscale)
 #   4. JP7 unixfd       + color (Bayer -> bayer2rgb; + the downscale behind the runtime seam)
 #   5. viewer sessions: the idle gate (a trickle with nobody watching, full rate for a viewer), one
-#      shared encoder for every viewer, and the reaper ending a viewer that went silent
+#      shared encoder for every viewer (software; and the Jetson hardware encoder where the host has
+#      one for containers), and the reaper ending a viewer that went silent
 #
 # Each scenario:  core (fake cam) -> webrtc-bridge (webrtcsink + signalling) -> webrtcsrc consumer
 # (decode + count). shm is shared cross-container via a named volume (not a host bind mount --
@@ -318,6 +319,52 @@ if run_scenario "shared encoder (CAM_WEBRTC_ENCODE=shared): one encode for every
   fi
 else
   FAILED=1
+fi
+
+# Asked for a profile the software encoder's preset cannot produce, x264enc labels its caps with it all
+# the same and the parser then finds the real one: the launcher must pin what the encoder will produce
+# (and say so), or the stream is announced twice.
+if run_scenario "shared encoder asked for High profile at x264enc's ultrafast preset" \
+    config/webrtc-fake.yaml \
+    -e CAM_PLATFORM=jp6 -e CAM_TRANSPORT=shm-raw -e CAM_SHM_SOCKET=/tmp/cam/raw \
+    -e CAM_WIDTH=512 -e CAM_HEIGHT=512 -e CAM_FORMAT=GRAY8 -e CAM_FPS=25 \
+    -e CAM_WEBRTC_ENCODE=shared -e CAM_WEBRTC_PROFILE=high -e CAM_WEBRTC_STATUS=2; then
+  if bridge_log_has "ultrafast preset produces constrained-baseline, not high"; then
+    echo "-- pinned to the profile the encoder produces --"
+  else
+    echo "-- FAIL: the launcher did not pin the profile the encoder produces --"
+    FAILED=1
+  fi
+else
+  FAILED=1
+fi
+
+# The same mode on the Jetson hardware encoder, where the host hands containers one (CDI on JP7; set
+# CAM_TEST_NVENC_ARGS for another way in, e.g. "--runtime nvidia"). The fake camera's 512x512@25 is an
+# H.264 level 3 stream, which is where nvv4l2h264enc has two habits that each killed the pipeline: it
+# announces level 3 as "3.0", and at a bitrate above a level's limit it writes a higher level than the
+# one it announced (the parser then announces again, and webrtcsink refuses that).
+read -r -a NVENC_ARGS <<< "${CAM_TEST_NVENC_ARGS:---device nvidia.com/gpu=all}"
+if docker run --rm "${NVENC_ARGS[@]}" --entrypoint gst-inspect-1.0 "$WEBRTC_IMG" nvv4l2h264enc >/dev/null 2>&1; then
+  for hw in "1500000|level=(string){ 3, 3.0 }" "12000000|the hardware encoder writes level 3.1"; do
+    if run_scenario "shared HARDWARE encoder at ${hw%%|*} bit/s (nvv4l2h264enc, H.264 level 3 geometry)" \
+        config/webrtc-fake.yaml "${NVENC_ARGS[@]}" \
+        -e CAM_PLATFORM=jp6 -e CAM_TRANSPORT=shm-raw -e CAM_SHM_SOCKET=/tmp/cam/raw \
+        -e CAM_WIDTH=512 -e CAM_HEIGHT=512 -e CAM_FORMAT=GRAY8 -e CAM_FPS=25 -e VIDEO_CAPS=video/x-h264 \
+        -e CAM_WEBRTC_ENCODE=shared -e CAM_WEBRTC_BITRATE="${hw%%|*}" -e CAM_WEBRTC_STATUS=2; then
+      if bridge_log_has "shared encoder: nvv4l2h264enc encodes once" && bridge_log_has "${hw##*|}"; then
+        echo "-- the hardware encoder was shared, at the level it writes --"
+      else
+        echo "-- FAIL: not the hardware encoder, or not the expected level ('${hw##*|}') --"
+        FAILED=1
+      fi
+    else
+      FAILED=1
+    fi
+  done
+else
+  echo
+  echo "########## SCENARIOS: shared HARDWARE encoder -- SKIPPED (no nvv4l2h264enc for containers here) ##########"
 fi
 
 run_reaper_scenario || FAILED=1

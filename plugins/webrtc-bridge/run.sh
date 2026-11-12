@@ -45,6 +45,7 @@
 # off), CAM_WEBRTC_IDLE_FPS (frames per second prepared while NOBODY is watching; default 1, off = every
 # frame as before) + CAM_WEBRTC_IDLE_GRACE_S (default 5), CAM_WEBRTC_ENCODE=shared (one encoder for all
 # viewers at CAM_WEBRTC_BITRATE instead of one per viewer -- see below).
+# CAM_DRY_RUN=1 prints the pipeline this configuration assembles and exits (nothing waited for or started).
 # CAM_WEBRTC_KEYFRAME_S (IDR every N s on every encoder, default 2.0; 0 = encoder default) and
 # CAM_WEBRTC_X264_PRESET (x264enc speed-preset nick for the software fallback, default ultrafast).
 # H.264: CAM_WEBRTC_PROFILE (effectively FIXED at constrained-baseline -- webrtcsink forces it for raw
@@ -219,9 +220,16 @@ fi
 # chance so we don't fail-and-restart on a cold start (both shm + unixfd create a socket file) --
 # and say exactly what's missing when it never shows, because the source element's own failure is
 # an opaque "Failed to start / pipeline doesn't want to preroll".
+# CAM_DRY_RUN=1 assembles the pipeline exactly as a real start would, prints it and stops: nothing is
+# waited for, started or opened. The unit tests read it (tools/test_run_sh.py); so can you.
+DRY="${CAM_DRY_RUN:-0}"
 WAITED=0
-for _ in $(seq 1 60); do [ -S "$SOCK" ] && break; sleep 1; WAITED=$((WAITED+1)); done
-if [ -S "$SOCK" ]; then
+if [ "$DRY" != 1 ]; then
+  for _ in $(seq 1 60); do [ -S "$SOCK" ] && break; sleep 1; WAITED=$((WAITED+1)); done
+fi
+if [ "$DRY" = 1 ]; then
+  :
+elif [ -S "$SOCK" ]; then
   if [ "$WAITED" -gt 0 ]; then echo "webrtc-bridge: socket $SOCK appeared after ${WAITED}s"; fi
 else
   echo "webrtc-bridge: WARNING: no socket at $SOCK after ${WAITED}s -- the pipeline will fail to start." >&2
@@ -235,7 +243,7 @@ else
 fi
 if [ -n "${GST_PLUGIN_FEATURE_RANK:-}" ]; then echo "webrtc-bridge: GST_PLUGIN_FEATURE_RANK=${GST_PLUGIN_FEATURE_RANK}"; fi
 
-if [ "${RUN_SIGNALLING:-1}" = "1" ]; then
+if [ "${RUN_SIGNALLING:-1}" = "1" ] && [ "$DRY" != 1 ]; then
   gst-webrtc-signalling-server --host 0.0.0.0 --port "$PORT" &
   sleep 1
 fi
@@ -247,7 +255,8 @@ fi
 # honoured). The price: one fixed bitrate for everybody (CAM_WEBRTC_BITRATE, default the start bitrate
 # or 4 Mbit/s) with no back-off when a link degrades -- the MIN/MAX/START bounds and the sink's
 # downscaling have nothing to act on. tools/shared_encoder.py picks the encoder this container has
-# (the Jetson hardware one, else x264enc for H.264) and prints the fragment; the launcher completes its
+# (the Jetson hardware one, else x264enc for H.264 -- by element rank, so GST_PLUGIN_FEATURE_RANK
+# decides as it does per viewer) and prints the fragment; the launcher completes its
 # caps and GOP from the stream and serves keyframe requests (bridge_stream.py). Not available with
 # CAM_LAUNCHER=gst-launch, nor for a codec other than H.264 / H.265.
 ENC_EL=""
@@ -306,6 +315,10 @@ echo "webrtc-bridge: ${TRANSPORT} ${SOCK}${BAYER:+ bayer=${BAYER}}${DEBAYER_EL:+
 # process, so the liveliness token lives exactly as long as the bridge (crash/kill -> presence withdrawn).
 # Escape hatch: CAM_LAUNCHER=gst-launch runs the bare pipeline with NO discovery AND no H.264
 # profile/level pinning (webrtcsink's fixed defaults) -- debugging / minimal only.
+if [ "$DRY" = 1 ]; then
+  printf 'webrtc-bridge: pipeline: %s\n' "$PIPELINE"
+  exit 0
+fi
 if [ "${CAM_LAUNCHER:-python}" = "gst-launch" ]; then
   echo "webrtc-bridge: launcher=gst-launch (discovery + H.264 profile/level off)"
   set -f                          # no globbing: the caps-range size bound carries [ ]
