@@ -187,7 +187,7 @@ Aravis stream ─► [feeder: read frame_id + PTP ChunkTimestamp; set PTS = ts�
 
 - **WebRTC egress via `webrtcsink` (gst-plugins-rs), built from source.** `webrtcsink` isn't packaged
   for Ubuntu — it's the Rust `gst-plugin-webrtc`, built with `cargo cinstall` in the plugin image
-  (LTO-off + limited jobs to dodge the Docker OOM-on-link). It takes **raw video and encodes
+  (LTO off to dodge the Docker OOM-on-link; shared objects only, no debug info). It takes **raw video and encodes
   internally** — zerolatency/CBR/keyframe tuning, GCC congestion control, FEC/RTX, multi-viewer
   fan-out — so the bridge just feeds it frames; no hand-rolled encoder. It runs as a **sibling
   container** consuming the **plugin endpoint** (unixfd on JP7; shm+36-byte-header on JP6, with a

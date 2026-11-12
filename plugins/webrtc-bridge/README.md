@@ -373,7 +373,11 @@ Brings up a `rmw_zenohd` router + core + bridge, and a Zenoh probe
   both compose. The auto H.264 level tracks the streamed size. Watch `lat[cap->enc]` in the heartbeat
   when A/B-ing.
 - **Build on-device:** gst-plugins-rs builds against the Jetson's GStreamer (≥ the 1.20 floor); arm64
-  builds are RAM-bound — the Dockerfile already uses LTO-off + limited jobs.
+  builds were RAM-bound with LTO, so the Dockerfile turns it off. A clean build of the Rust stage takes
+  about 11 minutes on an AGX Orin (it was 28): `cargo-c` is its checksum-pinned release binary rather
+  than compiled, both plugins build in one `cargo cinstall` as shared objects only and without debug
+  info (the plugins are 17 MB instead of 726 MB), and the job count follows the build machine's cores
+  and memory — `--build-arg CARGO_JOBS=2` restores the old fixed value on a box that runs out.
 
 ## Known limitations / future
 

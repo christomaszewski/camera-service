@@ -25,6 +25,15 @@ ARG L4T_VERSION=
 # pair. cargo-c's own install remains locked to its published dependency set.
 ARG RUST_TOOLCHAIN=1.96.0
 ARG CARGO_C_VER=0.10.23
+# cargo-c is a build tool: its release binary (static, musl) is downloaded and checked against these
+# instead of compiled from source, which took four minutes of every clean build. Bump all three together
+# (the digests are on the release page: github.com/lu-zero/cargo-c/releases).
+ARG CARGO_C_SHA256_ARM64=e1f8a41dfef0146bcadc7027bea3fa162cf068b7cedb462415e17352f92bf5a1
+ARG CARGO_C_SHA256_AMD64=603d6a9a25710220d631f0f7ace0e9922d5a69425eb4f1fbcbf6339b357f6d5f
+# Parallel rustc jobs for the plugin build: `auto` = one per core, at most one per GB of available
+# memory (measured: 4 GB at the peak with 12 jobs, LTO off); a number pins it (CARGO_JOBS=2 is the old
+# fixed value, for a box that still runs out).
+ARG CARGO_JOBS=auto
 
 # Only built for the modern dev target; vehicle targets keep their distro GStreamer.
 FROM ubuntu:26.04 AS gstreamer
@@ -63,6 +72,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 ARG GST_RS_TAG
 ARG RUST_TOOLCHAIN
 ARG CARGO_C_VER
+ARG CARGO_C_SHA256_ARM64
+ARG CARGO_C_SHA256_AMD64
+ARG CARGO_JOBS
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl build-essential pkg-config cmake libssl-dev \
       libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
@@ -71,19 +83,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal \
       --default-toolchain ${RUST_TOOLCHAIN}
 ENV PATH=/root/.cargo/bin:$PATH
-RUN cargo install cargo-c --version ${CARGO_C_VER} --locked
+RUN case "$(uname -m)" in \
+      aarch64) arch=aarch64; sum="${CARGO_C_SHA256_ARM64}" ;; \
+      x86_64)  arch=x86_64;  sum="${CARGO_C_SHA256_AMD64}" ;; \
+      *) echo "no cargo-c release binary pinned for $(uname -m)" >&2; exit 1 ;; \
+    esac \
+    && curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/cargo-c.tar.gz \
+         "https://github.com/lu-zero/cargo-c/releases/download/v${CARGO_C_VER}/cargo-c-${arch}-unknown-linux-musl.tar.gz" \
+    && echo "${sum}  /tmp/cargo-c.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/cargo-c.tar.gz -C /root/.cargo/bin && rm /tmp/cargo-c.tar.gz \
+    && cargo cinstall --version
 RUN git clone --depth 1 --branch ${GST_RS_TAG} \
       https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git /tmp/gst-rs
-# LTO off + limited jobs to dodge the OOM-during-link the full/LTO build hits in Docker.
-ENV CARGO_PROFILE_RELEASE_LTO=off CARGO_BUILD_JOBS=2
+# LTO off to dodge the OOM-during-link the full/LTO build hits in Docker; the job count is set in the
+# build step below, from the cores and memory of the machine doing the build.
+# No debug info: upstream's release profile carries it (debug = true), which tripled the size of the
+# plugins and lengthened every compile; panics still name their function.
+ENV CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_DEBUG=false
 # gst-plugin-rtp rides along for `rtpgccbwe`: webrtcsink's Google Congestion Control needs that
 # element to scale each consumer's encoder bitrate to the link. Without it CC never engages --
 # every consumer parks at start-bitrate AND a pinned rate above a (WiFi) link's momentary capacity
-# bufferbloats the stream (latency grows without recovering). Same RUN -> shared cargo target dir,
-# so the common gstreamer-rs deps compile once.
+# bufferbloats the stream (latency grows without recovering). One cinstall for both plugins, so their
+# common gstreamer-rs deps compile once; only the shared objects GStreamer loads are built
+# (--library-type=cdylib -- the static libraries were 500 MB that nothing linked).
 RUN cd /tmp/gst-rs \
-    && cargo cinstall -p gst-plugin-webrtc --prefix=/usr/local --libdir=/usr/local/lib \
-    && cargo cinstall -p gst-plugin-rtp --prefix=/usr/local --libdir=/usr/local/lib \
+    && if [ "${CARGO_JOBS}" = auto ]; then \
+         cores="$(nproc)"; by_mem="$(awk '/MemAvailable/ {print int($2 / 1048576)}' /proc/meminfo)"; \
+         jobs="$(( by_mem < cores ? by_mem : cores ))"; [ "$jobs" -ge 1 ] || jobs=1; \
+       else jobs="${CARGO_JOBS}"; fi \
+    && export CARGO_BUILD_JOBS="$jobs" && echo "gst-plugins-rs: building with ${jobs} jobs" \
+    && cargo cinstall -p gst-plugin-webrtc -p gst-plugin-rtp --library-type=cdylib \
+         --prefix=/usr/local --libdir=/usr/local/lib \
     && cargo build --release --bin gst-webrtc-signalling-server \
     && install -m755 target/release/gst-webrtc-signalling-server /usr/local/bin/
 # bayerbin: the bridge's own element (one C file) -- a Bayer mosaic to half-resolution RGBx without a
