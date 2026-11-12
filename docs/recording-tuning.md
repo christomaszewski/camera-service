@@ -127,6 +127,21 @@ full range), so the sidecar override is a safeguard rather than a necessity on R
 **JP6 is not validated yet.** r36 has a different NVENC and `nvvidconv`, so run the lossless proof
 in [the hardware test procedure](hardware-test-procedure.md) on a JP6 host at the sensor's geometry.
 
+**Where the rest of the CPU goes** (R39 Orin, MAXN, 2448×2048 at 24 fps, source paced at the camera rate,
+a mosaic that compresses to 52% of raw; [full results](encoding-optimization/RESULTS.md)):
+
+| Variant | CPU ms/frame | Size vs raw | Bit-exact | Notes |
+|---|---:|---:|---|---|
+| A as shipped (`videoconvert_threads: 4`) | 52.5 | 51.8% | 240/240 | `nvvidconv`'s copy into encoder memory 24 ms, `videoconvert` 12 ms, encoder threads 11 ms, parse + mux 4 ms |
+| A with `videoconvert_threads: 1` | 42.7 | 51.8% | 240/240 | same throughput (the encoder limits it, ~50 fps) |
+| B NV24 from the feeder | 40.9 | 51.8% | 240/240 | not implemented |
+| NV12 from the feeder | 25.5 | 51.8% | 240/240 | not implemented; the candidate |
+| C `nvvidconv` colour step | — | — | — | unsupported, and the two-pass VIC route is not exact |
+| A + `bayer_tile=plain` | 59.5 | 45.5% | 240/240 | tiling adds 9 ms on the capture thread |
+
+With the full-range pin the colour step is a copy, so `videoconvert_threads: 1` now costs less CPU than
+the default 4 at the same throughput.
+
 ## Lossless CFA tiling and temporal compression
 
 The lossless paths (HW HEVC on the Orin, FFV1/x265 on CPU) remain unchanged. For an 8-bit **Bayer**

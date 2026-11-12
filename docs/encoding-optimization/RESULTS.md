@@ -1,0 +1,351 @@
+# Encoding optimization — results on the Orin
+
+Measured 2026-11-11 (2026-11-12 UTC) on the bench AGX Orin, working through `README.md` in this directory.
+**Nothing is implemented in the service.** Test builds and prototypes lived outside the tree; the scripts
+that produced the numbers are in `scripts/`.
+
+- **Host:** AGX Orin, L4T R39 rev 2.1, kernel 6.8.12-tegra, Ubuntu 24.04, 12 CPUs, NVMe. `nvpmodel` MAXN,
+  `schedutil` governor.
+- **Images:** built on the Orin from `v1.13.0` (`6d3af8b`) with `tools/build-images.sh local jp7`:
+  `cam-core:jp7` and `webrtc-bridge:jp7`, both GStreamer 1.24.2; the bridge carries libnice 0.1.21 and
+  gst-plugins-rs `0.15.4-1afff37`.
+- **Deployment:** `cam-up --jp7` with a copy of `cam_usb.yaml` (ROS bridge off) against the NexiGo USB
+  camera: core healthy, MJPEG 1080p30 stream-copy recording, bridge on `nvv4l2h264enc`.
+- **CPU figures** are user + system time of the process per frame, with the source **paced at the camera
+  rate**, as the service runs. Under `schedutil` a paced load runs at a reduced clock, so the same work
+  costs fewer CPU-ms when saturated; both are given where it matters. System-wide accounting
+  (`/proc/stat` against an idle baseline) put the work done outside the process — kernel threads and IRQs
+  of the encoder and VIC drivers — at 1–5 ms per 5 MP frame, so the process figure is a fair measure.
+- **Content:** synthetic, as in the handoff scripts. No Bayer or 16-bit camera was on the bench. The 5 MP
+  mosaic (smooth scene, σ = 2.5) compresses to 51.8% of raw; the real Blackfly footage benchmarked on this
+  Orin earlier came to 51.4%, so it is representative in size.
+
+## 1. What is worth implementing
+
+| # | Change | Measured effect | Verdict |
+|---|---|---|---|
+| 1 | **Feed NV12 to the hardware lossless encoder** (frame + one shared constant chroma block, built where the recorder wraps frames; fragment starts at `nvvidconv`) for 8-bit mono/Bayer | Recorder 52.5 → 25.5 ms per 5 MP frame (−51%); whole live core 61.4 → 33.5 ms (−45%). Bit-exact on scene, noise and an all-codes ramp | **Do first.** Replaces the handoff's NV24 idea (variant B), which saves only 12 ms |
+| 2 | **16-bit on the hardware encoder by byte split** (R2), folded variant, fed as NV12 | 47.3 → 7.4 ms per 640×512 frame; in the live core FFV1 holds 297% of a core at 60 fps. Bit-exact 1200/1200. Size 34% of raw against FFV1's 31% (56% against 49% on noisier frames) | **Do**, after 1 (it reuses the NV12 feed). Needs real Boson footage for the size figure |
+| 3 | **Raise the WebRTC bitrate floor** (`min-bitrate` default 1 kbit/s) | After 10 s of 50% loss the encoder target is at the floor; back above 1 Mbit/s in 34 s with the default, in 5 s with a 500 kbit/s floor | **Do.** A default in `run.sh`; no code |
+| 4 | **Reap stale sessions** (W2), liveness + cap | On the jp7 bridge a vanished viewer held its session and encoder for about 15 min 40 s. The reaper prototype ended it 12 s after the blackout; bridge CPU 77% → 43% | **Do** for the 24.04-based bridge images; both signaller signals are needed (section 4.3). A 26.04-based bridge drops the dead session by itself after 30 s (row 4b) |
+| 4b | Build the jp7 bridge on Ubuntu 26.04 (`BASE_IMAGE=ubuntu:26.04`, what `jp6m` already does) | GStreamer 1.28.2 + libnice 0.1.23: the black-holed viewer was removed after 29.5 s with no reaper; `nvv4l2h264enc` loads through CDI on this R39 host and encoded both sessions | **Worth a validation round**: it fixes the cause rather than the symptom, but changes the bridge's whole userspace. The cap policy of row 4 is still wanted |
+| 5 | **Stop the bridge working with no viewer** (W6) | A 5 MP Bayer stream costs the bridge 80% of a core with zero viewers (debayer + convert); a viewer adds 32% | **Do.** Larger than any per-viewer saving on Bayer cameras |
+| 6 | **Encode once for all viewers** (W3, opt-in) | Works. 3 viewers: 64–66% of a core against ~145% per-viewer; High profile becomes available. Needs complete caps and a `force-IDR` hook (section 4.5) | **Do as opt-in**, after 3–5. Fixed bitrate, and the encoder runs with no viewer (20–24%) unless gated by 5 |
+| 7 | `videoconvert_threads` default 4 → 1 | 52.5 → 42.7 ms per 5 MP frame; throughput unchanged (encoder-bound at ~50 fps) | Free interim win; moot for mono/Bayer once 1 lands |
+| 8 | Skip the unused main-pipeline push | ~1 ms per 5 MP frame (2% of a core at 24 fps) | Small. Take it when touching that code |
+| 9 | Uncompressed mode (R1) | 1.3 ms per frame, 100% of raw. `splitmuxsink` splits raw Matroska cleanly on 1.24.2 and 1.28.8 and **aborts the process on 1.20.3** (the `jp6` userspace) | Only as a non-NVENC fallback; R2 gets within 6 ms of it at a third to a half of the disk |
+| 10 | Dependency bump to 1.28.9 / `gstreamer-1.28.9` | Checksums in the handoff verified against the downloads; both tags exist | Any time (dev images only) |
+
+Not worth it: `nvvidconv` doing the colour step (unsupported, or not exact); `bayer_tile` as a load knob (it
+adds 7–9 ms); `keyframe_interval_s` as a load knob; the FFV1 speed knobs for 16-bit; the chroma-plane
+layout for 16-bit; H.265 for the stream as a CPU measure.
+
+Two things surfaced that the handoff did not ask about:
+
+- **Publishing to the unixfd endpoint costs about 6 ms per 5 MP frame with no consumer connected** (a
+  memfd and a 5 MB copy per frame on the capture thread, plus the sink thread).
+- **The Ubuntu 26.04 userspace has ICE consent freshness on** (GStreamer 1.28 + libnice 0.1.23), and a
+  bridge built on it dropped a black-holed viewer after 29.5 s by itself. The stale-session problem belongs
+  to the 24.04-based bridge images only (section 4.2).
+
+## 2. Recording, 8-bit mono / Bayer on the hardware path
+
+2448×2048 at 24 fps, `scripts/recorder_variants_bench.py --set bayer`, 240 frames per variant, each
+recording decoded with `replay.raw_decode_chain` and compared frame by frame.
+
+### 2.1 Variants (handoff section 1.7)
+
+| Variant | CPU ms/frame | Size vs raw | Bit-exact | Notes |
+|---|---:|---:|---|---|
+| A — as shipped (`videoconvert n-threads=4`) | 52.5 | 51.8% | 240/240 | |
+| A with `n-threads=1` | 42.7 | 51.8% | 240/240 | the three pool threads cost more than they save now that the colour step is a copy |
+| B — NV24 from the feeder | 40.9 | 51.8% | 240/240 | `nvvidconv` still uploads 15 MB per frame |
+| C — GRAY8 straight into `nvvidconv` → NV24 | — | — | — | `gst_nvvconv_transform: Transform not supported` |
+| C via NVMM GRAY8 → NV24 | — | — | — | same refusal |
+| C2 — GRAY8 → VIC I420 → VIC NV24 | 25.4 | 51.3% | **0/240** | luma clamped at 235 (1.9% of pixels, error up to 20) |
+| C2 with the range pinned on the NVMM caps | 25.9 | 54.3% | **0/240** | range expanded instead (95% of pixels) |
+| **D — NV12 from the feeder** (frame + shared constant chroma; the VIC upsamples to NV24) | **25.5** | 51.8% | **240/240** | upload is 7.5 MB; no `videoconvert` |
+| D with I420 instead of NV12 | 26.5 | 54.3% | **0/240** | the VIC treats I420 as limited range |
+| A + `bayer_tile=plain` | 59.5 | 45.5% | 240/240 | tiling itself is 9 ms on the capture thread |
+| D + `bayer_tile=plain` | 32.4 | 45.5% | 240/240 | |
+| A with a 10 s GOP | 54.7 | 50.5% | 240/240 | |
+| FFV1, for scale | 301 | 59.5% | 240/240 | 12.5 fps: not real time at 5 MP |
+| Uncompressed Matroska, for scale | 7.8 | 100% | 240/240 | |
+
+Further runs of the candidates:
+
+| Content | A | A, 1 thread | B | D (NV12) | Size |
+|---|---:|---:|---:|---:|---:|
+| Scene, paced (above) | 52.5 | 42.7 | 40.9 | 25.5 | 51.8% |
+| Uniform noise, paced — worst case | 74.4 | 62.2 | 62.8 | 45.9 | 131.7% |
+| All 256 codes in every frame (ramp + noise) | 57.7 | — | — | 29.3 | 65.9% |
+| Scene, saturated (`--unpaced`) | 37.3 | 32.8 | — | 24.6 | 51.8% |
+
+All of these are bit-exact, D with and without the colorimetry pin on its input caps. Saturated, every
+variant drains at about 50 fps: the encoder is the limit, not the CPU side.
+
+### 2.2 Where the CPU goes (step 1)
+
+Queues between the elements give each its own thread (`A-diag`, `D-NV12-diag`):
+
+| Stage | A as shipped | D (NV12) |
+|---|---:|---:|
+| Feeder (wrap + push) | 1.2 | 1.0 |
+| `videoconvert` (streaming thread + 3 pool threads) | 11.9 | — |
+| `nvvidconv` — the copy into encoder memory | 24.4 | 7.8 |
+| Encoder, output thread | 5.7 | 5.7 |
+| Encoder, `V4L2_EncThread` ×3 (mostly system time) | 5.8 | 6.0 |
+| `h265parse` | 2.4 | 2.1 |
+| Muxer + file write | 2.0 | 2.0 |
+| **Total, ms per frame** | **54.3** | **25.4** |
+
+So the "other 59 ms" of the handoff is mostly `nvvidconv` copying a 15 MB NV24 frame into NVMM, at about
+1.6 ms per MB. That is why halving the upload (NV12) beats removing `videoconvert` (NV24 from the feeder).
+The two encoder threads scale with the bitstream: on noise (6.6 MB per frame) they take 19 and 14 ms.
+
+### 2.3 The live core (steps 1 and 6)
+
+The real core recording a live 5 MP 24 fps stream through the `shm` input, unixfd plugin endpoint enabled
+with no consumer, measured with `scripts/thread_cpu.py`. The test build was a copy of `core-driver` with two
+environment-gated changes: `_discard_replay_main` extended to live sources, and the NV12 feed. Every run
+was decoded afterwards and checked against the writer's frames (788/788 exact, in order, no drops).
+
+| Build | Whole core, ms/frame | Capture thread |
+|---|---:|---:|
+| As shipped | 61.4 | 8.0 |
+| Main-pipeline push skipped | 63.6 | 9.5 |
+| NV12 feed | 33.5 | 8.2 |
+| NV12 feed + push skipped | 32.3 | 7.2 |
+| NV12 feed + push skipped + plugin endpoint off | 26.0 | 3.0 |
+| As shipped, plugin endpoint off | 54.4 | 3.8 |
+
+- The unused main-pipeline push is one 5 MB copy: about 1 ms per frame (3.8 → 3.0, 8.2 → 7.2; the second
+  row is run-to-run variation in the publish path, not a regression).
+- The unixfd publish costs about 5 ms on the capture thread plus 1.4 ms on the sink thread, with nobody
+  connected.
+
+### 2.4 Tiling and temporal prediction (steps 4 and 5)
+
+- **Tiling is a disk knob, not a load knob.** It removes 12% of the bitstream on the synthetic mosaic and
+  about 1 ms from the encoder's output thread, and adds 9 ms of numpy on the capture thread. On the real
+  Blackfly footage benchmarked here earlier (`tiling_benchmark.py`) the gain was 2%.
+- **Temporal prediction is active.** `probe_temporal.py` on a hardware recording of the static synthetic
+  scene: 28 keyframes of 4555 KiB, 760 delta frames of 2464 KiB (54%). The default GOP is about 30 frames,
+  so a 10 s GOP removes only 2.5%. On the real footage delta and key frames were the same size
+  (98–100%). It is content-dependent and does nothing for CPU.
+
+### 2.5 Notes for the implementation of change 1
+
+- Build the buffer as two memories, the frame and one shared read-only chroma block of `width × height / 2`
+  bytes of 128; keep the block's Python `bytes` alive for the life of the memory. `nvvidconv` merges the
+  two (1.4 ms); a contiguous buffer built in Python costs the same on the feeder instead.
+- A `GstVideoMeta` on the buffer changes nothing: `nvvidconv` maps the whole buffer.
+- Only NV12 is exact. I420 through the same path is not, and neither VIC-only route is, so the choice of
+  format is load-bearing: qualify it per JetPack with noise **and** a ramp of all codes at the sensor
+  geometry (`nvenc_lossless_test.py`, review finding TQ-18). JP6 (r36) is unverified.
+- Geometry: NV12's default layout needs `width % 4 == 0` and an even height (review finding DP-1); keep
+  the present path, or refuse, otherwise.
+- The sidecar's `recording_colorimetry` and the read path do not change: the bitstream is the same NV24.
+
+## 3. Recording, 16-bit
+
+640×512 at 60 fps, `recorder_variants_bench.py --set gray16`, 1200 frames (600 at σ = 40).
+
+| Path | CPU ms/frame, σ = 6 | Size, σ = 6 | CPU, σ = 40 | Size, σ = 40 | Saturated CPU |
+|---|---:|---:|---:|---:|---:|
+| FFV1 (today) | 47.3 | 31.3% | 48.6 | 49.3% | 20.8 (192 fps) |
+| Uncompressed (R1) | 1.3 | 100% | 1.4 | 100% | 0.6 |
+| Split, plain, shipped 8-bit fragment | 10.8 | 36.8% | | | 6.6 |
+| Split, folded, shipped 8-bit fragment | 12.6 | 34.3% | | | |
+| Split, plain, fed as NV12 | **5.5** | 36.8% | 6.8 | 62.9% | 5.4 |
+| Split, folded, fed as NV12 | **7.4** | 34.3% | 9.5 | 56.0% | 5.0 |
+| Planes: Y = high byte, U = low byte, NV24 | 10.1 | 39.3% | 11.4 | 66.4% | |
+| Planes, folded | 13.5 | 35.9% | | | |
+
+Every row is bit-exact on every frame (the planes variant included: chroma survives the NV24 upload and
+the lossless encoder exactly, and the unused V plane comes back constant).
+
+- **R2 works on the hardware.** The handoff's own scripts agree: `gray16_split_roundtrip.py --encoder
+  hw-hevc-lossless` gives 120/120 for both variants at 6.9 / 7.4 ms against FFV1's 21.1 (saturated).
+- **The saving is larger live than the scripts show.** Paced at 60 fps FFV1 costs 47 ms per frame; the real
+  core on a live 640×512 GRAY16 60 fps stream measured 49.6 ms per frame, **297% of a core**. The split is
+  about 0.4 of a core.
+- **Use the folded variant.** It costs 2 ms more in numpy (the script's `np.where`; an XOR with
+  `-(high & 1)` would be cheaper) and matters most where it counts: on noisier frames it is 56.0% against
+  62.9% for the plain split.
+- **Disk:** 3 points more than FFV1 on smooth frames, 7 on noisy ones. Real Boson footage is the missing
+  input; `docs/recording-tuning.md` puts FFV1 on real 60 fps thermal at 64–76% of raw.
+- The FFV1 speed knobs do nothing here (20.9 → 20.1 ms), as predicted.
+- **R1:** `splitmuxsink` writes and splits raw `GRAY16_LE` / `GRAY8` Matroska correctly on 1.24.2 and
+  1.28.8 (every frame read back exact, width 642 included). On 1.20.3 it aborts the process:
+  `gstsplitmuxsink.c:2691:check_completed_gop: assertion failed: (gop != NULL)`.
+
+## 4. WebRTC
+
+### 4.1 Cost per viewer
+
+| Source | Bridge, no viewer | One viewer | Two viewers |
+|---|---:|---:|---:|
+| USB 1080p30, already I420, NVENC H.264 | 2% of a core | 45–50% | 85–100% |
+| 5 MP Bayer at 24 fps, NVENC H.264 | **80%** | 112% | |
+| the same with `CAM_WEBRTC_MAX_SIZE=1280` | **83%** | 110% | |
+
+On Bayer the idle cost is `bayer2rgb` plus the convert at sensor resolution, 33 ms per frame, and the
+downscale sits after it. A half-resolution debayer (one RGB pixel per CFA cell) ahead of the scale would
+remove most of it for any target at or below half size; not tried.
+
+### 4.2 Stale sessions (handoff section 2.4) — confirmed
+
+- **jp7 bridge image (24.04, GStreamer 1.24.2, libnice 0.1.21):** `consent-freshness = False`,
+  `keepalive-conncheck = False`.
+- **Ubuntu 26.04 (GStreamer 1.28.2 from the distribution, and the source-built 1.28.8 of the `dev` image,
+  libnice 0.1.23):** both `True`. This is the userspace of the `jp6m` and `dev` bridges.
+- **A 26.04-based bridge on this host** (`tools/build-images.sh local jp6m`, `IMAGES=webrtc-bridge`:
+  GStreamer 1.28.2, libnice 0.1.23, the same gst-plugins-rs 0.15.4): `nvv4l2h264enc`, `nvv4l2h265enc` and
+  `nvvidconv` are present through CDI and the sink picked `nvv4l2h264enc` for both of two viewers. One
+  viewer black-holed: `consumer-removed` **29.5 s** later with no reaper, the other viewer untouched.
+- **Deployed jp7 bridge:** a viewer cut off by dropping all traffic to it stayed counted for **about 15 min 40 s**
+  (cut at 02:21:58, removed at 02:37:36 UTC), the kernel's TCP retransmission limit on the signalling connection. Its encoder
+  ran the whole time (bridge at 33% of a core for nobody), and a second viewer brought the bridge to 85–90%.
+- A viewer killed with the link intact is removed at once (its connection resets).
+
+### 4.3 Reaper prototype (W2) — works
+
+`scripts/webrtc_lab.py`, on the Orin, media over UDP:
+
+- **Liveness field.** With `LAB_DIFF=1`: after a blackout only sender-side counters keep changing
+  (`bytes-sent`, `packets-sent`, the SR fields). Frozen from the first sample: the candidate pair's
+  `gst-twcc-stats` (changes at every 2 s sample while a receiver is alive), and the receiver-report block
+  of the remote source (`rb-lsr`, `rb-dlsr`, `rb-exthighestseq`, `round-trip-time`; about every 5 s). Key
+  on those two together.
+- **Ending a session needs both signals, in this order:** `end-session` on the signaller (tells the server
+  and through it the viewer) and then `session-ended` (the sink's handler for it removes the session and
+  releases the encoder). `end-session` alone leaves `get-sessions` unchanged — measured.
+- **Liveness policy, 10 s:** the black-holed viewer was ended 12 s after the blackout (threshold plus one
+  2 s tick), `consumer-removed` fired, CPU 77% → 43%, the other viewer kept 30 fps.
+- **Cap policy, 1 session:** a second viewer joining ended the first within one tick.
+- A viewer whose session was reaped does not come back by itself when its link returns (`webrtcsrc` sat at
+  0 fps). The dashboard's own reconnect has to do that.
+
+### 4.4 Recovery after a dropout (W1, handoff section 2.3)
+
+No radio link was available; loss was injected between a producer and a viewer in two containers (random
+drop in the `FORWARD` chain), media over UDP, 1080p30, defaults unless stated.
+
+| Event | Default floor (1 kbit/s) | `min-bitrate=500000` |
+|---|---|---|
+| 50% loss for 10 s: encoder target during the loss | 4.7 Mbit/s → 441 → 25 → 2 → **1 kbit/s** within 8 s | → 500 kbit/s |
+| Time after the loss ends to reach 1 Mbit/s | **34 s** | **5 s** |
+| … 2 Mbit/s | 40 s | 8 s |
+| … the previous rate | 46 s | 22 s |
+| Total blackout, 10 s | picture back 0.4 s after the link; rate dips to 3.6 Mbit/s and recovers in 4 s | |
+| Total blackout, 45 s | session survives; picture back within 1 s; rate halved, then climbs ~60 kbit/s per 2 s | |
+
+- **Hypothesis 1 is confirmed and is the dominant one**: it is the lossy fade, not the outage itself, that
+  makes recovery slow. With the default floor the stream delivers 30 frames a second of a few kbit/s for
+  half a minute.
+- Hypothesis 2 (a new session's 2 Mbit/s start overshooting) only applies to a link below 2 Mbit/s; not
+  tested. Hypothesis 3 is the dashboard's.
+- A session that survives a blackout resumes faster than a reconnect can, so a viewer-side watchdog that
+  tears down at 12 s works against recovery after a clean outage, and each reconnect leaves a stale
+  session behind on the 24.04 bridges.
+
+### 4.5 Encode once (W3) — works, with two requirements
+
+| Viewers | Shared NVENC H.264, 4 Mbit/s | Per-viewer (today) |
+|---|---:|---:|
+| 0 | 20–24% of a core (the encoder never stops) | 2% |
+| 1 | 34% | 45–50% |
+| 2 | 50% | 85–100% |
+| 3 | 64–66% | ~145% (extrapolated) |
+
+- **Complete caps up front.** `h264parse` announces caps when the encoder's arrive and again after parsing
+  the SPS; `webrtcsink` refuses the second (`Renegotiation is not supported`) and the pipeline dies
+  not-negotiated. Working chain: `nvv4l2h264enc ! video/x-h264,profile=high,level=(string)4,
+  stream-format=byte-stream,alignment=au ! h264parse config-interval=-1 ! capssetter join=true
+  caps="video/x-h264,coded-picture-structure=(string)frame,chroma-format=(string)4:2:0,
+  bit-depth-luma=(uint)8,bit-depth-chroma=(uint)8" ! webrtcsink`. The level has to be the derived one the
+  bridge already computes.
+- **Keyframes on request.** `nvv4l2h264enc` ignores the upstream force-key-unit events the sink sends when
+  a session connects and on every PLI, so a joining viewer waits for the next periodic IDR (first frame
+  after 1.3–2.9 s at a 2 s GOP, with dozens of repeated requests per join). Emitting the encoder's `force-IDR` action from a
+  probe on those events, at most once a second, brings joins to 0.7–1.0 s and the requests down to about two per join.
+- The offer advertises `profile-level-id=640028`: High profile, level 4. The constrained-baseline pin does
+  not apply, as the handoff expected.
+- 30% loss to one of three viewers for 10 s: that viewer held ~30 fps on retransmissions, the others were
+  untouched, no extra keyframes. There is no bitrate adaptation in this mode.
+
+### 4.6 H.265 (W5)
+
+`video-caps=video/x-h265` with `nvv4l2h265enc` ranked up, and the shared-encoder chain with `h265parse`,
+both streamed 1080p30 to the GStreamer viewer (first frame in about 1 s; per-viewer one viewer 30% of a
+core). No browser was tried.
+
+### 4.7 A trap in the test set-up
+
+With the producer host-networked and the viewer in a container on the same host, every session ran over
+**ICE-TCP**: libnice's UDP checks from the host-networked agent to the container went unanswered while
+plain UDP between the same addresses worked. TCP hides packet loss, so the first loss runs showed nothing.
+All loss figures above are from producer and viewer both on the Docker bridge network, where the selected
+pair is UDP host-to-host. Worth one check on a vehicle: the `protocol` of the selected candidate pair in
+the sink's stats.
+
+## 5. Dependencies (handoff section 3.6)
+
+- **Step 1, inputs:** the seven 1.28.9 checksums in the handoff match the archives downloaded from
+  `gstreamer.freedesktop.org`; Debian's mirror serves the identical `gstreamer` archive. The
+  `gstreamer-1.28.9` tag exists in gst-plugins-rs (`5d373ca6`, 2026-11-06). The bump itself was not made.
+- **Step 3, what the images run:**
+
+  | Image | GStreamer | libnice | Consent freshness |
+  |---|---|---|---|
+  | `cam-core:jp7` (24.04) | 1.24.2 | 0.1.21 (unused) | — |
+  | `webrtc-bridge:jp7` (24.04); the `jp6` bridge has the same base | 1.24.2, gst-plugins-rs 0.15.4-1afff37 | 0.1.21 | **off** |
+  | `cam-dev` (26.04, source-built) | 1.28.8 | 0.1.23 | on |
+  | `webrtc-bridge:jp6m` (26.04), run here with the CDI device | 1.28.2, gst-plugins-rs 0.15.4-1afff37 | 0.1.23 | **on**: dead session gone in 29.5 s |
+
+  The `jp6` core (22.04, GStreamer 1.20) was not built here.
+
+## 6. Corrections to the handoff
+
+- **Variant B's `0/120` in `bayer_hw_path_cpu.py` was the script's fault.** It wrapped a temporary `bytes`
+  as the shared chroma block; `Gst.Memory.new_wrapped` does not copy, so the block dangled and `nvvidconv`
+  read freed memory (NvMap write errors, 123.7% of raw). Fixed in the script: B is 48/48.
+- **The NV24 buffer of variant B is not the cheap one.** The copy into NVMM dominates, and NV12 halves it.
+- **`session-ended` removes a session; `end-session` does not** (section 4.3). The handoff had this right;
+  it is recorded here because the first prototype run suggested otherwise.
+- **16-bit FFV1 costs 47–50 ms per frame live**, not the 16–21 ms a saturated run shows.
+
+## 7. Not done, and still open
+
+- Real footage: no Bayer or 16-bit camera on the bench, and no thermal recording to feed `--raw-file`.
+- JetPack 6: nothing here was run on r36. The NV12 feed and the split both rest on VIC behaviour that
+  differs by format on R39, so they need the lossless proof there before being enabled.
+- A real radio link for W1; a browser for W3 (High profile) and W5.
+- Power draw was not recorded (`tegrastats`); CPU time only.
+- The 26.04-based bridge was only run as the lab producer: not through `cam-up`, not `webrtc_test.sh`, and
+  not on a JP6 host, where the encoder plugins arrive by CSV injection instead of CDI.
+
+## 8. Reproducing
+
+```
+# images, on the Orin
+PUSH=0 IMAGES="cam-core webrtc-bridge" tools/build-images.sh local jp7
+R='docker run --rm --device nvidia.com/gpu=all -v '"$PWD"':/repo -v /tmp/work:/work -w /repo --entrypoint python3 local/cam-core:jp7'
+
+# sections 2 and 3
+$R docs/encoding-optimization/scripts/recorder_variants_bench.py --set bayer
+$R docs/encoding-optimization/scripts/recorder_variants_bench.py --set bayer --content ramp --variants A,D-NV12,D-NV12-nopin
+$R docs/encoding-optimization/scripts/recorder_variants_bench.py --set bayer --content noise --variants A,A-1thr,B,D-NV12
+$R docs/encoding-optimization/scripts/recorder_variants_bench.py --set gray16 --frames 1200 --distinct 240
+$R docs/encoding-optimization/scripts/recorder_variants_bench.py --set gray16 --sigma 40 --frames 600
+
+# section 2.3: a writer (appsrc ! shmsink) feeds a `camera.type: shm` instance; then, on the host
+python3 docs/encoding-optimization/scripts/thread_cpu.py <core pid> 20 24
+
+# section 4: producer and viewers as containers of the bridge image on the Docker bridge network
+gst-webrtc-signalling-server --host 0.0.0.0 --port 8450 & python3 webrtc_lab.py        # in the producer
+python3 webrtc_viewer.py ws://<producer address>:8450 600 A                            # in each viewer
+iptables -I FORWARD -s <producer> -d <viewer> -m statistic --mode random --probability 0.5 -j DROP   # loss
+iptables -I FORWARD -s <viewer> -d <producer> -j DROP    # with the reverse rule: a dead link
+```

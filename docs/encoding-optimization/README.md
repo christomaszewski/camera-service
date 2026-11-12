@@ -3,6 +3,10 @@
 Status as of 2026-11-11: **investigation only, nothing implemented.** This document carries a design
 discussion over to a session that has a Jetson AGX Orin, so it can implement and test.
 
+**The Orin measurements have since been run: see [RESULTS.md](RESULTS.md)** (R39 AGX Orin, 2026-11-11). It
+answers sections 1.5, 1.7, 2.3–2.6 and 3.6 step 3, ranks what is worth implementing, and corrects two things
+below: variant B's failure was a bug in `bayer_hw_path_cpu.py` (fixed), and the cheaper feed is NV12, not NV24.
+
 The goal is to lower the CPU cost of encoding, for recordings (16-bit thermal first) and for the WebRTC
 preview streams, and to fix slow WebRTC recovery after the radio link drops.
 
@@ -19,7 +23,8 @@ preview streams, and to fix slow WebRTC recovery after the radio link drops.
 - **Related review:** `docs/review-v1.13.0/` on the same branch. Findings it numbers (DP-1, PB-11, BR-9 …)
   are cited where they bear on this work.
 - **Scripts:** `scripts/` holds three measurement scripts that run today on the software path and take
-  `--encoder hw-hevc-lossless` on a Jetson. See section 6.
+  `--encoder hw-hevc-lossless` on a Jetson. See section 6. The harnesses behind RESULTS.md are there too:
+  `recorder_variants_bench.py`, `thread_cpu.py`, `webrtc_lab.py`, `webrtc_viewer.py`.
 
 ### Decisions the owner has already made
 

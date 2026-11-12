@@ -158,7 +158,11 @@ def main():
         tiled[mode] = [bayer_tile.tile_cfa(f, w, h, mode, "rggb") for f in frames]
         tile_ms[mode] = (time.process_time() - t0) * 1000 / n
         print(f"  bayer_tile={mode:10s}       : {tile_ms[mode]:6.2f} ms CPU/frame")
-    chroma = Gst.Memory.new_wrapped(Gst.MemoryFlags.READONLY, bytes([128]) * (2 * w * h), 2 * w * h, 0, None, None)
+    # The bytes object must outlive the memory: Gst.Memory.new_wrapped does not copy it. Passing a temporary
+    # here left the chroma block dangling, and on the Orin variant B then read garbage (NvMap write errors,
+    # 123.7% of raw, bit-exact 0/120) -- a fault of this script, not of the layout. Held, it is 48/48.
+    chroma_bytes = bytes([128]) * (2 * w * h)
+    chroma = Gst.Memory.new_wrapped(Gst.MemoryFlags.READONLY, chroma_bytes, 2 * w * h, 0, None, None)
 
     def nv24(f):
         b = Gst.Buffer.new_wrapped(f)
