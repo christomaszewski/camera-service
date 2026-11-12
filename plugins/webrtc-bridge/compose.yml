@@ -125,6 +125,15 @@ services:
       - CAM_WEBRTC_CONGESTION=${CAM_WEBRTC_CONGESTION:-}
       # The floor defaults to 500 kbit/s in run.sh (webrtcsink's own 1 kbit/s is where a lossy fade
       # leaves the stream for half a minute).
+      # Viewer sessions (plugins/webrtc-bridge/README.md "Viewer sessions"):
+      #   CAM_WEBRTC_STALE_S        end a session whose viewer has sent no RTCP / transport feedback for
+      #                             this many seconds (default 20; 0 = off). The 24.04-based image has
+      #                             ICE consent freshness off, so without this a viewer that vanishes
+      #                             keeps its session and encoder until the signalling TCP times out
+      #                             (measured: 15 min 40 s).
+      #   CAM_WEBRTC_MAX_SESSIONS   at most this many sessions; a newcomer ends the oldest (default off)
+      - CAM_WEBRTC_STALE_S=${CAM_WEBRTC_STALE_S:-}
+      - CAM_WEBRTC_MAX_SESSIONS=${CAM_WEBRTC_MAX_SESSIONS:-}
       # Loss tolerance: nominal keyframe interval in seconds, converted to frames from negotiated
       # fps (default 2.0; 0 leaves the sink/encoder default). x264 retains webrtcsink's effective
       # ultrafast preset; choose a slower preset only when CPU headroom permits.

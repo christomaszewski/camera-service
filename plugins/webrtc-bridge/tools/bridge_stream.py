@@ -36,6 +36,8 @@ from format_adapt import adapt_for_input, debayer_enabled
 from scale_plan import fit_within, parse_max_size, scale_caps
 from header_transport import (HeaderError, PtsTracker, TS_SOURCE_SHORT,
                               caps_for_frame, parse_header)
+from session_reaper import (SessionReaper, flatten_stats, parse_max_sessions, parse_stale_s,
+                            receiver_key)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bridge_stream")
@@ -329,6 +331,12 @@ class Bridge:
         self._status_zero = 0           # consecutive heartbeats with zero frames received
         self._consumers = 0             # webrtcsink consumers currently connected
         self._warn_last = {}            # bus-warning throttle: message -> monotonic s
+        # Viewer sessions (see session_reaper): the sink, and the policy that ends sessions whose
+        # viewer vanished or that exceed the cap. _SESSION_TICK_S paces the look at the sink.
+        self._sink = None
+        self._reaper = SessionReaper(parse_stale_s(_env("CAM_WEBRTC_STALE_S")),
+                                     parse_max_sessions(_env("CAM_WEBRTC_MAX_SESSIONS")))
+        self._looked_frames = 0         # _rx_frames at the previous look at the sessions
 
     def build(self):
         Gst.init(None)
@@ -399,6 +407,8 @@ class Bridge:
                          self._max_size[0], self._max_size[1], spec)
         # webrtcsink meta.name == producer_id, so discovery + signalling line up (one server, many producers).
         sink = self.pipeline.get_by_name("cam_webrtcsink")
+        self._sink = sink
+        self._setup_sessions()
         if sink is not None:
             try:
                 pid = producer_id()
@@ -630,6 +640,60 @@ class Bridge:
     def _on_consumer_removed(self, _sink, peer_id, _webrtcbin):
         self._consumers = max(0, self._consumers - 1)
         log.info("webrtc consumer left: %s (%d total)", peer_id, self._consumers)
+
+    # ---- viewer sessions: the reaper -------------------------------------------------------------
+    _SESSION_TICK_S = 2
+
+    def _setup_sessions(self):
+        """Look at the sink's sessions every _SESSION_TICK_S and end the ones the reaper names."""
+        if self._reaper.enabled:
+            log.info("session reaper: %s%s", "ends a session after %gs without receiver feedback" %
+                     self._reaper.stale_s if self._reaper.stale_s > 0 else "liveness check off",
+                     "; at most %d session(s)" % self._reaper.max_sessions if self._reaper.max_sessions else "")
+        if self._sink is not None and self._reaper.enabled:
+            GLib.timeout_add_seconds(self._SESSION_TICK_S, self._session_tick)
+
+    def _session_tick(self):
+        if self._stopping:
+            return False
+        try:
+            self._look_at_sessions()
+        except Exception as e:                        # noqa: BLE001 -- never take down the video path
+            now = time.monotonic()
+            if now - self._warn_last.get("session-tick", 0.0) >= 60.0:
+                self._warn_last["session-tick"] = now
+                log.warning("session check failed (%s); viewers are unaffected", e)
+        return True
+
+    def _look_at_sessions(self):
+        now = time.monotonic()
+        ids = list(self._sink.emit("get-sessions") or [])
+        self._consumers = len(ids)                    # the truth the consumer signals drift from
+        keys = {}
+        if ids:
+            stats = self._sink.get_property("stats")
+            for sid in ids:
+                one = stats.get_value(sid) if stats is not None and stats.has_field(sid) else None
+                keys[sid] = receiver_key(flatten_stats(one)) if one is not None else None
+        # Receiver silence only counts while frames are going out: with the camera stalled (a reconnect,
+        # a paused replay) a live viewer has nothing to acknowledge, and is not to be ended for it.
+        sending, self._looked_frames = self._rx_frames != self._looked_frames, self._rx_frames
+        for sid, why in self._reaper.observe(now, keys, sending=sending):
+            self._end_session(sid, why)
+
+    def _end_session(self, sid, why):
+        """Both signals, in this order. `end-session` (an action) has the signaller tell the server,
+        which tells the viewer; on its own it leaves the session in the sink. `session-ended` is what
+        the signaller emits when the far side ends a session, and the sink's handler for it is what
+        removes the session and releases its encoder (measured: emitting only the first leaves
+        get-sessions unchanged)."""
+        log.warning("ending viewer session %s: %s", sid, why)
+        signaller = self._sink.get_property("signaller")
+        for sig in ("end-session", "session-ended"):
+            try:
+                signaller.emit(sig, sid)
+            except Exception as e:                    # noqa: BLE001
+                log.warning("could not emit %s for %s: %s", sig, sid, e)
 
     @property
     def had_error(self):

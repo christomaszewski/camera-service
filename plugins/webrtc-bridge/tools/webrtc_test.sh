@@ -7,6 +7,7 @@
 #   3. shm-raw (legacy) + mono  (env geometry; also the two H.264 profile/level scenarios and
 #                                the CAM_WEBRTC_MAX_SIZE encode-side downscale)
 #   4. JP7 unixfd       + color (Bayer -> bayer2rgb; + the downscale behind the runtime seam)
+#   5. viewer sessions: the reaper ending a viewer that went silent
 #
 # Each scenario:  core (fake cam) -> webrtc-bridge (webrtcsink + signalling) -> webrtcsrc consumer
 # (decode + count). shm is shared cross-container via a named volume (not a host bind mount --
@@ -115,6 +116,71 @@ bridge_log_has() {
   return 1
 }
 
+# in_bridge_signal <SIGNAL> <cmdline substring>: signal the matching processes inside the bridge
+# container (the image has no procps).
+in_bridge_signal() {
+  docker exec "$BRIDGE" python3 -c "
+import os, signal, sys
+for pid in filter(str.isdigit, os.listdir('/proc')):
+    try:
+        cmd = open('/proc/%s/cmdline' % pid, 'rb').read().replace(b'\\0', b' ').decode()
+    except OSError:
+        continue
+    if sys.argv[2] in cmd and int(pid) != os.getpid():
+        os.kill(int(pid), getattr(signal, sys.argv[1]))
+" "$1" "$2"
+}
+
+# run_reaper_scenario: a viewer that goes SILENT without closing anything -- what a radio dropout or a
+# closed laptop lid looks like from here. Its process is frozen (SIGSTOP): the sockets stay open and the
+# kernel keeps acknowledging, but no RTCP and no transport feedback come back. webrtcsink alone keeps
+# such a session (and its encoder) until the signalling TCP times out, a quarter of an hour later; the
+# reaper must end it CAM_WEBRTC_STALE_S after the feedback stopped. Before that, the two things that
+# must NOT end a session: a live viewer, and a live viewer whose camera stalls.
+run_reaper_scenario() {
+  echo
+  echo "########## SCENARIO: a viewer that goes silent is ended (CAM_WEBRTC_STALE_S=5) ##########"
+  docker rm -f "$CORE" "$BRIDGE" >/dev/null 2>&1 || true
+  docker volume rm "$VOL" >/dev/null 2>&1 || true
+  docker volume create "$VOL" >/dev/null
+  docker run -d --rm --name "$CORE" --ipc=host --entrypoint bash \
+    -v "$VOL:/tmp/cam" -v "$REPO/core-driver:/app" "$CORE_IMG" \
+    -c "cd /app && mkdir -p /data/recordings /tmp/cam && exec python3 main.py -c config/webrtc-fake.yaml" >/dev/null
+  docker run -d --rm --name "$BRIDGE" --ipc=host -v "$VOL:/tmp/cam" \
+    -v "$REPO/plugins/webrtc-bridge:/app" -e CAM_PLATFORM=jp6 -e CAM_TRANSPORT=shm-raw \
+    -e CAM_SHM_SOCKET=/tmp/cam/raw -e CAM_WIDTH=512 -e CAM_HEIGHT=512 -e CAM_FORMAT=GRAY8 -e CAM_FPS=25 \
+    -e CAM_WEBRTC_STALE_S=5 -e CAM_WEBRTC_STATUS=2 "$WEBRTC_IMG" bash run.sh >/dev/null
+  wait_for_producer || { echo "-- scenario FAIL: the bridge never registered as a producer --"; return 1; }
+  # a viewer that would watch for a long time (a frame target it never reaches, a 120 s timeout)
+  docker exec -d "$BRIDGE" python3 /app/tools/webrtc_consumer.py ws://127.0.0.1:8443 1000000 120
+  if ! bridge_log_has "webrtc consumer connected"; then
+    echo "-- scenario FAIL: the viewer never connected --"; return 1
+  fi
+  sleep 8        # well past the 5 s: a LIVE viewer must not be ended
+  if [[ "$(docker logs "$BRIDGE" 2>&1)" == *"ending viewer session"* ]]; then
+    echo "-- scenario FAIL: a live viewer was ended --"; return 1
+  fi
+  echo "-- the live viewer was left alone for 8 s; stalling the camera for 20 s --"
+  # A stalled camera (a reconnect, a paused replay) silences a LIVE receiver too: with nothing sent it
+  # has nothing to acknowledge, and its feedback stops a few seconds after the last frame. The viewer
+  # must keep its session through that -- silence only counts while frames are going out.
+  docker pause "$CORE" >/dev/null; sleep 20; docker unpause "$CORE" >/dev/null
+  if [[ "$(docker logs "$BRIDGE" 2>&1)" == *"ending viewer session"* ]]; then
+    echo "-- scenario FAIL: a live viewer was ended because the camera stalled --"; return 1
+  fi
+  sleep 3
+  echo "-- the viewer kept its session through the stall; freezing the viewer --"
+  in_bridge_signal SIGSTOP webrtc_consumer.py
+  if bridge_log_has "no receiver feedback" && bridge_log_has "webrtc consumer left"; then
+    docker logs "$BRIDGE" 2>&1 | grep -E "ending viewer session|consumer left" | tail -2
+    echo "-- scenario PASS --"
+  else
+    docker logs "$BRIDGE" 2>&1 | grep -ivE "set_mempolicy" | tail -8
+    echo "-- scenario FAIL: the silent viewer's session was not ended --"; return 1
+  fi
+  in_bridge_signal SIGKILL webrtc_consumer.py || true
+}
+
 FAILED=0
 # One probe, two gates: unixfd needs a gst >= 1.24 core; the headered-shm endpoint only EXISTS on a
 # core without unixfdsink (unixfd replaces it at the same plugin endpoint when available).
@@ -211,6 +277,8 @@ if run_scenario "shm-raw + CAM_WEBRTC_MAX_SIZE=256 (encode-side downscale)" \
 else
   FAILED=1
 fi
+
+run_reaper_scenario || FAILED=1
 
 if [ "$CORE_HAS_UNIXFD" = 1 ]; then
   # + the encode-side downscale BEHIND the runtime format seam (tap -> bayer2rgb -> fmt_scale):

@@ -194,6 +194,8 @@ plugins:
       #                                          ("auto" = 1–99% EMA window, or pin "lo:hi" e.g. "5:99.5")
       # CAM_WEBRTC_MIN_BITRATE: 500000         # floor under gcc's per-viewer target (the default; lower it
       #                                          for a radio that really carries less)
+      # CAM_WEBRTC_STALE_S: 20                 # end a session whose viewer sent no feedback this long (0 = off)
+      # CAM_WEBRTC_MAX_SESSIONS: 3             # cap on viewer sessions; a newcomer ends the oldest (default off)
 
   # - name: ros1-bridge    # legacy ROS 1 (Noetic) publisher — JP6-class hosts; needs the shared
   #   enabled: true        #   roscore (cam-up --roscore / tools/roscore.sh)

@@ -119,6 +119,8 @@ Or via the per-sensor stack: `cam-up <sensor>.yaml up -d webrtc-bridge` (cam-up 
 | `CAM_WEBRTC_MIN_BITRATE` | `500000` | floor (bit/s) under the congestion controller's per-viewer encoder target. The element's own default is 1 kbit/s, which a lossy fade reaches within seconds and takes half a minute to climb back from (see [Viewer sessions](#viewer-sessions)). Lowered automatically to `CAM_WEBRTC_START_BITRATE` / `CAM_WEBRTC_MAX_BITRATE` when either is set below it; `1000` restores the element's behaviour |
 | `CAM_WEBRTC_MAX_BITRATE` / `CAM_WEBRTC_START_BITRATE` | _(element: 8 Mbit/s / 2 Mbit/s)_ | the other two bounds of the per-viewer bitrate adaptation (bit/s) |
 | `CAM_WEBRTC_CONGESTION` | `gcc` | `gcc` \| `homegrown` \| `disabled` (a fixed `start-bitrate`) |
+| `CAM_WEBRTC_STALE_S` | `20` | end a viewer session whose **receiver has sent no feedback** for this many seconds (`0` / `off` = never). Needs the python launcher |
+| `CAM_WEBRTC_MAX_SESSIONS` | _(off)_ | at most this many viewer sessions: a newcomer beyond it **ends the oldest**. Set it to the number of operators who watch one camera |
 | `SIGNALLING_PORT` | `8443` | signalling server port |
 | `RUN_SIGNALLING` | `1` | run the bundled signalling server in-container |
 | `CAM_WEBRTC_STATUS` | `10` | seconds between status heartbeat lines — pipeline state, frames received from the core, negotiated caps, connected viewers, and per-interval **latency percentiles** (see Latency below) (`0` = off). Startup also logs an encoder **element inventory** and warns when `GST_PLUGIN_FEATURE_RANK` names an element the registry doesn't have |
@@ -177,6 +179,17 @@ link. What the bridge adds around that (measured on an R39 AGX Orin —
   1 Mbit/s again — 30 frames a second of unrecognisable picture in between. With the floor at
   500 kbit/s the same fade recovers in 5 s. The floor is a rate the link is assumed to carry: on a
   radio that genuinely drops below it, set it lower.
+- **Stale sessions (`CAM_WEBRTC_STALE_S`, default 20).** A viewer that vanishes without saying
+  goodbye — a radio dropout, a closed laptop lid — is only noticed by ICE consent freshness, and the
+  24.04-based images (libnice 0.1.21) do not run it: the session, its encoder and its outgoing stream
+  lived **15 min 40 s** after the viewer was gone, and every reconnect added another. The bridge now
+  watches each session's receiver feedback in `webrtcsink`'s statistics (transport-wide congestion
+  feedback and RTCP receiver reports — the counters that froze when a viewer's link was cut) and ends
+  a session that has been silent for `CAM_WEBRTC_STALE_S`: 22 s after a black-holed viewer in the
+  deployed stack. The log says `ending viewer session <id>: no receiver feedback for 20 s`.
+  Silence only counts while frames are going out: when the camera itself stalls (a reconnect, a
+  paused replay) a live viewer has nothing to acknowledge, and keeps its session.
+  `CAM_WEBRTC_MAX_SESSIONS` is the blunt companion: a hard cap, the oldest session giving way.
 
 ## Latency (measure + display)
 
@@ -215,6 +228,8 @@ shm (self-describing, no geometry env; asserts the latency heartbeat + exercises
 overlay), headered shm + Bayer relabel, legacy shm-raw (+ the two H.264 profile/level scenarios and
 the `CAM_WEBRTC_MAX_SIZE` downscale, asserted off the auto-level line — the encoder must negotiate the
 scaled geometry), and unixfd on a gst ≥ 1.24 core (+ the downscale planned behind the runtime seam).
+A **stale-session** scenario freezes a consumer with `SIGSTOP`: the bridge must leave the live viewer
+alone, also while the camera stalls for 20 s, and end the silent one.
 Proves the whole egress path without a browser. PASS = each scenario decoded ≥30 frames. Each
 scenario waits for the bridge to register with the signalling server before it connects — codec
 discovery takes one second or ten depending on what the image carries.

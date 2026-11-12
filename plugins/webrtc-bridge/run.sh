@@ -40,6 +40,9 @@
 # bundled signalling server, default 1), CAM_WEBRTC_{MIN,MAX,START}_BITRATE (bit/sec; bound
 # webrtcsink's adaptive-bitrate range -- the element default max is 8 Mbps, raise it for 4K; the floor
 # defaults to 500 kbit/s here, see below), CAM_WEBRTC_CONGESTION ({gcc|homegrown|disabled}, default gcc).
+# Viewer sessions (python launcher): CAM_WEBRTC_STALE_S (end a session whose viewer has sent no feedback
+# for this long; default 20, 0 = off), CAM_WEBRTC_MAX_SESSIONS (cap; a newcomer ends the oldest; default
+# off).
 # CAM_WEBRTC_KEYFRAME_S (IDR every N s on every encoder, default 2.0; 0 = encoder default) and
 # CAM_WEBRTC_X264_PRESET (x264enc speed-preset nick for the software fallback, default ultrafast).
 # H.264: CAM_WEBRTC_PROFILE (effectively FIXED at constrained-baseline -- webrtcsink forces it for raw
