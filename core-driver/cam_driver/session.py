@@ -58,10 +58,15 @@ class PushResult(Enum):
     SKIPPED = "skipped"    # not a loss: the session is closing, or waiting for a sync point
 
 
-def _wrap_buffer(payload: FramePayload, pts: int, frame_id: int):
+def _wrap_buffer(payload: FramePayload, pts: int, frame_id: int, tail=None):
+    """One recorder buffer. `tail` (recorder.ChromaBlock) turns a luma plane into a whole NV12 frame by
+    appending the shared chroma block as a second memory -- no copy of either here."""
     if isinstance(payload, GstFrame):
-        return payload.to_buffer(pts, frame_id)
+        buf = payload.to_buffer(pts, frame_id)
+        return tail.tail(buf) if tail is not None else buf
     buf = Gst.Buffer.new_wrapped(payload)
+    if tail is not None:
+        buf = tail.tail(buf)
     buf.pts = pts
     buf.dts = Gst.CLOCK_TIME_NONE
     buf.offset = frame_id
@@ -83,6 +88,11 @@ def _blocking(appsrc) -> bool:
 
 
 class RecordingSession:
+    # NV12 feed (pipeline sets both before the first push): the chroma block appended to every frame,
+    # and the exact size the frame in front of it must have. None = frames are pushed as they are.
+    feed_tail = None
+    feed_luma_bytes = 0
+
     def __init__(self, index: int, prefix: str, output_dir: str, description: str, *,
                  header_factory: Callable, encoded: bool = False,
                  on_error: Optional[Callable] = None, on_fragment: Optional[Callable] = None,
@@ -157,6 +167,13 @@ class RecordingSession:
                     self.skipped_awaiting_keyframe += 1
                     return PushResult.SKIPPED
                 self._await_key = False
+            tail = self.feed_tail
+            if tail is not None and len(payload) != self.feed_luma_bytes:
+                # The chroma block sits where the plane ends. A frame of any other size would put it
+                # somewhere else and record a shifted picture as "lossless": end the session instead.
+                self._record_error(f"frame of {len(payload)} bytes on a recorder feed built for "
+                                   f"{self.feed_luma_bytes}; refusing to record a misplaced plane")
+                return PushResult.DROPPED
             if caps_str and not self._caps_applied:
                 # The NEGOTIATED encoded caps (stream-format + codec_data: the H.264/H.265 parameter
                 # sets that hvc1/avc keep in caps, not in the bytes) so appsrc -> parser -> muxer
@@ -169,7 +186,8 @@ class RecordingSession:
             # hand, because appsrc itself never does.
             if not _blocking(self._appsrc):
                 max_bytes = self._appsrc.get_property("max-bytes")
-                if max_bytes and self._appsrc.get_property("current-level-bytes") + len(payload) > max_bytes:
+                size = len(payload) + (tail.size if tail is not None else 0)
+                if max_bytes and self._appsrc.get_property("current-level-bytes") + size > max_bytes:
                     return PushResult.DROPPED   # appsrc block=false never enforces its own bound
             if self.first_pts is None:
                 self.first_pts = int(pts)
@@ -181,7 +199,7 @@ class RecordingSession:
                     # failure must not escape and kill acquisition/preview/transport.
                     self._record_error(f"sidecar header write failed: {exc}")
                     return PushResult.DROPPED
-            flow = self._appsrc.emit("push-buffer", _wrap_buffer(payload, pts, stamp.frame_id))
+            flow = self._appsrc.emit("push-buffer", _wrap_buffer(payload, pts, stamp.frame_id, tail))
             if flow != Gst.FlowReturn.OK:
                 if self._closing and flow == Gst.FlowReturn.EOS:
                     return PushResult.SKIPPED   # close cancelled a blocked replay push, no row

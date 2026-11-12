@@ -32,7 +32,7 @@ _real_helpers = (session_mod._wrap_buffer, session_mod._caps_from_string, sessio
 
 
 def setup_function():
-    session_mod._wrap_buffer = lambda payload, pts, fid: ("buf", payload, pts, fid)
+    session_mod._wrap_buffer = lambda payload, pts, fid, tail=None: ("buf", payload, pts, fid)
     session_mod._caps_from_string = lambda s: ("caps", s)
     session_mod.GLib = SimpleNamespace(idle_add=lambda fn, *a: fn(*a))
 

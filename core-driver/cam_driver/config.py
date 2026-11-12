@@ -246,9 +246,17 @@ class RecordingConfig:
     # FASTEST + LARGEST). Accepts ultrafast(1)|fast(2)|medium(3)|slow(4) or the number.
     nvenc_preset: str = ""
     nvenc_maxperf: bool = True   # maxperf-enable (deprecated; high GPU clocks for throughput)
-    # The GRAY8->NV24 (or ->I420) CPU `videoconvert` is the recorder's real per-frame bottleneck at high
-    # res (single-threaded ~21fps for 5MP in a 30W power mode -- right at the 24fps line). Parallelize it
-    # across cores so the recorder keeps real-time with margin (5MP: n-threads=6 -> ~69fps). 0 = all cores.
+    # How an 8-bit mono/Bayer frame reaches the hardware lossless encoder (recorder.LUMA_FEEDS):
+    #   auto         NV12 built by the feeder (the frame + shared constant chroma; the VIC makes the NV24
+    #                the encoder needs) once a start-up probe has proven it bit-exact on this host at this
+    #                geometry -- about half the recorder's CPU. Otherwise the videoconvert feed.
+    #   nv12         the same without the probe
+    #   videoconvert GRAY8 -> videoconvert -> NV24, the feed of every earlier release
+    nvenc_feed: str = "auto"
+    # Threads for a REAL colour conversion in front of the encoder (x264 from a mono or colour source,
+    # colour into x265): spreads it over cores so the recorder keeps real time. 0 = all cores. The copy
+    # of a mono/Bayer plane into its full-range container (hw-hevc / x265 lossless) always uses one:
+    # more threads only cost CPU there.
     videoconvert_threads: int = 4
 
 

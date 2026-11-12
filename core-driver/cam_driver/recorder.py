@@ -28,6 +28,16 @@ never reached that default. With the pin, an R39 Orin passes 24/24 noise frames 
 raw) where the unpinned path passes 0/24; JP6 is not yet validated. Validate at the sensor geometry:
 `tools/nvenc_lossless_test.sh` (or .py) with the NVENC CDI device, which defaults to 2448x2048.
 Re-verify after a JetPack bump (NVMM caps negotiation and the lossless enum are L4T-version-dependent).
+
+The hardware path's CPU cost is not the codec but getting the frame to it: `nvvidconv` copies the
+whole frame into encoder memory at about 1.6 ms per MB, and NV24 is three bytes per pixel. Measured
+on an R39 AGX Orin at 2448x2048 (docs/encoding-optimization/RESULTS.md): 24 ms of a 52 ms frame in
+that copy, 12 ms in `videoconvert` building the NV24 frame. So the recorder can be FED NV12 instead
+(`recording.nvenc_feed`): the frame itself plus one shared block of constant half-resolution chroma,
+which the VIC upsamples to NV24 in hardware with the luma plane untouched -- 25 ms a frame, the same
+bitstream. Which input formats the VIC passes through verbatim is its own business (NV12 does on
+R39; I420 and GRAY8 do not), so the feed is PROVEN before it is used: `probe_nv12_feed` pushes
+frames holding every 8-bit code through the real fragment at the real geometry and compares.
 """
 from __future__ import annotations
 
@@ -37,9 +47,60 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
+import os
+from typing import Optional
+
 from .formats import LUMA_COLORIMETRY, select_encoder
 
 log = logging.getLogger(__name__)
+
+# recording.nvenc_feed: how an 8-bit mono/Bayer frame reaches the hardware lossless encoder.
+#   auto         NV12 from the feeder when probe_nv12_feed proves it bit-exact on this host at this
+#                geometry; otherwise the videoconvert feed
+#   nv12         NV12 without the proof (a host where it is already qualified and the ~1 s is unwanted)
+#   videoconvert the feed every release before this one used: GRAY8 -> videoconvert -> NV24
+LUMA_FEEDS = ("auto", "nv12", "videoconvert")
+
+
+def normalize_feed(value) -> str:
+    v = str(value if value is not None else "auto").strip().lower()
+    if v in LUMA_FEEDS:
+        return v
+    log.warning("recording.nvenc_feed %r is not one of %s; using auto", value, "/".join(LUMA_FEEDS))
+    return "auto"
+
+
+def nv12_geometry_ok(width: int, height: int) -> bool:
+    """The feeder builds NV12 as two tight blocks (rows of `width`, then width x height/2 of chroma).
+    That is GStreamer's own layout only when rows need no padding and the height is even."""
+    return width > 0 and height > 0 and width % 4 == 0 and height % 2 == 0
+
+
+def nv12_feed_caps(width: int, height: int, framerate: str) -> str:
+    # Full range, like the NV24 the videoconvert feed builds: the plane is data, not a picture.
+    return (f"video/x-raw,format=NV12,width={int(width)},height={int(height)},"
+            f"framerate={framerate},colorimetry={LUMA_COLORIMETRY}")
+
+
+class ChromaBlock:
+    """The constant chroma half of an NV12 frame, shared by every buffer of a recording.
+
+    Held as a GstBuffer and handed out as regions of it: copy_region(MEMORY) refs the memory instead of
+    copying it, so each recorded frame gets the same 128s for the price of a small buffer struct. Two
+    routes that look shorter are traps. Gst.Memory.new_wrapped does not copy the Python bytes it is
+    given (a temporary dangles: the encoder then reads freed memory), and on the PyGObject of the 26.04
+    images the call aborts the process outright. Gst.Buffer.new_wrapped copies into memory GLib owns,
+    on every runtime the service has."""
+
+    def __init__(self, width: int, height: int):
+        self.size = int(width) * int(height) // 2
+        self._buffer = Gst.Buffer.new_wrapped(bytes([128]) * self.size)
+
+    def tail(self, buf):
+        """Append the block to a buffer holding one luma plane: the result is a whole NV12 frame in two
+        memories. Returns the buffer to use from here on (timestamps and metas of `buf` are kept)."""
+        return buf.append(self._buffer.copy_region(Gst.BufferCopyFlags.MEMORY, 0, self.size))
+
 
 # Encoders that carry a mono/Bayer plane in the Y plane of a YUV container.
 _LUMA_IN_YUV = ("hw-hevc-lossless", "x265-lossless")
@@ -50,6 +111,7 @@ def luma_colorimetry(enc, is_color):
     None when the plane never crosses a YUV conversion (ffv1, stream-copy, x264) or the source is
     colour (its own colorimetry carries through)."""
     return LUMA_COLORIMETRY if enc in _LUMA_IN_YUV and not is_color else None
+
 
 # nvv4l2h265enc preset-level enum (HW search depth: bigger = smaller lossless file, slower encode).
 _PRESET_LEVEL = {"disable": 0, "ultrafast": 1, "fast": 2, "medium": 3, "slow": 4}
@@ -127,11 +189,33 @@ def _gop_frames(cfg, fps: float) -> int:
     return 0
 
 
+def _hw_hevc_lossless(cfg, gop: int, bframes: int) -> str:
+    """NV24 or NV12 in system memory -> NVMM NV24 -> NVENC lossless -> parsed HEVC. One definition, so
+    the recorder and the proof of its feed (probe_nv12_feed) cannot drift apart. iframeinterval = the
+    GOP/keyframe window; preset-level = HW search depth; num-B-Frames only when asked (Xavier-only on
+    Tegra). Property names and the lossless interplay are L4T-version-dependent."""
+    opts = f" maxperf-enable={1 if getattr(cfg, 'nvenc_maxperf', True) else 0}"
+    level = _preset_level(getattr(cfg, "nvenc_preset", ""))
+    if level is not None:
+        opts += f" preset-level={level}"
+    if gop:
+        opts += f" iframeinterval={gop}"
+    if bframes:
+        opts += f" num-B-Frames={bframes}"
+    return ("nvvidconv ! video/x-raw(memory:NVMM),format=NV24 ! "
+            f"nvv4l2h265enc enable-lossless=1{opts} ! h265parse")
+
+
 def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps: float = 0.0,
-                               is_color: bool = False, encoded_parser: str = None):
+                               is_color: bool = False, encoded_parser: str = None,
+                               luma_feed: str = "videoconvert"):
     """Return `(gst-launch fragment, resolved encoder)`. The fragment begins with a sink pad
     (linkable from `tee.` or an appsrc); encoded_parser set => the source is already-encoded:
     STREAM-COPY through that parser (no decode/re-encode) -- the faithful path for MJPEG/H.264/H.265.
+
+    luma_feed="nv12": the caller feeds a mono/Bayer hw-hevc-lossless recording NV12 (nv12_feed_caps,
+    ChromaBlock) instead of the raw plane, so that fragment starts at `nvvidconv`. It has no effect on
+    any other encoder or on colour: check the returned encoder before feeding NV12.
 
     The encoder is returned because the CALLER has to wire the recorder differently for stream-copy
     (its own encoded appsrc) than for a re-encode (a tee branch), and re-deriving that from
@@ -168,13 +252,19 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
     gop = _gop_frames(cfg, fps)
     bframes = max(0, int(getattr(cfg, "bframes", 0)))
     preset = _preset_level(getattr(cfg, "nvenc_preset", "")) if enc == "hw-hevc-lossless" else None
-    # Parallelize the CPU GRAY8->NV24/I420 conversion (the recorder's real per-frame bottleneck at high
-    # res) so it keeps real-time with margin. n-threads=0 means all cores.
+    # videoconvert_threads spreads a REAL colour conversion over cores (n-threads=0 = all of them).
+    # A mono/Bayer plane into its full-range YUV container is no longer one: with the pin it is a
+    # copy, and on an Orin four threads then cost 10 ms more CPU per 5 MP frame than one, at the same
+    # throughput (the encoder limits it). That copy runs on one thread whatever the knob says.
     nt = max(0, int(getattr(cfg, "videoconvert_threads", 4)))
+    luma = luma_colorimetry(enc, is_color)
+    nv12 = luma_feed == "nv12" and enc == "hw-hevc-lossless" and luma is not None
+    if luma is not None:
+        nt = 1
     vconv = f"videoconvert n-threads={nt}"
-    log.info("recorder: encoder=%s (bits=%d) gop=%s bframes=%d preset=%s vconv-threads=%d -> %s-*.mkv",
-             enc, bits_per_pixel, gop or "default", bframes,
-             "default" if preset is None else preset, nt, location_base)
+    log.info("recorder: encoder=%s (bits=%d) gop=%s bframes=%d preset=%s %s -> %s-*.mkv",
+             enc, bits_per_pixel, gop or "default", bframes, "default" if preset is None else preset,
+             "feed=nv12" if nv12 else f"vconv-threads={nt}", location_base)
 
     if enc == "x264":
         settings = x264_settings(cfg)
@@ -193,28 +283,15 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
         ), enc
 
     if enc == "hw-hevc-lossless":
-        # GRAY8 / Bayer8 mosaic -> Y plane of NV24 -> NVMM -> NVENC lossless. iframeinterval = the
-        # GOP/keyframe window; preset-level = HW search depth (bigger = smaller file, slower -- the lever
-        # for archival size, but must sustain the frame rate); num-B-Frames only when asked (Xavier-only
-        # on Tegra). Property names/lossless interplay are L4T-version-dependent.
+        # GRAY8 / Bayer8 mosaic -> Y plane of NV24 -> NVMM -> NVENC lossless (_hw_hevc_lossless).
         # A mono/Bayer plane pins full range (formats.LUMA_COLORIMETRY) so videoconvert copies it into
-        # Y verbatim; colour keeps its own colorimetry.
-        luma = luma_colorimetry(enc, is_color)
-        nv24 = "video/x-raw,format=NV24" + (f",colorimetry={luma}" if luma else "")
-        opts = f" maxperf-enable={1 if getattr(cfg, 'nvenc_maxperf', True) else 0}"
-        level = _preset_level(getattr(cfg, "nvenc_preset", ""))
-        if level is not None:
-            opts += f" preset-level={level}"
-        if gop:
-            opts += f" iframeinterval={gop}"
-        if bframes:
-            opts += f" num-B-Frames={bframes}"
-        return (
-            "queue max-size-buffers=12 name=rec_q ! "
-            f"{vconv} ! {nv24} ! "
-            "nvvidconv ! video/x-raw(memory:NVMM),format=NV24 ! "
-            f"nvv4l2h265enc enable-lossless=1{opts} ! h265parse ! " + sink
-        ), enc
+        # Y verbatim; colour keeps its own colorimetry. Fed NV12, the frame arrives ready for
+        # nvvidconv and there is nothing to convert on the CPU.
+        head = "queue max-size-buffers=12 name=rec_q ! "
+        if not nv12:
+            nv24 = "video/x-raw,format=NV24" + (f",colorimetry={luma}" if luma else "")
+            head += f"{vconv} ! {nv24} ! "
+        return head + _hw_hevc_lossless(cfg, gop, bframes) + " ! " + sink, enc
 
     if enc == "x265-lossless":
         # CPU lossless + temporal; 8-bit only (>8-bit fell back to ffv1 above). Throughput-limited
@@ -225,7 +302,6 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
         if gop:
             opts += f":keyint={gop}:min-keyint={gop}"
         opts += f":bframes={bframes}"
-        luma = luma_colorimetry(enc, is_color)
         pin = f"video/x-raw,format=I420,colorimetry={luma} ! " if luma else ""
         return (
             f"queue max-size-buffers=12 name=rec_q ! {vconv} ! {pin}"
@@ -245,3 +321,87 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
         f"queue max-size-buffers=12 name=rec_q ! {vconv} ! "
         "avenc_ffv1 coder=1 context=1 threads=0 slices=4 slicecrc=1 ! " + sink
     ), enc
+
+
+# ---- proving the NV12 feed ---------------------------------------------------------------------
+_PROBE_ELEMENTS = ("nvvidconv", "nvv4l2h265enc", "h265parse", "avdec_h265", "capssetter", "videoconvert")
+_probe_verdicts: dict = {}       # (width, height) -> True / False; an inconclusive run is not kept
+
+
+def _probe_frames(width: int, height: int) -> list:
+    """Three frames that between them put every 8-bit code at many positions: a ramp, noise (the worst
+    case for the codec, and the second frame is predicted from the first), and the ramp reversed."""
+    row = (bytes(range(256)) * (width // 256 + 1))[:width]
+    half = height // 2
+    ramp = row * half + (row[97:] + row[:97]) * (height - half)
+    return [ramp, os.urandom(width * height), ramp[::-1]]
+
+
+def probe_nv12_feed(width: int, height: int, cfg=None, timeout_s: float = 10.0) -> Optional[bool]:
+    """Is the NV12 feed bit-exact on THIS host at THIS geometry? True, False, or None when the
+    question could not be put (an element missing, the encoder would not start, a timeout).
+
+    Frames go through the recorder's own hardware fragment and come back through the service's own
+    read path (sources.replay.raw_decode_chain); every byte of the plane must match. It has to run on
+    the host and at the geometry in use, because what it guards against has depended on both before:
+    the VIC decides by input format whether to treat a plane as full or limited range (NV12 passes
+    verbatim on R39, I420 and GRAY8 do not), and the height-dependent default of the software
+    conversion went unnoticed for months behind a 512-row test. A verdict is remembered for the life
+    of the process; a JetPack change is a new process."""
+    key = (int(width), int(height))
+    if key in _probe_verdicts:
+        return _probe_verdicts[key]
+    missing = [e for e in _PROBE_ELEMENTS if Gst.ElementFactory.find(e) is None]
+    if missing or not nv12_geometry_ok(width, height):
+        log.info("recorder: NV12 feed not probed at %dx%d (%s)", width, height,
+                 "missing " + ", ".join(missing) if missing else "geometry needs width % 4 == 0 and an even height")
+        return None
+    from .sources.replay import raw_decode_chain      # the read path; imported late (it imports the sources)
+    frames = _probe_frames(width, height)
+    chroma = ChromaBlock(width, height)
+    decode = raw_decode_chain("video/x-h265", {"recording_colorimetry": LUMA_COLORIMETRY})
+    desc = (f'appsrc name=s format=time caps="{nv12_feed_caps(width, height, "30/1")}" ! queue ! '
+            f"{_hw_hevc_lossless(cfg, 0, 0)} ! {decode} ! videoconvert ! video/x-raw,format=GRAY8 ! "
+            "appsink name=o sync=false max-buffers=8")
+    pipeline, got, failure = None, [], None
+    try:
+        pipeline = Gst.parse_launch(desc)
+        src, sink = pipeline.get_by_name("s"), pipeline.get_by_name("o")
+        if pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
+            raise RuntimeError("the probe pipeline refused to start")
+        for i, frame in enumerate(frames):
+            buf = chroma.tail(Gst.Buffer.new_wrapped(frame))
+            buf.pts, buf.duration = i * Gst.SECOND // 30, Gst.SECOND // 30
+            if src.emit("push-buffer", buf) != Gst.FlowReturn.OK:
+                raise RuntimeError("the probe pipeline refused a frame")
+        src.emit("end-of-stream")
+        while len(got) < len(frames):
+            sample = sink.emit("try-pull-sample", int(timeout_s * Gst.SECOND))
+            if sample is None:
+                break
+            got.append(sample.get_buffer().extract_dup(0, width * height))
+        err = pipeline.get_bus().pop_filtered(Gst.MessageType.ERROR)
+        if err is not None:
+            failure = err.parse_error()[0].message
+    except Exception as e:   # noqa: BLE001 -- a probe that cannot run must leave the old path in place
+        failure = str(e)
+    finally:
+        if pipeline is not None:
+            pipeline.set_state(Gst.State.NULL)
+    bad = [i for i, (a, b) in enumerate(zip(got, frames)) if a != b]
+    if bad:
+        a, b = got[bad[0]], frames[bad[0]]
+        worst = max(abs(x - y) for x, y in zip(a[::61], b[::61]))
+        log.warning("recorder: the NV12 feed is NOT bit-exact on this host at %dx%d (frame %d of the probe "
+                    "differs, sampled error up to %d codes); keeping the videoconvert feed", width, height,
+                    bad[0], worst)
+        _probe_verdicts[key] = False
+        return False
+    if failure is not None or len(got) < len(frames):
+        log.warning("recorder: NV12 feed probe inconclusive at %dx%d (%s); keeping the videoconvert feed",
+                    width, height, failure or f"{len(got)} of {len(frames)} frames came back")
+        return None
+    log.info("recorder: NV12 feed verified bit-exact at %dx%d (%d frames, every 8-bit code)",
+             width, height, len(frames))
+    _probe_verdicts[key] = True
+    return True

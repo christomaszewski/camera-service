@@ -136,7 +136,10 @@ CSV mounts:
 docker run --rm --runtime nvidia --network host <cam-core image> tools/nvenc_lossless_test.py --geometry 2448x2048 --frames 60
 ```
 Use the sensor's real geometry: a run at 576 rows or fewer can't catch a range squeeze. Expect
-`NVENC LOSSLESS PASS`, `60/60 frames bit-exact`. Record: encoder, MB per minute, PASS.
+`NVENC LOSSLESS PASS`, `60/60 frames bit-exact` for each feed. Record: encoder, MB per minute, PASS, and
+the two `feed ...:` lines. `feed nv12: NOT bit-exact` beside a pass is not a failure — the core proves
+that feed itself at start-up and stays on `videoconvert` — but it is worth writing down: it costs the
+recorder twice the CPU on that host.
 (README "Post-processing" has the decode-and-compare recipe for a real frame.)
 
 ### B3. The bridges and the dashboard

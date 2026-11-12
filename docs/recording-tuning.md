@@ -127,20 +127,38 @@ full range), so the sidecar override is a safeguard rather than a necessity on R
 **JP6 is not validated yet.** r36 has a different NVENC and `nvvidconv`, so run the lossless proof
 in [the hardware test procedure](hardware-test-procedure.md) on a JP6 host at the sensor's geometry.
 
-**Where the rest of the CPU goes** (R39 Orin, MAXN, 2448×2048 at 24 fps, source paced at the camera rate,
-a mosaic that compresses to 52% of raw; [full results](encoding-optimization/RESULTS.md)):
+## How the frame reaches the hardware encoder — `recording.nvenc_feed`
 
-| Variant | CPU ms/frame | Size vs raw | Bit-exact | Notes |
+The encoder needs NV24 in its own memory, and getting the frame there is where the hardware path spends
+its CPU: `nvvidconv` copies the frame in at about 1.6 ms per MB. Measured on an R39 Orin, MAXN,
+2448×2048 at 24 fps, source paced at the camera rate, a mosaic that compresses to 52% of raw
+([full results](encoding-optimization/RESULTS.md)):
+
+| Feed | CPU ms/frame | Size vs raw | Bit-exact | Where it goes |
 |---|---:|---:|---|---|
-| A as shipped (`videoconvert_threads: 4`) | 52.5 | 51.8% | 240/240 | `nvvidconv`'s copy into encoder memory 24 ms, `videoconvert` 12 ms, encoder threads 11 ms, parse + mux 4 ms |
-| A with `videoconvert_threads: 1` | 42.7 | 51.8% | 240/240 | same throughput (the encoder limits it, ~50 fps) |
-| B NV24 from the feeder | 40.9 | 51.8% | 240/240 | not implemented |
-| NV12 from the feeder | 25.5 | 51.8% | 240/240 | not implemented; the candidate |
-| C `nvvidconv` colour step | — | — | — | unsupported, and the two-pass VIC route is not exact |
-| A + `bayer_tile=plain` | 59.5 | 45.5% | 240/240 | tiling adds 9 ms on the capture thread |
+| `videoconvert`, four threads (v1.13.0) | 52.5 | 51.8% | 240/240 | the copy of a 15 MB NV24 frame 24 ms, `videoconvert` 12 ms, encoder threads 11 ms, parse + mux 4 ms |
+| `videoconvert`, one thread (now) | 42.7 | 51.8% | 240/240 | same throughput: the encoder limits it, about 50 fps |
+| `nv12` | 25.5 | 51.8% | 240/240 | the copy is 7.5 MB and there is no conversion |
 
-With the full-range pin the colour step is a copy, so `videoconvert_threads: 1` now costs less CPU than
-the default 4 at the same throughput.
+- **`nv12`.** The recorder hands the encoder the frame as it is plus one shared block of constant
+  half-resolution chroma, and the VIC makes the NV24 in hardware. The luma plane is untouched and the
+  bitstream is the same one, so nothing changes for replay, export or the sidecar's
+  `recording_colorimetry`; `recording_feed` records which feed made a recording. Bayer tiling still
+  applies in front of it.
+- **`auto` (the default)** uses `nv12` only after proving it: at start-up the core pushes three frames
+  holding every 8-bit code through the real encoder at the sensor's geometry, decodes them with the
+  read path and compares (about a second; `NV12 feed verified bit-exact at WxH` in the log). Anything
+  short of a pass keeps `videoconvert`. The proof is there because the VIC decides by input format
+  whether a plane is full or limited range — on R39, NV12 passes through verbatim while I420 and
+  GRAY8 do not — and that is an L4T property nobody can promise for the next release.
+- **`videoconvert`** is the feed of every earlier release: `GRAY8 → videoconvert → NV24`, now on one
+  thread, because with the full-range pin that step is a copy and more threads only cost CPU.
+- Frames whose width is not a multiple of 4, or whose height is odd, always use `videoconvert`.
+- Only `nv12` is exact among the cheaper routes. `nvvidconv` refuses `GRAY8 → NV24`; `GRAY8 → I420 →
+  NV24` on the VIC clamps the plane at 235; I420 from the feeder is range-expanded.
+
+`tools/nvenc_lossless_test.py` qualifies both feeds on real NVENC (`--feed`); on the R39 Orin both pass
+24/24 at 2448×2048 with byte-identical output. JP6 has not been measured: there `auto` decides.
 
 ## Lossless CFA tiling and temporal compression
 

@@ -75,6 +75,11 @@ class SidecarHeader:
     # conversion (ffv1, stream-copy, colour), or a recording made before the pin existed (taller
     # than 576 rows, such a recording's luma is a few codes off).
     recording_colorimetry: Optional[str] = None
+    # How the plane reached the hardware lossless encoder: "nv12" (built by the feeder, upsampled to
+    # NV24 by the VIC) or "videoconvert" (NV24 built on the CPU). The bitstream and the way to read it
+    # are the same; this is provenance, kept so a recording can be traced to the path that made it.
+    # None for every other encoder and for recordings made before the field existed.
+    recording_feed: Optional[str] = None
     recording_settings: Optional[dict] = None
     recording_settings_file: Optional[str] = None
 
