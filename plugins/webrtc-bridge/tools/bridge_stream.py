@@ -345,6 +345,7 @@ class Bridge:
         self._reaper = SessionReaper(parse_stale_s(_env("CAM_WEBRTC_STALE_S")),
                                      parse_max_sessions(_env("CAM_WEBRTC_MAX_SESSIONS")))
         self._looked_frames = 0         # _rx_frames at the previous look at the sessions
+        self._blind_warned = False      # said once that the liveness check has no feedback to go on
         gate_on, idle_fps = parse_idle_fps(_env("CAM_WEBRTC_IDLE_FPS"))
         self._gate = IdleGate(idle_fps, parse_grace_s(_env("CAM_WEBRTC_IDLE_GRACE_S")), enabled=gate_on)
         # One encoder for every viewer (CAM_WEBRTC_ENCODE=shared; run.sh put it in the pipeline -- see
@@ -760,6 +761,11 @@ class Bridge:
         sending, self._looked_frames = self._rx_frames != self._looked_frames, self._rx_frames
         for sid, why in self._reaper.observe(now, keys, sending=sending):
             self._end_session(sid, why)
+        if not self._blind_warned and self._reaper.blind(now):
+            self._blind_warned = True
+            log.warning("no receiver feedback has been seen in webrtcsink's statistics for any session yet; "
+                        "until it has, the stale-session check (CAM_WEBRTC_STALE_S) cannot tell a dead "
+                        "viewer from a live one and ends nothing")
 
     def _end_session(self, sid, why):
         """Both signals, in this order. `end-session` (an action) has the signaller tell the server,

@@ -19,6 +19,11 @@ Two policies, both driven from webrtcsink's own per-session statistics:
             Silence only counts while the bridge is SENDING. A camera that stalls -- a reconnect, a
             paused replay -- leaves a live receiver with nothing to acknowledge: its feedback stopped
             8 s after the last frame, and it must not lose its session for that.
+            It also only counts once this process has SEEN receiver feedback, from any session. The
+            policy reads another element's statistics by field name; on a build where those names
+            differ, or will not marshal, every key would stand still and every live viewer would be
+            ended stale_s after it connected, again and again. Without that evidence nothing is ended
+            (blind() says so) -- failing to reap costs CPU, the opposite costs the operators' video.
   cap       never more than `max_sessions`: a newcomer beyond it ends the oldest. Off by default; the
             right number is how many operators watch one camera.
 
@@ -86,6 +91,7 @@ class SessionReaper:
         self._seen = {}        # session id -> [first seen, receiver key, when the key last changed]
         self._ended = {}       # session id -> when it was last returned for ending
         self._last_look = None
+        self.feedback_seen = False   # some session's receiver key has been seen to move
 
     @property
     def enabled(self):
@@ -96,6 +102,14 @@ class SessionReaper:
         entry = self._seen.get(sid)
         return now - entry[2] if entry else 0.0
 
+    def blind(self, now):
+        """True when the liveness policy has nothing to go on: a session has been watched for stale_s
+        and no session of this process has ever shown receiver feedback. Then nothing is ended for
+        silence, and the caller should say so once."""
+        if self.stale_s <= 0 or self.feedback_seen:
+            return False
+        return any(now - entry[2] >= self.stale_s for entry in self._seen.values())
+
     def observe(self, now, keys, sending=True):
         """One look at the sink's sessions: {session id: receiver key, or None when the sink has no
         statistics for it yet}. Returns [(session id, reason)] to end, oldest first.
@@ -104,8 +118,9 @@ class SessionReaper:
         not counted as anybody's silence (the cap still applies).
 
         A session with no receiver feedback at all ages from when it was first seen, so one that never
-        gets as far as talking is ended like one that stopped. A session already returned is not
-        returned again until _REISSUE_S later (the sink removes it asynchronously)."""
+        gets as far as talking is ended like one that stopped -- once feedback has been seen from some
+        session at all (see the module docstring). A session already returned is not returned again
+        until _REISSUE_S later (the sink removes it asynchronously)."""
         since_last = now - self._last_look if self._last_look is not None else 0.0
         self._last_look = now
         for sid in [s for s in self._seen if s not in keys]:
@@ -116,13 +131,17 @@ class SessionReaper:
             if entry is None:
                 self._seen[sid] = [now, key, now]
             elif key != entry[1]:
+                # feedback = a key that MOVED between two looks that both had statistics, and has
+                # receiver fields in it; statistics merely appearing prove nothing about the far end
+                if key and entry[1] is not None:
+                    self.feedback_seen = True
                 entry[1], entry[2] = key, now
             elif not sending:
                 entry[2] = min(now, entry[2] + since_last)
         pending = {s for s, at in self._ended.items() if now - at < _REISSUE_S}
         to_end = []
         oldest_first = sorted(self._seen, key=lambda s: self._seen[s][0])
-        if self.stale_s > 0:
+        if self.stale_s > 0 and self.feedback_seen:
             for sid in oldest_first:
                 quiet = now - self._seen[sid][2]
                 if quiet >= self.stale_s and sid not in pending:

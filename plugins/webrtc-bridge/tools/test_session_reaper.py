@@ -76,17 +76,56 @@ def test_a_session_whose_receiver_goes_quiet_is_ended_once():
 def test_an_ended_session_that_lingers_is_asked_for_again():
     r = SessionReaper(stale_s=5)
     r.observe(0, {"a": 1})
-    assert [s for s, _ in r.observe(5, {"a": 1})] == ["a"]
-    assert r.observe(9, {"a": 1}) == []
-    assert [s for s, _ in r.observe(15, {"a": 1})] == ["a"]
+    r.observe(1, {"a": 2})
+    assert [s for s, _ in r.observe(6, {"a": 2})] == ["a"]
+    assert r.observe(10, {"a": 2}) == []
+    assert [s for s, _ in r.observe(16, {"a": 2})] == ["a"]
+
+
+def _seen_feedback(stale_s, **kw):
+    """A reaper that has watched one viewer talk and leave: the statistics of this build are readable."""
+    r = SessionReaper(stale_s=stale_s, **kw)
+    r.observe(-10, {"earlier": 1})
+    r.observe(-9, {"earlier": 2})
+    r.observe(-8, {})
+    assert r.feedback_seen
+    return r
 
 
 def test_a_session_that_never_gets_as_far_as_talking_ages_from_when_it_appeared():
-    r = SessionReaper(stale_s=5)
+    r = _seen_feedback(5)
     assert r.observe(100, {"a": None}) == []                    # no statistics yet
     assert r.observe(103, {"a": ()}) == []                      # statistics, no receiver in them: a change
     assert r.observe(107.9, {"a": ()}) == []
     assert [s for s, _ in r.observe(108, {"a": ()})] == ["a"]
+
+
+def test_nothing_is_ended_for_silence_until_receiver_feedback_has_been_seen_at_all():
+    """The policy reads webrtcsink's statistics by field name. Where those names differ, or the values
+    will not marshal, every key stands still: that must not end every live viewer every stale_s."""
+    r = SessionReaper(stale_s=5)
+    for t in range(0, 600, 2):                                  # two viewers, ten minutes, keys that never move
+        assert r.observe(t, {"a": (), "b": (("x", "1"),)}) == []
+    assert not r.feedback_seen and r.blind(600)                 # ...and the caller is told why
+    assert not SessionReaper(stale_s=5).blind(600)              # nobody watched yet: nothing to say
+    r2 = SessionReaper(stale_s=5)
+    r2.observe(0, {"a": None})
+    assert not r2.blind(4.9) and r2.blind(5)
+    # statistics APPEARING is not the far end talking
+    r2.observe(6, {"a": (("rb", "0"),)})
+    assert not r2.feedback_seen
+    # a key that moves is: from then on the silent ones go, and the check is no longer blind
+    out = r.observe(600, {"a": (), "b": (("x", "2"),)})
+    assert r.feedback_seen and not r.blind(600)
+    assert [s for s, _ in out] == ["a"]                         # ten minutes of nothing, and now it counts
+    assert r.observe(602, {"b": (("x", "2"),)}) == []
+    assert [s for s, _ in r.observe(605, {"b": (("x", "2"),)})] == ["b"]
+    # the cap needs no evidence
+    capped = SessionReaper(stale_s=5, max_sessions=1)
+    capped.observe(0, {"a": ()})
+    assert [s for s, _ in capped.observe(1, {"a": (), "b": ()})] == ["a"]
+    # and with the liveness policy off there is nothing to be blind about
+    assert not SessionReaper(stale_s=0, max_sessions=1).blind(1e9)
 
 
 def test_silence_only_counts_while_media_is_going_out():
@@ -101,7 +140,7 @@ def test_silence_only_counts_while_media_is_going_out():
     assert r.observe(120, {"a": 2}) == []                       # frames again: the count resumes at 2 s
     assert r.observe(126, {"a": 3}) == []                       # ...and the viewer answers
     # a viewer that really is gone is still ended once frames flow; the stall is not counted either way
-    r = SessionReaper(stale_s=10)
+    r = _seen_feedback(10)
     r.observe(0, {"a": 1})
     r.observe(4, {"a": 1})
     for t in (6, 8, 10, 12, 14):
@@ -126,7 +165,7 @@ def test_cap_ends_the_oldest_and_counts_what_is_already_going():
 
 def test_both_policies_together_do_not_end_more_than_they_must():
     # `old` is stale AND over the cap: it goes once, for the first reason, and `new` -- now alone -- stays
-    r = SessionReaper(stale_s=10, max_sessions=1)
+    r = _seen_feedback(10, max_sessions=1)
     r.observe(0, {"old": 1})
     out = r.observe(10, {"old": 1, "new": 1})
     assert [s for s, _ in out] == ["old"] and "no receiver feedback" in out[0][1]
