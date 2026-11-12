@@ -71,7 +71,7 @@ run_scenario() {
     -v "$REPO/plugins/webrtc-bridge:/app" "$@" "$WEBRTC_IMG" bash run.sh >/dev/null
 
   echo "== wait for producer (encoder discovery + transport hookup) =="
-  sleep 12
+  wait_for_producer || { echo "-- scenario FAIL: the bridge never registered as a producer --"; return 1; }
   echo "-- bridge transport line --"
   docker logs "$BRIDGE" 2>&1 | grep -E "webrtc-bridge:" | head -1 || true
   docker logs "$BRIDGE" 2>&1 | grep -E "h264 encode:" | head -1 || true   # auto profile/level (H.264 scenarios)
@@ -85,6 +85,19 @@ run_scenario() {
   docker logs "$BRIDGE" 2>&1 | grep -ivE "set_mempolicy" | tail -8
   [ "$rc" -eq 0 ] && echo "-- scenario PASS --" || echo "-- scenario FAIL (rc=$rc) --"
   return "$rc"
+}
+
+# wait_for_producer: the consumer connects to the FIRST producer the signalling server lists, and gets
+# nothing if it asks before the bridge has registered -- which the bridge only does once webrtcsink
+# has finished discovering its codecs. That takes a second with one pinned hardware codec and ten with
+# every software encoder an image carries, so a fixed sleep here was a race (it lost on an Orin with
+# the jp7 images, where discovery ran 10 s against a 12 s sleep that started before the pipeline did).
+wait_for_producer() {
+  for _ in $(seq 1 60); do
+    if [[ "$(docker logs "$BRIDGE" 2>&1)" == *"registered as [Producer]"* ]]; then sleep 1; return 0; fi
+    sleep 1
+  done
+  return 1
 }
 
 # bridge_log_has <substring>: poll the bridge log (up to 20s) for a substring. Polled because the

@@ -199,7 +199,9 @@ shm (self-describing, no geometry env; asserts the latency heartbeat + exercises
 overlay), headered shm + Bayer relabel, legacy shm-raw (+ the two H.264 profile/level scenarios and
 the `CAM_WEBRTC_MAX_SIZE` downscale, asserted off the auto-level line — the encoder must negotiate the
 scaled geometry), and unixfd on a gst ≥ 1.24 core (+ the downscale planned behind the runtime seam).
-Proves the whole egress path without a browser. PASS = each scenario decoded ≥30 frames.
+Proves the whole egress path without a browser. PASS = each scenario decoded ≥30 frames. Each
+scenario waits for the bridge to register with the signalling server before it connects — codec
+discovery takes one second or ten depending on what the image carries.
 
 Discovery has its own test (needs a Linux host for host networking + a Zenoh router):
 
