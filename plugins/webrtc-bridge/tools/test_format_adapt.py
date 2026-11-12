@@ -4,7 +4,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from format_adapt import adapt_for_input, debayer_enabled  # noqa: E402
+from format_adapt import adapt_for_input, bin_plan, debayer_enabled, debayer_full  # noqa: E402
 
 
 def test_bayer_debayers_to_color():
@@ -42,6 +42,49 @@ def test_debayer_enabled_forms():
         assert not debayer_enabled(off)
     for on in (None, "", "auto", "true", "1", "yes", "anything-else"):
         assert debayer_enabled(on)
+
+
+def test_full_is_a_debayer_mode_not_an_off_form():
+    for full in ("full", "Full", " FULL "):
+        assert debayer_full(full) and debayer_enabled(full)
+    for other in (None, "", "auto", "true", "false", "0", "fully"):
+        assert not debayer_full(other)
+
+
+def test_a_preview_reduced_to_half_size_or_less_is_binned_and_streams_at_the_planned_size():
+    # the 5 MP camera: half size is 1224x1024
+    assert bin_plan(2448, 2048, (1280, 1280), "rggb") == (1224, 1024)     # near half: the half frame as it is
+    assert bin_plan(2448, 2048, (1224, 1224), "rggb") == (1224, 1024)     # exactly half
+    assert bin_plan(2448, 2048, (640, 640), "rggb") == (640, 534)         # below half: binned, then scaled
+    assert bin_plan(2448, 2048, (1280, 720), "rggb") == (860, 720)
+    assert bin_plan(512, 512, (256, 256), "grbg") == (256, 256)
+    for pattern in ("rggb", "bggr", "grbg", "gbrg", "RGGB"):
+        assert bin_plan(1920, 1200, (960, 960), pattern) == (960, 600)
+
+
+def test_a_bound_well_above_half_size_keeps_the_full_debayer():
+    assert bin_plan(2448, 2048, (1920, 1920), "rggb") is None             # asked for 1920: 1224 is not it
+    assert bin_plan(2448, 2048, (1400, 1400), "rggb") is None
+    assert bin_plan(2448, 2048, (1360, 1360), "rggb") == (1224, 1024)     # 1224 is within 10% of 1360
+    assert bin_plan(2448, 2048, (1361, 1361), "rggb") is None
+    # each axis is held to it: a wide box that the height binds
+    assert bin_plan(2448, 2048, (4000, 1200), "rggb") is None
+
+
+def test_nothing_is_binned_without_a_bound_a_reduction_or_a_known_pattern():
+    assert bin_plan(2448, 2048, None, "rggb") is None                     # CAM_WEBRTC_MAX_SIZE off
+    assert bin_plan(640, 480, (1280, 1280), "rggb") is None               # already fits: nothing is scaled
+    assert bin_plan(2448, 2048, (1280, 1280), None) is None
+    assert bin_plan(2448, 2048, (1280, 1280), "rgb") is None
+    assert bin_plan(2, 2, (1, 1), "rggb") is None and bin_plan(3, 9, (2, 2), "rggb") is None
+
+
+def test_a_half_size_frame_with_an_odd_edge_is_only_used_when_the_scaler_follows():
+    # 2052x2048 halves to 1026x1024 (even: streamed as it is); 2050x2048 to 1025x1024 (odd)
+    assert bin_plan(2052, 2048, (1100, 1100), "rggb") == (1026, 1024)
+    assert bin_plan(2050, 2048, (1100, 1100), "rggb") is None             # would stream 1025 wide
+    assert bin_plan(2050, 2048, (640, 640), "rggb") == (640, 638)         # the scaler evens it out
+    assert bin_plan(2448, 2046, (1280, 1280), "rggb") is None             # 1023 high
 
 
 def _main():

@@ -11,6 +11,7 @@ CAM_WEBRTC_DEBAYER=false against a Bayer stream (videoconvert takes no video/x-b
 run.sh plants an inert `identity name=fmt_tap` seam and bridge_stream.py resolves it from the
 FIRST caps the stream actually carries, using the decision below.
 """
+from scale_plan import fit_within
 
 
 def debayer_enabled(value):
@@ -19,6 +20,41 @@ def debayer_enabled(value):
     the raw mosaic."""
     return str(value if value is not None else "auto").strip().lower() \
         not in ("0", "false", "no", "off")
+
+
+BAYER_PATTERNS = ("rggb", "bggr", "grbg", "gbrg")
+_NEAR_HALF = 0.9
+
+
+def debayer_full(value):
+    """CAM_WEBRTC_DEBAYER=full: always the full-resolution debayer, never bayerbin."""
+    return str(value if value is not None else "").strip().lower() == "full"
+
+
+def bin_plan(width, height, max_size, pattern):
+    """The size a Bayer stream is streamed at when it should be debayered by BINNING -- one RGB pixel
+    per 2x2 cell, the bridge's `bayerbin` element -- instead of by bayer2rgb; else None.
+
+    `max_size` is the CAM_WEBRTC_MAX_SIZE box (None = no bound). A full debayer of a frame that is then
+    reduced to half size or less interpolates four pixels to keep one: 21 ms of a 5 MP frame on an
+    Orin, most of what a viewer of such a camera costs. Binning is used when the scaled size is at or
+    below half size -- or within 10% above it, where the bound is honoured by streaming the half-size
+    frame as it is (2448x2048 asked to fit 1280 streams 1224x1024, not 1280x1070). A bound well above
+    half size keeps the full debayer: binning would give away resolution that was asked for. So does a
+    half-size frame that would be streamed as it is with an odd edge (4:2:0 and the hardware encoders
+    want even sizes; the scaler rounds, binning cannot)."""
+    if max_size is None or str(pattern).lower() not in BAYER_PATTERNS or width < 4 or height < 4:
+        return None
+    target = fit_within(width, height, *max_size)
+    if target is None:
+        return None
+    half_w, half_h = width // 2, height // 2
+    if half_w < _NEAR_HALF * target[0] or half_h < _NEAR_HALF * target[1]:
+        return None
+    scaled = fit_within(half_w, half_h, *max_size)
+    if scaled is not None:
+        return scaled
+    return None if half_w % 2 or half_h % 2 else (half_w, half_h)
 
 
 def adapt_for_input(media_type, width, height, framerate, debayer):

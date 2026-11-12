@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from zenoh_advertiser import StreamAdvertiser
 from h264_level import h264_level_for, level_covers, LEVELS as H264_LEVELS
 from encoder_policy import live_encoder_props
-from format_adapt import adapt_for_input, debayer_enabled
+from format_adapt import adapt_for_input, bin_plan, debayer_enabled, debayer_full
 from scale_plan import fit_within, parse_max_size, scale_caps
 from header_transport import (HeaderError, PtsTracker, TS_SOURCE_SHORT,
                               caps_for_frame, parse_header)
@@ -977,6 +977,20 @@ class Bridge:
             self.loop.quit()
         return True
 
+    def _streamed_dims(self, d):
+        """The viewer receives the DOWNSCALED geometry (CAM_WEBRTC_MAX_SIZE): the plan the format seam
+        and the fmt_scale probe apply, computed here from the source dims because the advert fires
+        before the first caps have reached either."""
+        if self._max_size is None or not (d.get("width") and d.get("height")):
+            return d
+        pix = str(d.get("pixel_format") or "")
+        binned = self._binned_size(d["width"], d["height"], pix[6:-1]) \
+            if pix.startswith("bayer_") and debayer_enabled(_env("CAM_WEBRTC_DEBAYER", "auto")) else None
+        target = binned or fit_within(d["width"], d["height"], *self._max_size)
+        if target is not None:
+            d["width"], d["height"] = target
+        return d
+
     def _advertise(self):
         self._advertised = True                              # enter once (on the PLAYING transition)
         if not _truthy(_env("CAM_ADVERTISE", "1")):
@@ -987,13 +1001,7 @@ class Bridge:
             # appsrc (hdr_out) carries the real video caps the header described.
             src = self.pipeline.get_by_name("hdr_out") or self.pipeline.get_by_name("cam_src")
             d = fill_dims_from_caps(base_descriptor(), src)
-            if self._max_size is not None and d.get("width") and d.get("height"):
-                # The viewer receives the DOWNSCALED geometry (CAM_WEBRTC_MAX_SIZE): the same plan
-                # the fmt_scale probe applies, computed here from the source dims because the advert
-                # fires before the first caps have reached the scaler.
-                target = fit_within(d["width"], d["height"], *self._max_size)
-                if target is not None:
-                    d["width"], d["height"] = target
+            self._streamed_dims(d)
             key = "fleet/{}/media/{}".format(vehicle_id(), sensor_id())
             self.advertiser = StreamAdvertiser(key, d, connect=zenoh_connect(), enabled=True)
             log.info("descriptor: %s", json.dumps(d))
@@ -1110,6 +1118,19 @@ class Bridge:
         return False
 
     # ---- input format adapter (fmt_tap: adapt to the caps the stream ACTUALLY carries) ---------
+    def _binned_size(self, width, height, pattern):
+        """The size this Bayer stream is streamed at when it is debayered at half resolution (`bayerbin`,
+        one RGB pixel per 2x2 cell) instead of in full, or None when it is not: the preview is not being
+        reduced to about half size or less (format_adapt.bin_plan), CAM_WEBRTC_DEBAYER=full asks for
+        the full debayer, or this image was built without the element. Asked by the format seam and by
+        the descriptor, which has to say the same size before the first frame arrives."""
+        if debayer_full(_env("CAM_WEBRTC_DEBAYER")) or self.pipeline.get_by_name("fmt_tap") is None:
+            return None                                  # (a static front-end has bayer2rgb written in)
+        size = bin_plan(width, height, self._max_size, pattern)
+        if size is None or Gst.ElementFactory.find("bayerbin") is None:
+            return None
+        return size
+
     def _on_fmt_caps(self, _pad, info, tap):
         """Pad probe on fmt_tap's sink pad: on the first CAPS event, splice in whatever the real
         input format needs (bayer2rgb / a GRAY8 relabel / nothing -- adapt_for_input). Runs on the
@@ -1158,6 +1179,9 @@ class Bridge:
             plan = adapt_for_input(st.get_name(), w if okw else 0, h if okh else 0, fr,
                                    debayer_enabled(_env("CAM_WEBRTC_DEBAYER", "auto")))
             el = None
+            if plan is not None and plan[0] == "bayer2rgb" and okw and okh \
+                    and self._binned_size(w, h, st.get_string("format")) is not None:
+                plan = ("bayerbin", None)
             if plan is not None:
                 factory, el_caps = plan
                 el = Gst.ElementFactory.make(factory, "fmt_adapt")
@@ -1174,7 +1198,9 @@ class Bridge:
                 _link(srcpad, el.get_static_pad("sink"))
                 _link(el.get_static_pad("src"), nxtpad)
                 log.info("format adapter: input %s -> inserted %s%s", caps.to_string(), factory,
-                         " (relabel to {})".format(el_caps) if el_caps else " (debayer to color)")
+                         " (relabel to {})".format(el_caps) if el_caps else
+                         " (debayer to color at half resolution; CAM_WEBRTC_DEBAYER=full keeps bayer2rgb)"
+                         if factory == "bayerbin" else " (debayer to color)")
             else:
                 _link(srcpad, nxtpad)
                 log.info("format adapter: input %s passes through", caps.to_string())

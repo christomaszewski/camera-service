@@ -377,6 +377,62 @@ def test_the_heartbeat_names_the_idle_gate_and_the_shared_encoder(caplog):
         assert "idle(" not in status()
 
 
+# ---- the format seam: which debayer --------------------------------------------------------------------
+_BAYER = ("videotestsrc is-live=true name=cam_src ! video/x-bayer,format=rggb,width=64,height=48,framerate=50/1 ! "
+          "identity name=fmt_tap   videoscale name=fmt_scale add-borders=false ! capsfilter name=scale_caps ! "
+          "videoconvert name=fmt_next ! video/x-raw,format=I420 ! fakesink name=cam_webrtcsink sync=false")
+_HAS_BIN = Gst.ElementFactory.find("bayerbin") is not None      # the WebRTC image has it; the core's does not
+
+
+def _seam(b):
+    """Play `b` until frames arrive: (the element spliced in at the seam, the size the sink is given)."""
+    seen = _count_buffers(b.pipeline)
+    b.pipeline.set_state(Gst.State.PLAYING)
+    assert _pump(lambda: len(seen) >= 5)
+    st = b.pipeline.get_by_name("cam_webrtcsink").get_static_pad("sink").get_current_caps().get_structure(0)
+    return (b.pipeline.get_by_name("fmt_adapt").get_factory().get_name(),
+            (st.get_int("width")[1], st.get_int("height")[1]))
+
+
+def test_a_bayer_preview_reduced_to_half_is_debayered_at_half_resolution_where_the_element_exists(caplog):
+    caplog.set_level(logging.INFO)
+    with _bridge(_BAYER, CAM_WEBRTC_MAX_SIZE="32") as b:
+        factory, size = _seam(b)
+        assert size == (32, 24)                                  # the same size either way
+        assert factory == ("bayerbin" if _HAS_BIN else "bayer2rgb")
+        # and the descriptor, worked out before any frame, says that size
+        assert b._streamed_dims({"width": 64, "height": 48, "pixel_format": "bayer_rggb8"})["width"] == 32
+    assert ("at half resolution" in caplog.text) == _HAS_BIN
+
+
+@pytest.mark.parametrize("env, size", [
+    ({"CAM_WEBRTC_MAX_SIZE": "32", "CAM_WEBRTC_DEBAYER": "full"}, (32, 24)),    # asked for the full debayer
+    ({"CAM_WEBRTC_MAX_SIZE": "48"}, (48, 36)),                                    # well above half size
+    ({}, (64, 48)),                                                               # nothing is reduced
+])
+def test_the_full_debayer_stays_wherever_binning_would_cost_resolution_or_was_declined(env, size):
+    with _bridge(_BAYER, **env) as b:
+        assert _seam(b) == ("bayer2rgb", size)
+
+
+def test_the_descriptor_gives_the_size_the_viewer_receives():
+    dims = lambda b, **d: (lambda out: (out["width"], out["height"]))(                    # noqa: E731
+        b._streamed_dims({"width": 2448, "height": 2048, **d}))
+    with _bridge(_BAYER, CAM_WEBRTC_MAX_SIZE="1280") as b:
+        assert dims(b, pixel_format="mono8") == (1280, 1070)
+        assert dims(b, pixel_format="bayer_rggb8") == ((1224, 1024) if _HAS_BIN else (1280, 1070))
+    with _bridge(_BAYER, CAM_WEBRTC_MAX_SIZE="1280", CAM_WEBRTC_DEBAYER="full") as b:
+        assert dims(b, pixel_format="bayer_rggb8") == (1280, 1070)
+    with _bridge(_BAYER, CAM_WEBRTC_MAX_SIZE="1280", CAM_WEBRTC_DEBAYER="false") as b:    # the raw mosaic
+        assert dims(b, pixel_format="bayer_rggb8") == (1280, 1070)
+    with _bridge(_BAYER) as b:
+        assert dims(b, pixel_format="bayer_rggb8") == (2448, 2048)
+    # a static front-end (shm-raw) has bayer2rgb written into it: never binned
+    with _bridge("videotestsrc name=cam_src ! videoscale name=fmt_scale ! capsfilter name=scale_caps ! "
+                 "fakesink name=cam_webrtcsink", CAM_WEBRTC_MAX_SIZE="1280") as b:
+        assert dims(b, pixel_format="bayer_rggb8") == (1280, 1070)
+
+
 # ---- the shared encoder, on a pipeline -------------------------------------------------------------------
 _SINK = "capsfilter name=first_caps_only ! fakesink name=cam_webrtcsink sync=false"
 

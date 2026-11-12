@@ -194,7 +194,7 @@ the lossless encoder exactly, and the unused V plane comes back constant).
 
 On Bayer the idle cost is `bayer2rgb` plus the convert at sensor resolution, 33 ms per frame, and the
 downscale sits after it. A half-resolution debayer (one RGB pixel per CFA cell) ahead of the scale would
-remove most of it for any target at or below half size; not tried.
+remove most of it for any target at or below half size; not tried here (built later: section 10.1).
 
 ### 4.2 Stale sessions (handoff section 2.4) — confirmed
 
@@ -454,19 +454,44 @@ browser.
 
 ## 10. A second round: five more candidates
 
-Evaluated on the same Orin on 2026-11-12, each against a measurement; one was adopted.
+Evaluated on the same Orin on 2026-11-12, each against a measurement; two were adopted.
 
 | Candidate | Measured | Verdict |
 |---|---|---|
 | **ROS 2 bridge idles with no subscriber** | 5 MP Bayer at 24 fps, nobody subscribed: 65% of a core with debayer on and 12% with it off, before; under 1% after. A subscriber still receives 150 of 150 frames; a 5 Hz `publish_rate` gives 5 Hz | **Adopted** (`idle_gate` / `CAM_ROS_IDLE_GATE`, default on). The `publish_rate` throttle moved ahead of the debayer with it |
-| Debayer at half resolution before the downscale (WebRTC bridge) | One RGB pixel per 2x2 cell in numpy, as a pump in place of `bayer2rgb`: 24.5 ms a frame in the live bridge against about 21 ms for `bayer2rgb` plus the scale it replaces. Bridge with one viewer at `CAM_WEBRTC_MAX_SIZE=1280`: 108% of a core before, 131% with it | **Rejected as built.** The idea needs a compiled element (an estimated 2 ms a frame, some 18 ms saved on a 5 MP stream); Python is slower than what it replaces. Paced, the numpy step cost three times its 8 ms benchmark |
+| **Debayer at half resolution before the downscale** (WebRTC bridge) | Tried twice. In numpy, as a pump in place of `bayer2rgb`: 24.5 ms a frame in the live bridge against about 21 ms for what it replaces, 131% of a core against 108% — slower. As a compiled element (`bayerbin`, one C file): 5 MP Bayer at 24 fps, one hardware-encoded viewer, bridge CPU **109.5% → 80.4%** of a core at `CAM_WEBRTC_MAX_SIZE=1280` (the debayer/scale/convert thread 34.4 → 18.1 ms a frame) and **92.1% → 76.7%** at `640` (26.8 → 19.3 ms); the viewer receives 24 fps either way | **Adopted, compiled** (section 10.1). The numpy version was backed out |
 | Skip the unixfd publish when no consumer is attached | 6 ms per 5 MP frame (section 2.3). `unixfdsink` exposes neither a client count nor a signal | **Not done.** The only way to know is to scan the process's own sockets; a deployment with no bridge can set `transport.plugin_endpoint.enabled: false` and pay nothing |
 | Vectorised colour conversion in the ROS 2 bridge | 1080p30 I420 with one subscriber: 22.4 ms a frame with the per-pixel loop, 19.4 ms through `GstVideoConverter` | **Rejected.** 3 ms of 22: the cost is the 6 MB copy into the message and its publication, not the conversion, and the converter changes the colours (it honours the caps' colorimetry) |
 | The split's extra frame copies | 0.044 ms + 0.051 ms a frame at 640x512, of 7.8 ms | **Not worth code** |
 
 What this leaves as the larger remaining costs: publishing full-resolution RGB images over ROS (22 ms a
-1080p frame, mostly copies), and `bayer2rgb` at sensor resolution in the WebRTC bridge whenever a viewer is
-connected. Both want compiled code or a different message path, not tuning.
+1080p frame, mostly copies), and `bayer2rgb` at sensor resolution in the WebRTC bridge for a viewer of a
+preview that is not bounded to about half size. The first wants a different message path, not tuning.
+
+### 10.1 The half-resolution debayer
+
+`plugins/webrtc-bridge/gst/gstbayerbin.c`: a `GstBaseTransform`, `video/x-bayer` (8-bit, the four
+patterns) to `video/x-raw,format=RGBx` at half the width and height. Each 2x2 cell gives one pixel — its
+red, its blue, the mean of its two greens. Built with `gcc -O3` in the bridge image's builder stage.
+
+- **Where it is used.** At the runtime format seam (unixfd, headered shm), when `CAM_WEBRTC_MAX_SIZE`
+  bounds the preview to half the sensor size or less, or to within 10% above it
+  (`format_adapt.bin_plan`). In that band the half-size frame is streamed as it is: 2448x2048 bounded
+  to 1280 streams 1224x1024 rather than 1280x1070. Below it the scaler finishes (640 → 640x534). A
+  bound well above half size, no bound, `CAM_WEBRTC_DEBAYER=full`, a static front-end or an image
+  without the element all keep `bayer2rgb`.
+- **In isolation** (`gst-launch`, 240 frames of 2448x2048): `bayer2rgb ! videoscale(1280) !
+  videoconvert` costs 32 ms of CPU a frame over the source; `bayerbin ! videoconvert` costs 4 ms.
+  The live saving is smaller (16 ms at 1280) because the thread also carries the conversion and
+  the hand-off to the encoder.
+- **What is given up.** The picture is not the one `bayer2rgb` and a scaler produce: nothing is
+  interpolated, and the colour samples of a cell sit half a pixel apart. Not compared by eye on
+  real footage or in a browser; `CAM_WEBRTC_DEBAYER=full` is the way back.
+- **Checked:** the element against frames with a known answer — the four patterns, odd edges, tight
+  and four-byte-padded rows, a short frame dropped without stopping the stream
+  (`tools/check_bayerbin.py`, run by `webrtc_test.sh` in the bridge image); the plan and the seam in
+  the unit suite; both debayers end to end in the loopback test. The descriptor and the H.264 level
+  follow the size streamed.
 
 One thing to watch when measuring on this host: with an image build running, the same bridge measured
 47% and 73% of a core minutes apart. Per-frame CPU figures here were taken on an idle machine, or back to

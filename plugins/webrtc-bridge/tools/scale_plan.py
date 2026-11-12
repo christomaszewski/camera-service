@@ -6,8 +6,9 @@ CAM_WEBRTC_MAX_SIZE bounds the geometry fed to webrtcsink's encoder: run.sh inse
 bridge_stream.py pins the capsfilter from the caps the stream ACTUALLY carries (a pad probe on the
 scaler's sink pad -- the same "the stream decides, env only bounds" contract as the fmt_tap seam),
 using the decision below. What this removes is everything downstream of the scaler at full
-resolution: videoconvert, the (software) encoder, and the overlay / normalize passes. bayer2rgb,
-when present, sits upstream and still runs at sensor resolution.
+resolution: videoconvert, the (software) encoder, and the overlay / normalize passes. The debayer
+sits upstream: bayer2rgb at sensor resolution, or `bayerbin` at half resolution when the bound is
+about half size or less (format_adapt.bin_plan), which leaves this scaler the rest or nothing.
 """
 
 _OFF = ("", "0", "off", "false", "no", "none")

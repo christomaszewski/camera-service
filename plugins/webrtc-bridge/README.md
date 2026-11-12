@@ -70,6 +70,24 @@ by the I420 conversion). *How* the bridge decides differs by transport:
   `pcap` source inherits the live block's, so a replayed Bayer camera previews in color on the
   header and raw-shm paths too) labels the stream `video/x-bayer` and statically inserts `bayer2rgb`.
 
+**Half-resolution debayer.** When `CAM_WEBRTC_MAX_SIZE` bounds a Bayer preview to about half the sensor
+size or less, the seam splices `bayerbin` instead of `bayer2rgb`: each 2×2 cell of the mosaic becomes
+one RGB pixel (its red, its blue, the mean of its two greens), so nothing is interpolated at sensor
+resolution only to be scaled away. `bayerbin` is the bridge's own element — one C file,
+[gst/gstbayerbin.c](gst/gstbayerbin.c), compiled into the image.
+
+- *When:* the bounded size is at or below half size, or up to 10% above it. In that last band the
+  half-size frame is streamed as it is, so the picture can be slightly smaller than the bound asks
+  for: 2448×2048 with `CAM_WEBRTC_MAX_SIZE=1280` streams **1224×1024**, not 1280×1070. Below half
+  size the scaler finishes the job (`640` → 640×534). A bound well above half size (`1920`) keeps
+  `bayer2rgb`, as does no bound.
+- *Where:* the `fmt_tap` seam — unixfd and headered shm. The static front-ends (raw shm, the
+  `gst-launch` hatch) keep `bayer2rgb`. An image built without the element falls back to `bayer2rgb`.
+- *The picture* is not pixel-identical to `bayer2rgb` + scale: there is no interpolation and the
+  colour samples of a cell sit half a pixel apart, so fine diagonal edges can fringe slightly.
+  `CAM_WEBRTC_DEBAYER=full` keeps the full-resolution debayer at any size.
+- The discovery descriptor and the auto H.264 level give the size actually streamed.
+
 ## Why a sibling container (not in-image)
 
 `webrtcsink` isn't packaged for Debian/Ubuntu — it's the Rust `gst-plugin-webrtc`, built from source
@@ -104,7 +122,7 @@ Or via the per-sensor stack: `cam-up <sensor>.yaml up -d webrtc-bridge` (cam-up 
 | `CAM_TRANSPORT_SOCKET` | _(by transport)_ | the core's plugin endpoint: `/tmp/cam/unixfd` (unixfd) \| `/tmp/cam/frames` (headered shm) |
 | `CAM_SHM_SOCKET` | `/tmp/cam/raw` | raw shm socket (`shm-raw` only) |
 | `CAM_BAYER` | _(empty)_ | Bayer pattern (`rggb`/`grbg`/`gbrg`/`bggr`) → debayer to color; empty → mono. Consulted on **headered shm** (mosaic rides as GRAY8; the pattern relabels it — wrong pattern only mis-tints) and **shm-raw / the gst-launch hatch** (static front-end) — on JP7/unixfd the stream's own caps decide at runtime |
-| `CAM_WEBRTC_DEBAYER` | `auto` | `false` to preview the raw mosaic instead of debayering (self-describing paths: a zero-copy GRAY8 relabel) |
+| `CAM_WEBRTC_DEBAYER` | `auto` | `false` to preview the raw mosaic instead of debayering (self-describing paths: a zero-copy GRAY8 relabel). `full` to always debayer at sensor resolution with `bayer2rgb`, never at half resolution (see [Color](#color-debayer)) |
 | `CAM_WEBRTC_NORMALIZE` | `off` | 16-bit mono preview stretch: `auto` (1–99% percentile window, EMA-smoothed) or `lo:hi` (e.g. `5:99.5`). Stretches GRAY16 → GRAY8 **before** the 8-bit convert, so an LSB-aligned radiometric camera (thermal Y16) previews with full contrast instead of near-black. Preview-only — the recording and ROS topic keep the raw 16-bit. Needs the python launcher (the default) |
 | `CAM_WEBRTC_LATENCY_OVERLAY` | `off` | burn the live **capture→encode latency** into the video (`textoverlay`, top-left, e.g. `lat 87 ms (ptp)`) — any viewer sees it with zero client support; `lat --` where no capture stamp survives (shm-raw). Needs the python launcher |
 | `CAM_WEBRTC_MAX_SIZE` | _(off)_ | **encode-side downscale**: bound the streamed geometry to a box `WxH` (e.g. `1280x720`) or `N` on both axes (e.g. `1280`, a longest-edge cap). Aspect preserved, even dimensions, never upscaled. A `videoscale` right after the format seam, so `videoconvert`, the encoder and the overlay/normalize passes all run at the reduced size — the CPU lever for a 5MP color preview. Planned at runtime from the stream's own caps (a frame that already fits leaves the scaler in passthrough); the auto H.264 level and the discovery descriptor follow the streamed size. Preview-only — recording/ROS keep full resolution. The `gst-launch` hatch bounds via caps ranges instead (may land on an odd dimension) |
@@ -348,9 +366,12 @@ Brings up a `rmw_zenohd` router + core + bridge, and a Zenoh probe
   The lever is `CAM_WEBRTC_MAX_SIZE` (e.g. `1280` → 1280×1070): a `videoscale` right after the format
   seam, so `videoconvert`, the encoder and the overlay/normalize passes run on ~¼ of the pixels — the
   encoder cost scales with pixel count, and on software `x264enc` it is the dominant term.
-  `bayer2rgb` still runs at sensor resolution upstream of the scaler (a Bayer-aware 2×2 decimation
-  would cut that too — not built). Forcing NVENC (above) is the other half; both compose. The auto
-  H.264 level tracks the streamed size. Watch `lat[cap->enc]` in the heartbeat when A/B-ing.
+  A bound at about half the sensor size or below also replaces the debayer: `bayerbin` makes one RGB
+  pixel from each 2×2 cell instead of `bayer2rgb` interpolating the full frame for the scaler to
+  discard (see [Color](#color-debayer)) — 5 MP at 24 fps with one hardware-encoded viewer on an
+  Orin: 110% → 80% of a core at `1280`, 92% → 77% at `640`. Forcing NVENC (above) is the other half;
+  both compose. The auto H.264 level tracks the streamed size. Watch `lat[cap->enc]` in the heartbeat
+  when A/B-ing.
 - **Build on-device:** gst-plugins-rs builds against the Jetson's GStreamer (≥ the 1.20 floor); arm64
   builds are RAM-bound — the Dockerfile already uses LTO-off + limited jobs.
 

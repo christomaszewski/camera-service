@@ -3,10 +3,12 @@
 # bridge supports, end to end:
 #
 #   1. JP6 headered shm + mono  (self-describing; latency metrics + burned-in overlay)
-#   2. JP6 headered shm + color (GRAY8 mosaic relabeled video/x-bayer -> bayer2rgb)
+#   2. JP6 headered shm + color (GRAY8 mosaic relabeled video/x-bayer -> debayered: at half resolution
+#                                by `bayerbin` under a size bound, and by bayer2rgb + the downscale)
 #   3. shm-raw (legacy) + mono  (env geometry; also the two H.264 profile/level scenarios and
 #                                the CAM_WEBRTC_MAX_SIZE encode-side downscale)
-#   4. JP7 unixfd       + color (Bayer -> bayer2rgb; + the downscale behind the runtime seam)
+#   4. JP7 unixfd       + color (Bayer: the same two debayers behind the runtime seam)
+#   0. the bayerbin element against frames whose answer is known (tools/check_bayerbin.py)
 #   5. viewer sessions: the idle gate (a trickle with nobody watching, full rate for a viewer), one
 #      shared encoder for every viewer (software; and the Jetson hardware encoder where the host has
 #      one for containers), and the reaper ending a viewer that went silent
@@ -193,7 +195,49 @@ run_reaper_scenario() {
   in_bridge_signal SIGKILL webrtc_consumer.py || true
 }
 
+# run_bayer_downscale <label> <bridge -e env...>: a Bayer camera whose preview is bounded to half size,
+# twice. By default the seam splices `bayerbin` (one RGB pixel per 2x2 cell) and nothing is left to
+# scale; with CAM_WEBRTC_DEBAYER=full it is bayer2rgb and the downscale BEHIND the seam
+# (tap -> bayer2rgb -> fmt_scale), whose plan must come from the stream's caps -- no geometry env on
+# these paths. Either way the viewer gets 256x256.
+run_bayer_downscale() {
+  local label="$1" rc=0; shift
+  if run_scenario "$label (Bayer -> bayerbin, half resolution) + CAM_WEBRTC_MAX_SIZE=256" \
+      config/webrtc-fake-bayer.yaml "$@" -e CAM_BAYER=rggb -e CAM_WEBRTC_MAX_SIZE=256; then
+    # (a frame that already fits is the scaler's silent default: no "scale: 512x512 ->" line is the sign)
+    if bridge_log_has "inserted bayerbin" && [[ "$(docker logs "$BRIDGE" 2>&1)" != *"scale: 512x512 ->"* ]]; then
+      echo "-- debayered at half resolution; the scaler passes through --"
+    else
+      echo "-- FAIL: no 'inserted bayerbin' line, or the scaler still ran from 512x512 (half-resolution debayer) --"
+      rc=1
+    fi
+  else
+    rc=1
+  fi
+  if run_scenario "$label (Bayer -> bayer2rgb) + CAM_WEBRTC_MAX_SIZE=256 + CAM_WEBRTC_DEBAYER=full" \
+      config/webrtc-fake-bayer.yaml "$@" -e CAM_BAYER=rggb -e CAM_WEBRTC_MAX_SIZE=256 -e CAM_WEBRTC_DEBAYER=full; then
+    if bridge_log_has "inserted bayer2rgb" && bridge_log_has "scale: 512x512 -> 256x256"; then
+      echo "-- downscale planned from the stream's own caps (behind the fmt_tap seam) --"
+    else
+      echo "-- FAIL: no 'inserted bayer2rgb' / 'scale: 512x512 -> 256x256' lines (runtime plan behind the seam) --"
+      rc=1
+    fi
+  else
+    rc=1
+  fi
+  return "$rc"
+}
+
 FAILED=0
+echo
+echo "########## CHECK: the bayerbin element against known frames ##########"
+if docker run --rm -v "$REPO/plugins/webrtc-bridge:/app" --entrypoint bash "$WEBRTC_IMG" \
+    -c 'cd /app/tools && python3 check_bayerbin.py'; then
+  echo "-- check PASS --"
+else
+  echo "-- check FAIL (an image built before gst/gstbayerbin.c existed has no such element: rebuild it) --"
+  FAILED=1
+fi
 # One probe, two gates: unixfd needs a gst >= 1.24 core; the headered-shm endpoint only EXISTS on a
 # core without unixfdsink (unixfd replaces it at the same plugin endpoint when available).
 if docker run --rm --entrypoint bash "$CORE_IMG" -c 'gst-inspect-1.0 unixfdsink >/dev/null 2>&1'; then
@@ -221,21 +265,8 @@ if [ "$CORE_HAS_UNIXFD" = 0 ]; then
   fi
 
   # Color on the headered path: the wire carries the GRAY8 mosaic; CAM_BAYER relabels it
-  # video/x-bayer and the fmt_tap seam splices bayer2rgb. + the encode-side downscale BEHIND that
-  # seam (tap -> bayer2rgb -> fmt_scale): the plan must come from the stream's caps -- no geometry
-  # env on this path -- and land after the debayer.
-  if run_scenario "JP6 headered shm + color (Bayer relabel -> bayer2rgb) + CAM_WEBRTC_MAX_SIZE=256" \
-      config/webrtc-fake-bayer.yaml \
-      -e CAM_PLATFORM=jp6 -e CAM_BAYER=rggb -e CAM_WEBRTC_MAX_SIZE=256; then
-    if bridge_log_has "scale: 512x512 -> 256x256"; then
-      echo "-- downscale planned from the stream's own caps (behind the fmt_tap seam) --"
-    else
-      echo "-- FAIL: no 'scale: 512x512 -> 256x256' line (runtime plan behind the seam) --"
-      FAILED=1
-    fi
-  else
-    FAILED=1
-  fi
+  # video/x-bayer and the fmt_tap seam splices the debayer.
+  run_bayer_downscale "JP6 headered shm + color" -e CAM_PLATFORM=jp6 || FAILED=1
 else
   echo
   echo "########## SCENARIOS: JP6 headered shm -- SKIPPED ##########"
@@ -370,20 +401,7 @@ fi
 run_reaper_scenario || FAILED=1
 
 if [ "$CORE_HAS_UNIXFD" = 1 ]; then
-  # + the encode-side downscale BEHIND the runtime format seam (tap -> bayer2rgb -> fmt_scale):
-  # the plan must come from the stream's caps (no geometry env on this path).
-  if run_scenario "${CAM_TEST_PLATFORM:-jp7} unixfd + color (Bayer -> bayer2rgb) + CAM_WEBRTC_MAX_SIZE=256" \
-      config/webrtc-fake-bayer.yaml \
-      -e CAM_PLATFORM="${CAM_TEST_PLATFORM:-jp7}" -e CAM_BAYER=rggb -e CAM_WEBRTC_MAX_SIZE=256; then
-    if bridge_log_has "scale: 512x512 -> 256x256"; then
-      echo "-- downscale planned from the stream's own caps (behind the fmt_tap seam) --"
-    else
-      echo "-- FAIL: no 'scale: 512x512 -> 256x256' line (runtime plan behind the seam) --"
-      FAILED=1
-    fi
-  else
-    FAILED=1
-  fi
+  run_bayer_downscale "${CAM_TEST_PLATFORM:-jp7} unixfd + color" -e CAM_PLATFORM="${CAM_TEST_PLATFORM:-jp7}" || FAILED=1
 else
   echo
   echo "########## SCENARIO: JP7 unixfd + color -- SKIPPED ##########"

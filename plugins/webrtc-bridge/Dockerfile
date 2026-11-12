@@ -86,6 +86,12 @@ RUN cd /tmp/gst-rs \
     && cargo cinstall -p gst-plugin-rtp --prefix=/usr/local --libdir=/usr/local/lib \
     && cargo build --release --bin gst-webrtc-signalling-server \
     && install -m755 target/release/gst-webrtc-signalling-server /usr/local/bin/
+# bayerbin: the bridge's own element (one C file) -- a Bayer mosaic to half-resolution RGBx without a
+# full debayer, for previews that are scaled down anyway (gst/gstbayerbin.c, tools/format_adapt.py).
+# After the Rust layers, so editing it never rebuilds them. The loop is written to auto-vectorise.
+COPY plugins/webrtc-bridge/gst/gstbayerbin.c /tmp/gstbayerbin.c
+RUN gcc -O3 -fPIC -shared -Wall -Wextra -o /usr/local/lib/gstreamer-1.0/libgstbayerbin.so /tmp/gstbayerbin.c \
+      $(pkg-config --cflags --libs gstreamer-1.0 gstreamer-base-1.0)
 
 # ---- runtime: GStreamer + libnice ICE elements + the built plugin/binary (no Rust, no -dev) ----
 FROM ${BASE_IMAGE} AS distro

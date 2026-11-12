@@ -160,8 +160,10 @@ fi
 # even output dimensions. A `videoscale` sits right after the format seam -- BEFORE videoconvert, the
 # encoder, the normalize pump and the overlay -- so everything from there on runs at the reduced size.
 # videoconvert + a software x264enc at 5MP are what a full-res color preview burns CPU on, and both
-# scale with the pixel count; bayer2rgb (when present) is upstream and still runs at sensor
-# resolution. Preview-only: the recording and the ROS topic are untouched.
+# scale with the pixel count. The debayer is upstream: bayer2rgb at sensor resolution, or -- when the
+# bound is about half the sensor size or less -- `bayerbin`, one RGB pixel per 2x2 cell, which the
+# python launcher splices in at the seam instead (format_adapt.bin_plan; CAM_WEBRTC_DEBAYER=full
+# keeps bayer2rgb). Preview-only: the recording and the ROS topic are untouched.
 #   python launcher: the target is planned at RUNTIME from the caps the stream actually carries
 #     (a probe on fmt_scale's sink pad pins scale_caps -- bridge_stream.py _on_scale_caps +
 #     scale_plan.py), so it works on the self-describing transports where env holds no geometry,
