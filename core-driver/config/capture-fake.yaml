@@ -1,0 +1,32 @@
+# Test config: the frame-capture plugin (docs/CAPTURE.md) on the Aravis in-process "Fake" camera.
+# No hardware or network needed. The supervisor spawns the core and the plugin; captures land in
+# <recordings>/keyframes/ (with RIG_DATA_DIR + a run registry: <root>/runs/<id>/recordings/<instance>/keyframes).
+#
+# Run:  python3 supervisor.py -c config/capture-fake.yaml
+# Then: a get on fleet/<VEHICLE_ID>/svc/<CAM_INSTANCE>/capture/request (see docs/CAPTURE.md).
+camera:
+  type: gige
+  frame_rate: 25.0
+
+gige:
+  fake: true
+  camera_id: Fake_1
+  pixel_format: Mono8
+  timestamp_source: ptp_chunk    # falls back to 'camera' (host realtime) on the fake
+  ptp_enable: true
+
+recording:
+  enabled: false                 # the plugin does not need the recorder
+
+transport:
+  plugin_endpoint:
+    enabled: true
+    socket_path: /tmp/cam/frames
+
+plugins:
+  - name: frame-capture
+    isolation: process
+    params:
+      buffer_s: 2.0
+      quality: 90
+      sinks: [file]

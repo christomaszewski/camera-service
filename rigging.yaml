@@ -59,6 +59,12 @@ build:                                   # rig's BUILD phase: how to (re)build +
     dev: {architectures: [arm64, amd64], images: [cam-dev, ros2-bridge, webrtc-bridge]}
                                          #   (ros1-bridge is Noetic / jp6-class; built into the jp6 set.
                                          #    cam-dev is the `dev` set's core, replacing cam-core there)
+  variants:                              # what tools/build-images.sh actually builds per platform; rig certify
+                                         #   checks each platform's build against its own list
+    jp6: {images: [cam-core, ros2-bridge, ros1-bridge, webrtc-bridge]}
+    jp6m: {images: [cam-core, ros2-bridge, webrtc-bridge]}
+    jp7: {images: [cam-core, ros2-bridge, webrtc-bridge]}
+    dev: {images: [cam-dev, ros2-bridge, webrtc-bridge]}
 
 examples:                                # repo-relative example configs. [0] is special: `rig pkg add`
   #                                        seeds a bare (profile-less) instance's editable config from it,

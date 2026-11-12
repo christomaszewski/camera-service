@@ -82,6 +82,22 @@ shm both work.
 - **Host/deploy** — NIC MTU 9000 + `net.core.rmem_max`, `ptp4l`/`phc2sys` grandmaster (JP6 hosts:
   `default-runtime: nvidia`; JP7 uses CDI, no runtime change).
 
+## Future work (ideas, not scheduled)
+
+- **Map a GigE camera's clock to host time when PTP isn't available** (a new `timestamp_source`,
+  e.g. `latched`). Without a PTP lock, the chunk and leader timestamps come from a free-running
+  camera counter (typically counting from power-on), so the only absolute time is host arrival
+  (`system`). Arrival time is late by the transfer, about 40 ms for a 5 MP 8-bit frame on 1 GbE,
+  and it jitters. Instead, latch the camera counter periodically (SFNC `TimestampLatch` →
+  `TimestampLatchValue`; GigE Vision `GevTimestampControlLatch` → `GevTimestampValue`), reading
+  `CLOCK_REALTIME` just before and after. Pair the latched value with the midpoint and keep a
+  running offset and drift fit. Camera oscillators drift tens of ppm, so re-latch every few
+  seconds, and again after any reconnect, since the counter may reset. Stamp each frame as counter
+  plus offset. Precision is about half the register round trip (sub-ms to a few ms), which sits
+  between arrival time and PTP. Record the fit residual and the age of the last latch as
+  provenance, and fall back to `system` when latching fails. PTP stays the recommended setup;
+  this is for cameras or networks without it.
+
 ## How to resume (for a future session)
 
 1. Read [DESIGN.md](DESIGN.md) (architecture + decisions) and this file.
@@ -121,6 +137,15 @@ shm both work.
   Compose projects; shm shared as an external named volume + `ipc:host` (not pod-scoped). No generated
   compose. Podman/pods rejected (would wall off the shm). `service:` tag reserved for a future fleet launcher.
 - Zenoh kept as the future data-fabric transport (swappable in).
+- Triggered keyframe capture = an in-image `frame-capture` plugin (docs/CAPTURE.md), not core code:
+  a short buffer of transport frames, `fleet/<vehicle>/svc/<instance>/capture/request` picks the frame
+  nearest a UTC time and writes JPEG + GPS EXIF + JSON sidecar into the run (and, opt-in, the vehicle
+  store's `fleet/<vehicle>/store/<run>/**` keys). WHEN to capture (overlap, distance) is a separate
+  policy node's job. Frames are matched per frame by plausibility -- UTC, TAI, or (an unlocked GigE
+  counter) the plugin's receipt time -- because neither endpoint carries the PTP lock state.
+- Captures are photogrammetry inputs (Pix4D): EXIF camera identity + focal tags from config, Pix4D's
+  XMP `Camera:` namespace for orientation/accuracy/band, and a 16-bit single-band TIFF that keeps
+  thermal values unscaled (JPEG stays 8-bit; R-JPEG is FLIR-proprietary and not produced).
 - Lifecycle = `inactive`/`active` (ROS-lifecycle naming); the recorder is a per-SESSION `Gst.Pipeline`
   (private appsrc, own prefix/sidecar, delta drop counters; process PTS base untouched; H.26x sessions
   gate on a keyframe) — never a removable tee bin. Synchronous bounded finalize inside the stop budget.

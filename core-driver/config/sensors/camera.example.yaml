@@ -194,3 +194,25 @@ plugins:
   #   params:
   #     topic: image_raw
   #     # frame_id: my_frame
+
+  # - name: frame-capture  # JPEG (+ GPS EXIF + JSON sidecar) of the frame nearest a requested time, on a
+  #   enabled: true        #   trigger over zenoh at fleet/<vehicle>/svc/<instance>/capture/request
+  #   isolation: process   #   (docs/CAPTURE.md). Runs in this image beside the core; no extra container.
+  #   params:
+  #     buffer_s: 2.0          # recent video kept to choose from (also capped by buffer_max_mb: 256)
+  #     # buffer_fps: 10       # keep at most N frames/s (dropped before the copy: less CPU + memory)
+  #     # tolerance_ms: 40     # nearest frame must be within this; default = one frame interval
+  #     # wait_ms: 250         # how long a trigger may wait for its frame to come through
+  #     # quality: 90          # JPEG quality; max_width: 0 = full size (else downscale to this width)
+  #     # jpeg_encoder: auto   # auto = Jetson hardware nvjpegenc when it works, else CPU jpegenc | hw | cpu
+  #     # formats: [jpeg]      # jpeg | tiff (16-bit radiometric, unscaled) -- thermal: [tiff] or [jpeg, tiff]
+  #     # camera_make: FLIR    # EXIF Make/Model/FocalLength + pixel pitch: photogrammetry tools (Pix4D)
+  #     # camera_model: Boson 640   #   build their camera model from these (docs/CAPTURE.md "Pix4Dmapper")
+  #     # focal_length_mm: 9.1
+  #     # pixel_pitch_um: 12.0
+  #     # mono16: stretch      # 16-bit -> JPEG: stretch (per frame) | fixed (+ mono16_range: [lo, hi]) | shift
+  #     # time_basis: auto     # auto | capture | arrival -- see docs/CAPTURE.md "Time"
+  #     # time_scale: auto     # auto | utc | tai -- what PTP-sourced stamps are
+  #     sinks: [file]          # file = <recordings>/keyframes/ in the run; zenoh = put to the vehicle store
+  #     # file_root: store     # write into the run's store/<instance>/keyframes/ instead, which rig-infra's
+  #     #                      #   zenoh-store serves to the ground (no zenoh sink needed on the same disk)
