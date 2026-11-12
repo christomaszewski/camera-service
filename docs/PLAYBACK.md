@@ -154,8 +154,9 @@ Proxy playback exposes profile/lossiness and original-file lineage in the playba
 descriptor's `proxy` field; re-recorded sidecars retain it as `replay_proxies`.
 
 Raw-frame recordings can change encoder (for example FFV1 → H.264 → FFV1), quality, preset,
-keyframe interval, segment duration, and Bayer tiling between sessions. Replay probes each session's
-MKV codec and uses that session's sidecar to restore the consumer format and undo its tiling.
+keyframe interval, segment duration, Bayer tiling and the 16-bit split between sessions. Replay probes
+each session's MKV codec and uses that session's sidecar to restore the consumer format and undo its
+tiling or join its split 16-bit frames (`gray16_split_mode`).
 Frame IDs and timestamps still come from the matching CSV. Lossy H.264 replays the stored,
 approximate image; it cannot recover pixels discarded during compression. Source pixel format,
 dimensions and Bayer pattern must stay consistent across sessions.
@@ -195,7 +196,8 @@ On GStreamer 1.28+, replay offers the raw decoder/converter a reusable shared-me
 resulting FD-backed buffers pass through unixfd without another pixel copy. If upstream declines
 the allocator, unixfdsink copies into its native pool. Older unixfd versions retain the explicit
 memfd copy, after the publication rate/queue checks. Feature detection selects these paths.
-CFA un-tiling uses the byte path; recording-side CFA tiling materializes bytes only for that transform.
+CFA un-tiling and the 16-bit join use the byte path; recording-side CFA tiling and the 16-bit split
+materialize bytes only for that transform.
 Live GigE/USB/RTSP and pcap sources retain their existing byte callback interface.
 
 When neither local preview nor the raw endpoint is enabled, replay leaves the main appsrc idle;

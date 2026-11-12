@@ -15,7 +15,8 @@ The consumer format stays constant; raw recordings can change codec and tiling p
 
   RAW runs (ffv1 / hw-hevc-lossless / x265-lossless, or opt-in lossy x264):
       filesrc ! matroskademux ! decoder ! videoconvert ! <header format> ! rawsink -> on_frame
-    Decoded back to the source format (exact pixels only for lossless recordings); a CFA-tiled
+    Decoded back to the source format (exact pixels only for lossless recordings); a 16-bit
+    recording stored as its split 8-bit frame is joined again (gray16_split.join) and a CFA-tiled
     recording is un-tiled per frame (bayer_tile.untile_cfa, the exact inverse) so
     consumers see the original mosaic.
 
@@ -50,7 +51,7 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import GLib, Gst
 
-from .. import playback
+from .. import gray16_split, playback
 from ..bayer_tile import normalize_mode, untile_cfa
 from ..formats import (FFV1_DECODER, LUMA_COLORIMETRY, encoded_info, parse_pixel_format,
                        select_decoder)
@@ -186,7 +187,9 @@ class ReplaySource(GstPipelineSource):
         self._failed = False
         self._mkv_caps = None
         self._enc = None            # (caps, parser, decoder) for a stream-copy run
-        self._untile = None         # frame-bytes transform for CFA-tiled runs
+        self._untile = None         # frame-bytes transform back to the source frame: un-tiling a CFA-tiled
+        #                             run, or joining a 16-bit run stored as its split 8-bit frame
+        self._stored_shape = None   # (gst format, width) the video track holds when that differs (split)
         self._gen = 0               # reader generation: a stale halt/EOS must not touch a new reader
         self._reader_bus = None
         self._epoch_cfg = None      # the CONFIGURED epoch (None = the run's own first frame)
@@ -304,6 +307,11 @@ class ReplaySource(GstPipelineSource):
                 if codec not in _RAW_DECODE:
                     raise ValueError(f"replay: unsupported recorded codec {codec!r} in {run.mkv_paths[0]}")
                 raw_decode_chain(codec, run.header)        # reject an unknown colorimetry up front
+                if gray16_split.stored_mode(run.header.get("gray16_split_mode")) != "off" and not (
+                        gray16_split.geometry_ok(int(run.header["width"]), int(run.header["height"]))
+                        and self._container_format(run.header) in ("GRAY16_LE", "GRAY16_BE")):
+                    raise ValueError(f"replay: {run.base} declares a 16-bit split on a frame that cannot "
+                                     "have been stored that way")
                 note = legacy_luma_note(run.header)
                 if note:
                     log.warning("replay: %s: %s", run.base, note)
@@ -327,9 +335,19 @@ class ReplaySource(GstPipelineSource):
         self._mkv_caps = self._session_caps[idx]
         # Reset even when the next session is untiled (e.g. a switch to lossy H.264).
         self._untile = None
+        self._stored_shape = None
         hdr = self._run.header
         tile_mode = normalize_mode(hdr.get("cfa_tile_mode", "off"))
-        if tile_mode != "off" and self._enc is None:
+        split_mode = gray16_split.stored_mode(hdr.get("gray16_split_mode"))
+        if split_mode != "off" and self._enc is None:
+            # The track holds high|low bytes side by side in 8 bits; consumers get the 16-bit frame.
+            w, h = int(hdr["width"]), int(hdr["height"])
+            big = self._container_format(hdr) == "GRAY16_BE"
+            self._untile = lambda b: gray16_split.join(b, w, h, big)
+            self._stored_shape = ("GRAY8", 2 * w)
+            log.info("replay: session %s stores 16-bit frames split (%s) -- joining to the original frame",
+                     self._run.base, split_mode)
+        elif tile_mode != "off" and self._enc is None:
             w, h = int(hdr["width"]), int(hdr["height"])
             pattern = hdr.get("bayer_pattern") or "rggb"
             self._untile = lambda b: untile_cfa(b, w, h, mode=tile_mode, pattern=pattern)
@@ -521,6 +539,8 @@ class ReplaySource(GstPipelineSource):
                 f"st. ! queue ! appsink name=encsink emit-signals=true max-buffers=8 drop=false sync=false"
             )
         gst_format = self._container_format(hdr)
+        if self._stored_shape is not None:
+            gst_format, w = self._stored_shape       # what the track holds; _untile restores the frame
         return (f"{src} ! {raw_decode_chain(self._mkv_caps, hdr)} ! videoconvert n-threads=2 ! "
                 f"video/x-raw,format={gst_format},width={w},height={h} ! {raw_sink}")
 

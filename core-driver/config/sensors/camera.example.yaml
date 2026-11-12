@@ -90,6 +90,8 @@ recording:
   # bframes: 0             # B-frames between references (HW support is Xavier-only on Tegra = no-op on Orin)
   # nvenc_preset: ""       # NVENC search depth ultrafast|fast|medium|slow — must still hold real-time fps
   # nvenc_maxperf: true    # high GPU clocks for encoder throughput
+  # gray16_split: fold     # 16-bit cams: store through the 8-bit hardware lossless encoder (bytes split side
+  #                          by side; exact; ~1/6 the CPU of FFV1). off | fold. Sidecar flags it; replay joins
   # nvenc_feed: auto       # 8-bit mono/Bayer on the hardware encoder: auto | nv12 | videoconvert. auto feeds
   #                          NV12 (half the recorder's CPU) once a start-up probe proves it bit-exact here
   # videoconvert_threads: 4  # threads for a real colour conversion before the encoder (x264, colour); 0 = all

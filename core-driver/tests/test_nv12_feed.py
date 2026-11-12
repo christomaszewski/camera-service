@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import gi
@@ -184,8 +185,8 @@ def test_session_pipeline_takes_nv12_caps_and_the_larger_frame():
         assert f'caps="{rec.nv12_feed_caps(W, H, "25/1")}"' in desc
         assert f"max-bytes={32 * (W * H * 3 // 2)} " in desc
         # a candidate plan is dry-run with ITS feed, not the installed one
-        assert "format=GRAY8" in p._session_desc("fakesink", "videoconvert")
-        assert "format=NV12" in p._session_desc("fakesink", "nv12")
+        assert "format=GRAY8" in p._session_desc("fakesink", SimpleNamespace(feed="videoconvert", split_mode="off"))
+        assert "format=NV12" in p._session_desc("fakesink", SimpleNamespace(feed="nv12", split_mode="off"))
 
 
 # ---- the buffer, through a real session ------------------------------------------------------------

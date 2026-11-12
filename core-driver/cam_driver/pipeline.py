@@ -53,6 +53,7 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import GLib, Gst
 
+from . import gray16_split
 from . import recorder as rec
 from . import transport
 from . import recording_settings as settings
@@ -72,7 +73,6 @@ log = logging.getLogger(__name__)
 # enforce its own bound -- past max-bytes it keeps queueing and push-buffer still returns OK -- so
 # the feeder checks the fill level before each push (_queue_full) and drops WITH accounting,
 # instead of growing RAM at sensor bandwidth until the OOM killer takes the recording with it.
-_INSTALLED = object()     # _session_desc: "the installed recording plan", as opposed to a candidate's
 _REC_QUEUE_FRAMES = 32   # the recording session's appsrc (+ camsrc): ride out brief stalls before dropping
 _PUB_QUEUE_FRAMES = 8    # best-effort publish feeds (transport/unixfd): drop early, stay lean
 
@@ -202,6 +202,11 @@ class CapturePipeline:
         self._rec_feed = None
         self._rec_chroma = None
         self._rec_caps = None                       # None = the recorder appsrc takes the source's caps
+        # A 16-bit source stored through the 8-bit recorder (gray16_split): the mode for the sidecar, the
+        # frame transform, and the size of the 8-bit frame the recorder is fed (None = the source's).
+        self._split_mode = "off"
+        self._splitter = None
+        self._rec_frame_bytes = None
         self._nv12_probe = rec.probe_nv12_feed      # swapped for a stub by the unit tests (it runs the encoder)
         self._chroma_blocks = {}                    # (width, height) -> recorder.ChromaBlock, built once
         self._settings_generation = uuid.uuid4().hex
@@ -778,9 +783,17 @@ class CapturePipeline:
         """Push one frame into the open session (CFA-tiled when configured). DROPPED = the recording
         feed could not take it: counted as an enqueue failure, the recording's own loss counter.
         SKIPPED (closing / waiting for a sync point) is not a loss and is not counted here."""
-        tiler = getattr(sess, "recording_tiler", self._tiler)
+        tiler = getattr(sess, "recording_tiler", self._splitter or self._tiler)
         if tiler is not None:
-            payload = tiler(bytes(payload) if isinstance(payload, GstFrame) else payload)
+            try:
+                payload = tiler(bytes(payload) if isinstance(payload, GstFrame) else payload)
+            except Exception as e:   # noqa: BLE001 -- a frame the transform cannot take (wrong size)
+                # is a recording loss, never a reason to take the capture thread and the transport down
+                n = self._note_push_drop(publish=False)
+                if n % 100 == 1:
+                    log.error("recording transform refused a frame (session %d): %s; dropped %d so far",
+                              getattr(sess, "index", 0), e, n)
+                return False
         r = sess.push(payload, pts, stamp, caps_str)
         if r is PushResult.DROPPED:
             n = self._note_push_drop(publish=False)
@@ -822,6 +835,7 @@ class CapturePipeline:
             recording_lossy=(enc == "x264") if enc not in (None, "", "stream-copy") else None,
             recording_colorimetry=rec.luma_colorimetry(enc, self._is_color),
             recording_feed=getattr(sess, "recording_feed", self._rec_feed),
+            gray16_split_mode=getattr(sess, "gray16_split_mode", self._split_mode),
             recording_settings=x264_settings(cfg) if enc == "x264" else None,
             recording_settings_file=getattr(sess, "settings_path", None),
         )
@@ -844,14 +858,57 @@ class CapturePipeline:
             return "nv12"
         return "nv12" if self._nv12_probe(width, height, cfg) else "videoconvert"
 
-    def _describe_recorder(self, cfg, loc: str, feed):
-        """(fragment, resolved encoder) for the recorder as planned: `feed` is _luma_feed's answer."""
+    def _describe_recorder(self, cfg, loc: str, feed, split: bool = False):
+        """(fragment, resolved encoder) for the recorder as planned: `feed` is _luma_feed's answer, and
+        with `split` the recorder is described for the 8-bit frame a 16-bit source is stored as."""
         extra = {"luma_feed": "nv12"} if feed == "nv12" else {}
-        return self._recorder_desc(cfg, self._bits, loc, self._fps, self._is_color, self._enc_parser, **extra)
+        bits, color = (8, False) if split else (self._bits, self._is_color)
+        return self._recorder_desc(cfg, bits, loc, self._fps, color, self._enc_parser, **extra)
+
+    def _split_plan(self, cfg, loc: str):
+        """Can this 16-bit source be stored through the 8-bit lossless recorder (gray16_split)? Returns
+        (fragment, encoder, feed) or None, in which case the 16-bit frame is recorded as it always was.
+
+        The split only ever sits in front of a lossless 8-bit encoder, where one wrong code in the high
+        half would be 256 counts: the hardware encoder behind the NV12 feed (proven bit-exact on this
+        host at the split geometry, or asked for outright), or x265-lossless when that is the encoder
+        configured. `auto` never picks a CPU encoder for it: without the hardware it stays FFV1."""
+        if (self._bits <= 8 or self._gst_format not in ("GRAY16_LE", "GRAY16_BE")
+                or self._is_color or self._enc_parser):
+            return None                      # the knob is about 16-bit mono/Bayer frames; nothing to say
+        if not gray16_split.geometry_ok(self._width, self._height):
+            log.warning("recorder: gray16_split needs even width and height (%dx%d); recording the 16-bit "
+                        "frame unsplit", self._width, self._height)
+            return None
+        desc, enc = self._describe_recorder(cfg, loc, None, split=True)
+        if enc == "x265-lossless":
+            return desc, enc, None
+        if enc != "hw-hevc-lossless":
+            log.info("recorder: gray16_split needs an 8-bit lossless encoder (hw-hevc-lossless, or an "
+                     "explicit x265-lossless); %r resolves to %s here, so the 16-bit frame is recorded "
+                     "unsplit", cfg.encoder, enc)
+            return None
+        feed = self._luma_feed(cfg, enc, 2 * self._width, self._height)
+        if feed != "nv12":
+            log.warning("recorder: gray16_split is only used behind the NV12 feed, and that is %s on this "
+                        "host; recording the 16-bit frame unsplit",
+                        "switched off (recording.nvenc_feed)" if rec.normalize_feed(
+                            getattr(cfg, "nvenc_feed", "auto")) == "videoconvert" else "not proven bit-exact")
+            return None
+        desc, enc = self._describe_recorder(cfg, loc, feed, split=True)
+        return desc, enc, feed
 
     def _recording_plan(self, cfg):
         """Resolve a candidate without changing the live source or consumer pipelines."""
         loc = f"{cfg.output_dir.rstrip('/')}/{cfg.name_prefix}"
+        split_mode = gray16_split.normalize_mode(getattr(cfg, "gray16_split", "off"))
+        split = self._split_plan(cfg, loc) if split_mode != "off" else None
+        if split is not None:
+            desc, enc, feed = split
+            width, height, big = self._width, self._height, self._gst_format == "GRAY16_BE"
+            return SimpleNamespace(desc=desc, encoder=enc, tile_mode="off", tiler=None, feed=feed,
+                                   split_mode=split_mode,
+                                   splitter=lambda b: gray16_split.split(b, width, height, big))
         desc, enc = self._describe_recorder(cfg, loc, None)
         if enc == "x264" and (self._width % 2 or self._height % 2):
             raise ValueError("recording.encoder=x264 requires even width and height for 4:2:0; use ffv1 for this geometry")
@@ -869,26 +926,34 @@ class CapturePipeline:
                 tiler = lambda b: bayer_tile.tile_cfa(b, width, height, mode, pattern)
         if self._bayer and enc == "x264":
             log.warning("recorder: lossy H.264 records an approximate Bayer mosaic; CFA tiling is disabled")
-        return SimpleNamespace(desc=desc, encoder=enc, tile_mode=mode, tiler=tiler, feed=feed)
+        return SimpleNamespace(desc=desc, encoder=enc, tile_mode=mode, tiler=tiler, feed=feed,
+                               split_mode="off", splitter=None)
 
-    def _feed_shape(self, feed):
-        """(recorder appsrc caps or None for the source's, bytes per pushed frame, chroma block or None)."""
-        if feed != "nv12":
-            return None, self._image_size, None
-        key = (self._width, self._height)
-        chroma = self._chroma_blocks.get(key)
-        if chroma is None:
-            chroma = self._chroma_blocks[key] = rec.ChromaBlock(*key)
+    def _feed_shape(self, plan):
+        """What the recorder appsrc is fed under `plan`: (caps, or None for the source's; bytes of the
+        frame the feeder pushes, before any chroma; the chroma block, or None)."""
+        split = getattr(plan, "split_mode", "off") != "off"
+        width = 2 * self._width if split else self._width
+        frame_bytes = width * self._height if split else self._image_size
         framerate = self._raw_caps.rsplit("framerate=", 1)[-1] if "framerate=" in self._raw_caps else "0/1"
-        return (rec.nv12_feed_caps(self._width, self._height, framerate),
-                self._image_size + chroma.size, chroma)
+        if getattr(plan, "feed", None) == "nv12":
+            key = (width, self._height)
+            chroma = self._chroma_blocks.get(key)
+            if chroma is None:
+                chroma = self._chroma_blocks[key] = rec.ChromaBlock(*key)
+            return rec.nv12_feed_caps(width, self._height, framerate), frame_bytes, chroma
+        if split:
+            return (f"video/x-raw,format=GRAY8,width={width},height={self._height},framerate={framerate}",
+                    frame_bytes, None)
+        return None, frame_bytes, None
 
     def _install_recording_plan(self, cfg, plan):
         desc, enc, mode, tiler = plan.desc, plan.encoder, plan.tile_mode, plan.tiler
         self.cfg.recording = cfg
         self._rec_enc, self._tile_mode, self._tiler = enc, mode, tiler
         self._rec_feed = plan.feed
-        self._rec_caps, _size, self._rec_chroma = self._feed_shape(plan.feed)
+        self._split_mode, self._splitter = plan.split_mode, plan.splitter
+        self._rec_caps, self._rec_frame_bytes, self._rec_chroma = self._feed_shape(plan)
         self._stream_copy = enc == "stream-copy"
         self._session_desc_probe = self._session_desc(desc)
         # Publish a complete immutable view in one assignment for Zenoh's reader thread.
@@ -911,7 +976,7 @@ class CapturePipeline:
             "generation": self._settings_generation, "revision": self._settings_revision,
             "requested": requested,
             "resolved": {"encoder": enc, "lossy": None if enc == "stream-copy" else enc == "x264",
-                         "bayer_tile": mode, "nvenc_feed": plan.feed,
+                         "bayer_tile": mode, "nvenc_feed": plan.feed, "gray16_split": plan.split_mode,
                          "x264": rec.x264_settings(cfg) if enc == "x264" else None},
             "encoders": encoders,
             "source_mode_fixed": bool(self._enc_parser),
@@ -945,29 +1010,30 @@ class CapturePipeline:
         if (plan.encoder == "stream-copy") != self._stream_copy:
             raise ValueError("switching between source-copy and re-encoding requires a service restart")
         # Parse/link in NULL before committing; this neither opens a file nor touches live ingest.
-        probe = Gst.parse_launch(self._session_desc(plan.desc, plan.feed))
+        probe = Gst.parse_launch(self._session_desc(plan.desc, plan))
         probe.set_state(Gst.State.NULL)
         if (settings.requested(cfg) == settings.requested(self.cfg.recording)
                 and plan.encoder == self._rec_enc and plan.tile_mode == self._tile_mode
-                and plan.feed == self._rec_feed):
+                and plan.feed == self._rec_feed and plan.split_mode == self._split_mode):
             return {"ok": True, "noop": True}
         self._settings_revision += 1
         self._install_recording_plan(cfg, plan)
         return {"ok": True}
 
     # ---- recording sessions (lifecycle activate / deactivate) ---------------
-    def _session_desc(self, rec_desc: str, feed=_INSTALLED) -> str:
+    def _session_desc(self, rec_desc: str, plan=None) -> str:
         """The per-session pipeline: one private appsrc -> the recorder fragment. Raw and CFA-tiled
         share a description (tiling changes bytes, not caps); stream-copy carries the encoded caps; a
-        recorder fed NV12 carries those caps and the larger frame. `feed` is a CANDIDATE plan's
-        (configure_recording dry-runs one before installing it); left out, the installed plan's.
+        recorder fed NV12, or a 16-bit source stored as its split 8-bit frame, carries those caps and
+        that frame size. `plan` is a CANDIDATE (configure_recording dry-runs one before installing
+        it); left out, the installed plan.
         max-bytes uses the RAW frame size for stream-copy too: encoded frames are (much) smaller, so
         the bound is roomy in frames while still hard-capping memory."""
-        if feed is _INSTALLED:
-            feed_caps, frame_bytes = self._rec_caps, self._image_size + (
-                self._rec_chroma.size if self._rec_chroma is not None else 0)
+        if plan is None:
+            feed_caps, frame_bytes, chroma = self._rec_caps, self._rec_frame_bytes or self._image_size, self._rec_chroma
         else:
-            feed_caps, frame_bytes, _chroma = self._feed_shape(feed)
+            feed_caps, frame_bytes, chroma = self._feed_shape(plan)
+        frame_bytes += chroma.size if chroma is not None else 0
         src_caps = self.source.encoded_caps if self._stream_copy else (feed_caps or self._raw_caps)
         # block=true for a FINITE (playback) source -- see _feed_appsrc_props: a batch reprocess must
         # wait for the encoder, not drop. The recorder's appsrc moved from the main pipeline into
@@ -990,17 +1056,19 @@ class CapturePipeline:
             out_dir = cfg.output_dir
             prefix = unique_run_prefix(out_dir, cfg.name_prefix + (f"-{run_id}" if run_id else ""))
             loc = f"{out_dir.rstrip('/')}/{prefix}"
-            rec_desc, enc = self._describe_recorder(cfg, loc, self._rec_feed)
+            rec_desc, enc = self._describe_recorder(cfg, loc, self._rec_feed, split=self._split_mode != "off")
             if self._rec_enc is not None and enc != self._rec_enc:
                 raise RuntimeError("resolved encoder changed; review recording settings again")
             sess = self._session_factory(self._session_seq, prefix, out_dir, self._session_desc(rec_desc),
                                          header_factory=self._session_header, encoded=self._stream_copy,
                                          on_error=self._on_session_error, on_fragment=self._on_session_fragment)
             sess.recording_config, sess.recording_encoder = cfg, enc
-            sess.recording_tile_mode, sess.recording_tiler = self._tile_mode, self._tiler
-            sess.recording_feed = self._rec_feed
+            # the one per-frame transform of this session: CFA tiling (8-bit Bayer) or the 16-bit split
+            sess.recording_tile_mode, sess.recording_tiler = self._tile_mode, self._splitter or self._tiler
+            sess.recording_feed, sess.gray16_split_mode = self._rec_feed, self._split_mode
             if self._rec_chroma is not None:
-                sess.feed_tail, sess.feed_luma_bytes = self._rec_chroma, self._image_size
+                sess.feed_tail = self._rec_chroma
+                sess.feed_luma_bytes = self._rec_frame_bytes or self._image_size
             sess.settings_path = loc + ".recording-settings.json"
             snapshot = {"schema_version": 1, "created_unix_s": time.time(),
                         "session_index": sess.index, "session_prefix": prefix, "run_id": run_id,

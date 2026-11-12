@@ -253,6 +253,16 @@ class RecordingConfig:
     #   nv12         the same without the probe
     #   videoconvert GRAY8 -> videoconvert -> NV24, the feed of every earlier release
     nvenc_feed: str = "auto"
+    # Store a 16-bit mono/Bayer source through the 8-bit lossless recorder: each sample split into its
+    # two bytes, side by side in one 8-bit frame twice as wide (cam_driver.gray16_split). On a Jetson
+    # that moves a 16-bit recording from FFV1 on the CPU (three cores for 640x512 at 60 fps) to the
+    # hardware encoder at about a seventh of the CPU, for a file a few points larger. Recorder-only:
+    # transport and preview keep the 16-bit frame, and the sidecar's gray16_split_mode has replay and
+    # export join it again -- which needs a build that knows the field, so it is opt-in.
+    #   off | fold
+    # Used with the hardware encoder behind a proven NV12 feed (see nvenc_feed), or with an explicit
+    # encoder: x265-lossless; otherwise the 16-bit frame is recorded as before.
+    gray16_split: str = "off"
     # Threads for a REAL colour conversion in front of the encoder (x264 from a mono or colour source,
     # colour into x265): spreads it over cores so the recorder keeps real time. 0 = all cores. The copy
     # of a mono/Bayer plane into its full-range container (hw-hevc / x265 lossless) always uses one:

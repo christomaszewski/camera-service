@@ -291,6 +291,16 @@ range, and the recording's range lives in the sidecar (`recording_colorimetry`),
 For raw Bayer recorded as gray, debayer using `bayer_pattern` from the JSON header after extraction.
 The JSON header records `bits_per_pixel`, so pick `gray8` vs `gray16le` from it.
 
+Two header fields say the track holds the frame in a rearranged form, and replay and export undo both
+for you: `cfa_tile_mode` (8-bit Bayer, `cam_driver.bayer_tile.untile_cfa`) and `gray16_split_mode`
+(16-bit stored through the 8-bit encoder). By hand, a `fold` recording is the 8-bit HEVC line above —
+which yields frames of `2 × width` by `height` — followed by:
+
+```python
+from cam_driver import gray16_split      # stored: high bytes | low bytes, side by side
+frame16 = gray16_split.join(stored_frame, width, height, big_endian=(pixel_format == "GRAY16_BE"))
+```
+
 ## Transport endpoints (for plugins)
 
 The core publishes frames to same-host consumers on a per-sensor **`plugin_endpoint`**, whose

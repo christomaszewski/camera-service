@@ -51,7 +51,9 @@ stored timeline consequently differs from the CSV by more than the allowed fixed
 offset and one-millisecond tolerance are rejected. Export does not widen that
 tolerance to conceal encoder retiming or accumulated drift.
 
-Eight-bit mono, Bayer and supported RGB/YUV formats are accepted. Bayer recordings,
+Eight-bit mono, Bayer and supported RGB/YUV formats are accepted. A 16-bit recording stored through
+the 8-bit encoder (`gray16_split_mode`) is joined back to its 16-bit frames first, so it exports
+exactly as an FFV1 one does. Bayer recordings,
 including FFV1 MKVs, are decoded, restored from any lossless CFA storage tiling, and
 debayered with GStreamer's `bayer2rgb` before H.264 encoding. All four Bayer patterns
 are supported. The proxy is ordinary color video: its header declares `I420` with

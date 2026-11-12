@@ -155,6 +155,9 @@ def preflight(request, profile_root):
                     raise ValueError(f"unknown CFA storage tiling: {tile}")
                 if tile not in ("off", False, None) and (fmt != "GRAY8" or not (bayer or hdr.get("bayer_pattern"))):
                     raise ValueError("CFA tiling requires an 8-bit Bayer recording")
+                from . import gray16_split
+                if gray16_split.stored_mode(hdr.get("gray16_split_mode")) != "off" and not gray16:
+                    raise ValueError("a 16-bit split requires a 16-bit recording")
                 _, rows, stamps = _rows(run)
                 files = [run.base + ".json", run.csv_path, *run.mkv_paths]
                 paths = []
@@ -205,16 +208,21 @@ def _decode(run):
     cannot validate the original CSV. The Matroska parts retain continuous PTS.
     """
     from .sources.replay import _check_glob_hazards, _probe_mkv, _RAW_DECODE, raw_decode_chain
+    from . import gray16_split
     Gst = _gst()
     _check_glob_hazards(run)
     fmt = parse_pixel_format(run.header["pixel_format"])[0]
+    width, height = int(run.header["width"]), int(run.header["height"])
+    # A 16-bit recording stored as its split 8-bit frame: decode what the track holds, hand on the frame.
+    split = gray16_split.stored_mode(run.header.get("gray16_split_mode")) != "off"
+    stored_fmt, stored_width = ("GRAY8", 2 * width) if split else (fmt, width)
     for part in run.mkv_paths:
         codec = _probe_mkv(part)
         if codec not in _RAW_DECODE:
             raise ValueError(f"unsupported/unreadable recording codec {codec}: {part}")
         pipeline = Gst.parse_launch(
             f'filesrc location="{part}" ! matroskademux ! {raw_decode_chain(codec, run.header)} ! videoconvert n-threads=2 ! '
-            f'video/x-raw,format={fmt},width={int(run.header["width"])},height={int(run.header["height"])} ! '
+            f'video/x-raw,format={stored_fmt},width={stored_width},height={height} ! '
             'appsink name=sink sync=false max-buffers=4 drop=false')
         sink, bus = pipeline.get_by_name("sink"), pipeline.get_bus()
         pipeline.set_state(Gst.State.PLAYING)
@@ -222,7 +230,7 @@ def _decode(run):
             while True:
                 sample = sink.emit("try-pull-sample", 30 * Gst.SECOND)
                 if sample is not None:
-                    yield sample
+                    yield _join_sample(sample, fmt, width, height) if split else sample
                     continue
                 msg = bus.timed_pop_filtered(Gst.SECOND, Gst.MessageType.ERROR | Gst.MessageType.EOS)
                 if msg is not None and msg.type == Gst.MessageType.EOS:
@@ -233,6 +241,22 @@ def _decode(run):
                 raise ValueError(f"recording decode timed out: {part}")
         finally:
             pipeline.set_state(Gst.State.NULL)
+
+
+def _join_sample(sample, fmt, width, height):
+    """The 16-bit sample a split recording stands for: the same timing, the joined frame, its caps."""
+    from . import gray16_split
+    Gst = _gst()
+    stored = sample.get_buffer()
+    frame = gray16_split.join(stored.extract_dup(0, 2 * width * height), width, height, fmt == "GRAY16_BE")
+    buf = Gst.Buffer.new_wrapped(frame)
+    buf.pts, buf.dts, buf.duration, buf.offset = stored.pts, stored.dts, stored.duration, stored.offset
+    structure = sample.get_caps().get_structure(0).copy()
+    structure.set_value("format", fmt)
+    structure.set_value("width", width)
+    caps = Gst.Caps.new_empty()
+    caps.append_structure(structure)
+    return Gst.Sample.new(buf, caps, sample.get_segment(), None)
 
 
 def _check_frame_pts(sample, expected, offset, context):
@@ -428,7 +452,8 @@ def convert(request, profile_root):
             header.update({"recording_encoder": "x264", "recording_lossy": True, "recording_colorimetry": None,
                            "bayer_pattern": header.get("bayer_pattern") or parse_pixel_format(header["pixel_format"])[2],
                            "recording_settings": definition["encoding"], "recording_settings_file": None,
-                           "cfa_tile_mode": "off", "pts_offset_ns": 0,
+                           "cfa_tile_mode": "off", "gray16_split_mode": "off", "recording_feed": None,
+                           "pts_offset_ns": 0,
                            "first_pts_ns": int(rows[0]["pts_ns"]),
                            "first_timestamp_ns": stamps[0].timestamp_ns,
                            "first_frame_id": stamps[0].frame_id, "session_prefix": prefix,

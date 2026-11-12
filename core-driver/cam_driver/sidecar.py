@@ -80,6 +80,12 @@ class SidecarHeader:
     # are the same; this is provenance, kept so a recording can be traced to the path that made it.
     # None for every other encoder and for recordings made before the field existed.
     recording_feed: Optional[str] = None
+    # How a 16-bit frame is stored: off = as it is; fold = split into high and low bytes side by side
+    # in an 8-bit frame of 2*width x height (cam_driver.gray16_split), which is what the video track
+    # then holds while width / pixel_format / bits_per_pixel above keep describing the SOURCE frame.
+    # Anything but 'off' means a reader must join the halves: gray16_split.join(frame, width, height,
+    # big_endian = pixel_format is GRAY16_BE).
+    gray16_split_mode: str = "off"
     recording_settings: Optional[dict] = None
     recording_settings_file: Optional[str] = None
 

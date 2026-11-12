@@ -43,7 +43,13 @@ recording:
   enabled: true
   encoder: auto            # GRAY16 (>8-bit) -> FFV1: truly lossless + bit-exact, INTRA-only (no NVENC
   #                          for >8-bit, and x265 would truncate the container -> auto picks FFV1).
-  #                          FFV1 is threaded (slices) so it sustains 60fps 16-bit on an Orin core.
+  #                          FFV1 is threaded (slices) so it sustains 60fps 16-bit -- at about three
+  #                          cores of an Orin for this camera.
+  # gray16_split: fold     # store the 16-bit frame through the HARDWARE lossless encoder instead: bytes
+  #                          split side by side, exact, about a sixth of the CPU, a few points more disk.
+  #                          Used only once the core has proven the path bit-exact on this host; replay
+  #                          and export need a build that knows the sidecar's gray16_split_mode.
+  #                          docs/recording-tuning.md "16-bit on the hardware encoder".
   # output_dir: unset = the managed layout (<data root>[/runs/<id>]/recordings/<instance>);
   #   relative = a subdir under that root replacing <instance>; absolute = a verbatim pin.
   name_prefix: cam_thermal # -> cam_thermal-<UTCstamp>-00000.mkv + .csv/.json (run-stamped; restarts

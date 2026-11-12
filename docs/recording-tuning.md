@@ -167,7 +167,8 @@ camera, the options below can shrink files while retaining exact pixels. They ar
 transport, preview and raw endpoints continue to see the original mosaic.
 
 > **>8-bit / 16-bit (e.g. thermal Y16) cameras** take the **FFV1** path instead — see
-> [the FFV1 section below](#ffv1-path-for-16-bit-and-thermal-cameras). The Bayer-tiling and
+> [the FFV1 section below](#ffv1-path-for-16-bit-and-thermal-cameras) — unless
+> [`gray16_split`](#16-bit-on-the-hardware-encoder--recordinggray16_split) puts them on the hardware. The Bayer-tiling and
 > temporal-window levers here are HW-HEVC/8-bit concepts and don't apply (FFV1 is intra-only); the
 > relevant knob there is throughput, not ratio.
 
@@ -249,11 +250,44 @@ mosaic, **`enc-fps`** (encode throughput — must be ≥ camera fps to record re
 the **nvenc** leg is the one that represents your recorder, so run the benchmark on the box. The image
 needs numpy (the published `cam-core` may predate it: `cam-core:bench` = base `+ apt install python3-numpy`).
 
+## 16-bit on the hardware encoder — `recording.gray16_split`
+
+The hardware encoder is lossless at 8 bits only, so a 16-bit camera has recorded FFV1 on the CPU: 47 ms
+a frame for 640×512, which at 60 fps is three cores of an Orin. `gray16_split: fold` stores the same
+samples through the 8-bit recorder instead. Each sample is split into its two bytes and the halves are
+laid side by side — high bytes left, low bytes right — as one 8-bit frame twice as wide; the low byte
+is mirrored wherever the high byte is odd, which turns the sawtooth a smooth scene makes of its low
+byte into a triangle wave the codec predicts far better. It is exactly reversible, the sidecar's
+`gray16_split_mode` records it, and replay and export join the frame again. Transport, preview and
+ROS keep the 16-bit frame.
+
+Measured in the core on a live 640×512 16-bit 60 fps stream, R39 Orin
+([full results](encoding-optimization/RESULTS.md)):
+
+| | CPU, whole core | Size vs raw | Bit-exact |
+|---|---:|---:|---|
+| FFV1 | 295% of a core | 31.3% | 1973/1973 |
+| `gray16_split: fold`, hardware encoder | 47% of a core | 34.3% | 1952/1952 |
+| the same on noisier frames (σ = 40 counts) | 52% of a core | 56.0% (FFV1: 49.3%) | 1952/1952 |
+
+- **It costs disk**: a few points more than FFV1 on smooth frames, about seven on noisy ones. Those
+  figures are from synthetic frames; check them on real footage before fleet-wide use.
+- **It is opt-in** because a recording made with it needs a build that knows `gray16_split_mode` to be
+  read back. An older replay or export sees an 8-bit frame of twice the width.
+- **When it applies.** With the hardware encoder (`encoder: auto` or `hw-hevc-lossless`) it rides the
+  NV12 feed, and only once that feed is proven bit-exact on the host at the split geometry (or asked
+  for outright with `nvenc_feed: nv12`): one wrong code in the high half would be 256 counts. With an
+  explicit `encoder: x265-lossless` it runs on the CPU, which is how a dev host exercises it.
+  Otherwise — no hardware encoder, the proof failing, `nvenc_feed: videoconvert`, `ffv1`, `x264`, an odd
+  width or height — the 16-bit frame is recorded exactly as before, and the log says why.
+- Qualify the 8-bit path at the split geometry like any other:
+  `tools/nvenc_lossless_test.py --geometry 1280x512` for a 640×512 camera.
+
 ## FFV1 path for 16-bit and thermal cameras
 
 A camera the auto-selector can't put on the HW path — **>8-bit** (Mono16, Bayer16, thermal Y16 →
-`GRAY16_LE`), color (YUV/RGB), or any host with no NVENC — records **FFV1**: truly lossless, all bits
-preserved, but **intra-only** (each frame is independent). So the CFA-tiling and temporal-window knobs
+`GRAY16_LE`) without `gray16_split`, color (YUV/RGB), or any host with no NVENC — records **FFV1**:
+truly lossless, all bits preserved, but **intra-only** (each frame is independent). So the CFA-tiling and temporal-window knobs
 above don't apply (there's no inter-frame prediction to tune, and `keyframe_interval_s`/`bframes` are
 ignored with a log note). `x265-lossless` is offered for CPU *temporal* lossless but is **8-bit only**:
 a >8-bit request rides in a GRAY16 container x265's ≤12-bit input formats can't carry, so it falls back
