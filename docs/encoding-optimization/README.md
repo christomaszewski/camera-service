@@ -1,7 +1,10 @@
 # Encoding optimization — handoff
 
-Status as of 2026-11-11: **investigation only, nothing implemented.** This document carries a design
-discussion over to a session that has a Jetson AGX Orin, so it can implement and test.
+Status as written, 2026-11-11: **investigation only, nothing implemented.** This document carries a design
+discussion over to a session that has a Jetson AGX Orin, so it can implement and test. Since then the
+measurements were run and the changes they supported were implemented (R2, W1's floor, W2, W3, W6 and the
+NV12 feed that replaced variant B): [RESULTS.md](RESULTS.md) section 9. The text below is the handoff as it
+was written and still describes the code before those changes.
 
 **The Orin measurements have since been run: see [RESULTS.md](RESULTS.md)** (R39 AGX Orin, 2026-11-11). It
 answers sections 1.5, 1.7, 2.3–2.6 and 3.6 step 3, ranks what is worth implementing, and corrects two things

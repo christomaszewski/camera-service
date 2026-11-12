@@ -1,8 +1,10 @@
 # Encoding optimization — results on the Orin
 
 Measured 2026-11-11 (2026-11-12 UTC) on the bench AGX Orin, working through `README.md` in this directory.
-**Nothing is implemented in the service.** Test builds and prototypes lived outside the tree; the scripts
-that produced the numbers are in `scripts/`.
+The measurements in sections 1–8 were taken **before anything was implemented**: test builds and prototypes
+lived outside the tree, and the scripts that produced the numbers are in `scripts/`. Rows 1–8 of the table
+in section 1 were implemented afterwards; **section 9** says what each became in the tree and what the
+implementation measured on the same Orin.
 
 - **Host:** AGX Orin, L4T R39 rev 2.1, kernel 6.8.12-tegra, Ubuntu 24.04, 12 CPUs, NVMe. `nvpmodel` MAXN,
   `schedutil` governor.
@@ -349,3 +351,71 @@ python3 webrtc_viewer.py ws://<producer address>:8450 600 A                     
 iptables -I FORWARD -s <producer> -d <viewer> -m statistic --mode random --probability 0.5 -j DROP   # loss
 iptables -I FORWARD -s <viewer> -d <producer> -j DROP    # with the reverse rule: a dead link
 ```
+
+## 9. What was implemented
+
+Rows 1–8 of section 1, measured again on the same Orin on 2026-11-12 with the service itself (images rebuilt
+from the tree, `cam-up --jp7` for the camera runs). Not done: row 4b (a 26.04-based bridge), row 9
+(uncompressed mode) and row 10 (the dependency bump).
+
+| # | In the tree | Measured with the implementation |
+|---|---|---|
+| 1 | `recording.nvenc_feed: auto \| nv12 \| videoconvert` (default `auto`). The recorder appends one shared constant chroma block to each frame and the fragment starts at `nvvidconv`. `auto` uses it only after a start-up proof on the host (`recorder.probe_nv12_feed`: an all-codes ramp, noise and a reversed ramp through the real fragment, decoded and compared; about 1 s, once per geometry) and otherwise keeps the `videoconvert` feed. Widths not divisible by 4 or odd heights keep it too | Live core, 5 MP at 24 fps: **61.4 → 32.7 ms per frame**; 768/768 frames bit-exact. `tools/nvenc_lossless_test.py --feed both` passes at 2448×2048 and 1280×512 |
+| 2 | `recording.gray16_split: fold` (default `off`): the 16-bit frame is stored as GRAY8 of twice the width, low byte mirrored where the high byte is odd. Sidecar `gray16_split_mode`; replay and `export_recordings` join it again. Taken only in front of a lossless 8-bit encoder, and the hardware one only behind the proven feed of row 1 | Live core, 640×512 at 60 fps: FFV1 **294.6% of a core → 47.2%**, 34.3% of raw, 1952/1952 frames bit-exact. Noisy frames: 52.1% of a core, 56.0% of raw |
+| 3 | `run.sh` sets `min-bitrate=500000` unless `CAM_WEBRTC_MIN_BITRATE` says otherwise, lowered to the start or max bitrate when one of those is below it | The deployed bridge logs `min-bitrate 500000`; the recovery figures are those of section 4.4 |
+| 4 | `tools/session_reaper.py`, driven from `bridge_stream.py` every 2 s: `CAM_WEBRTC_STALE_S` (default 20) ends a session whose receiver feedback has stopped, `CAM_WEBRTC_MAX_SESSIONS` (default off) caps the count | Deployed stack: a black-holed viewer was ended **22 s** after the blackout; with a cap of 3 a fourth viewer ended the oldest |
+| 5 | `tools/idle_gate.py`: with no session only `CAM_WEBRTC_IDLE_FPS` (default 1) frames a second pass the bridge's ingress queue; `CAM_WEBRTC_IDLE_GRACE_S` (default 5) | 5 MP Bayer at 24 fps, no viewer: **82.8% → 6.3% of a core**. USB 1080p30: 1.3%. First frame for a viewer 1.3–1.4 s after connecting (1.0 s ungated) |
+| 6 | `CAM_WEBRTC_ENCODE=shared` (opt-in) with `CAM_WEBRTC_BITRATE`: `tools/shared_encoder.py` builds one encoder ahead of `webrtcsink` (hardware H.264 / H.265, or `x264enc`); `bridge_stream.py` completes its caps from the stream, forces keyframes on request (at most one a second) and keeps `CAM_WEBRTC_PROFILE` | USB 1080p30, NVENC, 4 Mbit/s: 2.2% idle, **32 / 44 / 58%** of a core for one / two / three viewers (per viewer: 45–50 / 85–100 / about 145). High profile 35 / 45%, H.265 32 / 44%, software `x264enc` 177 / 192% for one / two. VP8 falls back to per-viewer with a log line |
+| 7 | The pinned mono / Bayer luma copy in front of the hardware encoder always runs `videoconvert n-threads=1`; `recording.videoconvert_threads` keeps its meaning for real conversions | Live core on the `videoconvert` feed, 5 MP at 24 fps: 61.4 → 48.7 ms per frame |
+| 8 | The main pipeline's `camsrc` is not fed when nothing reads it (no preview, no raw endpoint) | Part of the row 1 figure |
+
+What the implementation found that the prototypes had not:
+
+- **The shared encoder saves little on a 5 MP Bayer stream.** At 8 Mbit/s it measured 139 / 170 / 175% of a
+  core for one / two / three viewers against 117 / 158% per viewer for one / two. The debayer dominates
+  either way. The two runs are also not at one bitrate — per-viewer encoders start at 2 Mbit/s and adapt,
+  the shared one holds its 8 — and that was not separated out. With `CAM_WEBRTC_MAX_SIZE=1280` at
+  4 Mbit/s: 113 / 133%. The mode's case is several viewers of a stream that is cheap to prepare.
+- **The shared encoder needs its own thread.** In line with the debayer and convert a 5 MP stream reached
+  viewers at 20 fps of 24; behind a queue, 24.
+- **`webrtcsink`'s discovery of an encoded stream needs a keyframe.** It joins the stream mid-GOP and drops
+  every slice until one arrives: with `x264enc`'s own 250-frame GOP the bridge registered with the
+  signalling server 10 s after the stream started. Keyframes are now forced on the clock until it has
+  registered: 1.8 s.
+- **`x264enc` takes no properties once it has started** ("setting property in wrong state"), so the software
+  shared encoder is configured before the pipeline starts and its keyframe interval is kept on the clock.
+- **Connecting a handler to the signaller's `start` signal replaces the default one**: the bridge then never
+  registers. The bridge reads the signaller's `client-id` instead to learn that discovery is over, which is
+  when the idle gate may first close (a fixed warm-up would cut a ten-second codec discovery short).
+- **`Gst.Memory.new_wrapped` aborts the process on the 26.04 PyGObject** when handed Python `bytes`; the
+  shared chroma block is a `Gst.Buffer` whose regions are appended to each frame.
+- **A stalled camera looks like a dead viewer.** With nothing sent a live receiver has nothing to
+  acknowledge; its feedback stopped 8 s after the last frame, and the first version of the reaper ended a
+  live viewer when the camera paused for 20 s. Silence now only counts while frames are going out
+  (covered in `webrtc_test.sh`).
+- **`webrtc_test.sh` raced codec discovery**: it slept 12 s and then connected to "the first producer",
+  which on the jp7 images had not registered yet. It now waits for the registration.
+
+Three of these change what a deployed bridge does **by default** and want a release note: the 500 kbit/s
+floor, sessions ended after 20 s without receiver feedback, and the idle gate (with no viewer the chain
+ahead of `webrtcsink` runs at 1 fps). The shared encoder and the 16-bit split are opt-in; the NV12 feed is
+on by default but only after its proof passes on the host.
+
+**Overlap with PR #65 (`load-knobs`).** That PR carries its own idle throttle under the same names
+(`CAM_WEBRTC_IDLE_FPS`, `CAM_WEBRTC_IDLE_GRACE_S`); row 5 replaces that part of it, with one difference in
+meaning: the grace here runs from the last viewer leaving (default 5 s), there from boot (default 10 s) —
+start-up is covered here by waiting for the bridge to register. The rest of the PR (`CAM_WEBRTC_MAX_FPS`,
+the FFV1 knobs, the per-thread CPU breakdown) is not in this work and will conflict with it in
+`bridge_stream.py` and `run.sh` when rebased.
+
+Tests: the hardware-free suite (694 tests) passes on GStreamer 1.28.8 (dev image), 1.24.2 (jp7 image) and
+1.20.3 (a `cam-core:jp6` image built on the Orin: the JetPack 6 userspace, not JetPack 6 hardware).
+`plugins/webrtc-bridge/tools/webrtc_test.sh` passes on the Orin against the jp7 core (unixfd) and against
+that jp6 core (headered shm), including three new scenarios: the idle gate, the shared encoder, and a
+viewer that must survive a stalled camera and be ended once frozen with `SIGSTOP`. The reaper, idle-gate
+and shared-encoder commits each pass it on their own (jp7 images).
+
+Still open, on top of section 7: none of this has run on JetPack 6 hardware (the NV12 proof decides there
+at start-up, so the feed cannot silently be wrong, but its cost and the split are unmeasured); the split's
+size on real thermal footage; the reaper and the floor over a real radio link; the shared stream in a
+browser.
