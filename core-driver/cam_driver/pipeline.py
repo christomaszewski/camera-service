@@ -194,6 +194,7 @@ class CapturePipeline:
         self._stalled = False                       # the health tick saw no frames in its last window
         self._fps = 0.0
         self._raw_caps = ""
+        self._framerate = "0/1"         # the framerate field of _raw_caps, for the caps the recorder is fed
         self._enc_parser = None
         self._rec_enc = None                        # the recorder's resolved encoder (build-time probe)
         # How a mono/Bayer plane is fed to the hardware lossless encoder (recorder.LUMA_FEEDS): "nv12" /
@@ -302,7 +303,7 @@ class CapturePipeline:
         self._image_size = bytes_per_frame(self._gst_format, self._width, self._height)
         frame_bytes = self._image_size
         self._fps = fps
-        self._raw_caps = caps
+        self._raw_caps, self._framerate = caps, framerate
 
         main = [
             f'appsrc name=camsrc is-live=true do-timestamp=false format=time{self._feed_appsrc_props()} '
@@ -870,9 +871,12 @@ class CapturePipeline:
         (fragment, encoder, feed) or None, in which case the 16-bit frame is recorded as it always was.
 
         The split only ever sits in front of a lossless 8-bit encoder, where one wrong code in the high
-        half would be 256 counts: the hardware encoder behind the NV12 feed (proven bit-exact on this
-        host at the split geometry, or asked for outright), or x265-lossless when that is the encoder
-        configured. `auto` never picks a CPU encoder for it: without the hardware it stays FFV1."""
+        half would be 256 counts: the hardware encoder behind the NV12 feed PROVEN bit-exact on this
+        host at the split geometry, or x265-lossless when that is the encoder configured. `auto` never
+        picks a CPU encoder for it: without the hardware it stays FFV1.
+
+        The proof is never waived here. `nvenc_feed: nv12` takes the feed on trust for an 8-bit camera
+        whose geometry somebody qualified; the split runs at twice that width, which nobody did."""
         if (self._bits <= 8 or self._gst_format not in ("GRAY16_LE", "GRAY16_BE")
                 or self._is_color or self._enc_parser):
             return None                      # the knob is about 16-bit mono/Bayer frames; nothing to say
@@ -888,15 +892,17 @@ class CapturePipeline:
                      "explicit x265-lossless); %r resolves to %s here, so the 16-bit frame is recorded "
                      "unsplit", cfg.encoder, enc)
             return None
-        feed = self._luma_feed(cfg, enc, 2 * self._width, self._height)
-        if feed != "nv12":
-            log.warning("recorder: gray16_split is only used behind the NV12 feed, and that is %s on this "
-                        "host; recording the 16-bit frame unsplit",
-                        "switched off (recording.nvenc_feed)" if rec.normalize_feed(
-                            getattr(cfg, "nvenc_feed", "auto")) == "videoconvert" else "not proven bit-exact")
-            return None
-        desc, enc = self._describe_recorder(cfg, loc, feed, split=True)
-        return desc, enc, feed
+        # (an even width, checked above, is all the NV12 feed needs of 2 * width)
+        if rec.normalize_feed(getattr(cfg, "nvenc_feed", "auto")) == "videoconvert":
+            why = "switched off (recording.nvenc_feed)"
+        elif self._nv12_probe(2 * self._width, self._height, cfg) is not True:
+            why = "not proven bit-exact"
+        else:
+            desc, enc = self._describe_recorder(cfg, loc, "nv12", split=True)
+            return desc, enc, "nv12"
+        log.warning("recorder: gray16_split is only used behind the NV12 feed, and that is %s on this host; "
+                    "recording the 16-bit frame unsplit", why)
+        return None
 
     def _recording_plan(self, cfg):
         """Resolve a candidate without changing the live source or consumer pipelines."""
@@ -935,15 +941,14 @@ class CapturePipeline:
         split = getattr(plan, "split_mode", "off") != "off"
         width = 2 * self._width if split else self._width
         frame_bytes = width * self._height if split else self._image_size
-        framerate = self._raw_caps.rsplit("framerate=", 1)[-1] if "framerate=" in self._raw_caps else "0/1"
         if getattr(plan, "feed", None) == "nv12":
             key = (width, self._height)
             chroma = self._chroma_blocks.get(key)
             if chroma is None:
                 chroma = self._chroma_blocks[key] = rec.ChromaBlock(*key)
-            return rec.nv12_feed_caps(width, self._height, framerate), frame_bytes, chroma
+            return rec.nv12_feed_caps(width, self._height, self._framerate), frame_bytes, chroma
         if split:
-            return (f"video/x-raw,format=GRAY8,width={width},height={self._height},framerate={framerate}",
+            return (f"video/x-raw,format=GRAY8,width={width},height={self._height},framerate={self._framerate}",
                     frame_bytes, None)
         return None, frame_bytes, None
 

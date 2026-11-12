@@ -187,7 +187,7 @@ Editable fields and accepted ranges:
 | `bframes` | Integer 0–16; ignored by FFV1 and disabled for x264 |
 | `nvenc_preset` | Empty/default, disable, ultrafast, fast, medium, slow |
 | `nvenc_maxperf` | Boolean |
-| `videoconvert_threads` | Integer 0–64; 0 uses automatic threading |
+| `videoconvert_threads` | Integer 0–64; 0 uses automatic threading. Not applied to the mono/Bayer copy in front of the hardware lossless encoder, which always runs on one thread |
 
 Settings for another codec may be staged but only affect encoders that use them. Always review
 `resolved`: unsupported high bit depths or unavailable encoder plugins still use the existing FFV1

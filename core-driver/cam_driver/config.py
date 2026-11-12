@@ -263,10 +263,10 @@ class RecordingConfig:
     # Used with the hardware encoder behind a proven NV12 feed (see nvenc_feed), or with an explicit
     # encoder: x265-lossless; otherwise the 16-bit frame is recorded as before.
     gray16_split: str = "off"
-    # Threads for a REAL colour conversion in front of the encoder (x264 from a mono or colour source,
-    # colour into x265): spreads it over cores so the recorder keeps real time. 0 = all cores. The copy
-    # of a mono/Bayer plane into its full-range container (hw-hevc / x265 lossless) always uses one:
-    # more threads only cost CPU there.
+    # Threads for the conversion in front of the encoder (x264, x265, ffv1, colour): spreads it over
+    # cores so the recorder keeps real time. 0 = all cores. The copy of a mono/Bayer plane into the
+    # HARDWARE lossless encoder's full-range NV24 always uses one, whatever this says: more threads
+    # only cost CPU there (measured on an Orin; recorder.convert_threads).
     videoconvert_threads: int = 4
 
 

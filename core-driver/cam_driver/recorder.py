@@ -48,6 +48,7 @@ gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
 import os
+import time
 from typing import Optional
 
 from .formats import LUMA_COLORIMETRY, select_encoder
@@ -206,6 +207,17 @@ def _hw_hevc_lossless(cfg, gop: int, bframes: int) -> str:
             f"nvv4l2h265enc enable-lossless=1{opts} ! h265parse")
 
 
+def convert_threads(cfg, enc: str, is_color: bool = False) -> int:
+    """n-threads for the recorder's videoconvert (0 = all cores). recording.videoconvert_threads spreads
+    a REAL colour conversion over cores. A mono/Bayer plane into the hardware encoder's full-range NV24
+    is no longer one: with the pin it is a copy, and on an Orin four threads then cost 10 ms more CPU
+    per 5 MP frame than one, at the same throughput (the encoder limits it). That copy runs on one
+    thread whatever the knob says; every other conversion keeps the knob."""
+    if enc == "hw-hevc-lossless" and luma_colorimetry(enc, is_color) is not None:
+        return 1
+    return max(0, int(getattr(cfg, "videoconvert_threads", 4)))
+
+
 def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps: float = 0.0,
                                is_color: bool = False, encoded_parser: str = None,
                                luma_feed: str = "videoconvert"):
@@ -252,15 +264,9 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
     gop = _gop_frames(cfg, fps)
     bframes = max(0, int(getattr(cfg, "bframes", 0)))
     preset = _preset_level(getattr(cfg, "nvenc_preset", "")) if enc == "hw-hevc-lossless" else None
-    # videoconvert_threads spreads a REAL colour conversion over cores (n-threads=0 = all of them).
-    # A mono/Bayer plane into its full-range YUV container is no longer one: with the pin it is a
-    # copy, and on an Orin four threads then cost 10 ms more CPU per 5 MP frame than one, at the same
-    # throughput (the encoder limits it). That copy runs on one thread whatever the knob says.
-    nt = max(0, int(getattr(cfg, "videoconvert_threads", 4)))
+    nt = convert_threads(cfg, enc, is_color)
     luma = luma_colorimetry(enc, is_color)
     nv12 = luma_feed == "nv12" and enc == "hw-hevc-lossless" and luma is not None
-    if luma is not None:
-        nt = 1
     vconv = f"videoconvert n-threads={nt}"
     log.info("recorder: encoder=%s (bits=%d) gop=%s bframes=%d preset=%s %s -> %s-*.mkv",
              enc, bits_per_pixel, gop or "default", bframes, "default" if preset is None else preset,
@@ -326,6 +332,8 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
 # ---- proving the NV12 feed ---------------------------------------------------------------------
 _PROBE_ELEMENTS = ("nvvidconv", "nvv4l2h265enc", "h265parse", "avdec_h265", "capssetter", "videoconvert")
 _probe_verdicts: dict = {}       # (width, height) -> True / False; an inconclusive run is not kept
+_probe_retry_at: dict = {}       # (width, height) -> monotonic time before which an inconclusive
+PROBE_RETRY_S = 300.0            #   probe is not run again
 
 
 def _probe_frames(width: int, height: int) -> list:
@@ -347,10 +355,16 @@ def probe_nv12_feed(width: int, height: int, cfg=None, timeout_s: float = 10.0) 
     the VIC decides by input format whether to treat a plane as full or limited range (NV12 passes
     verbatim on R39, I420 and GRAY8 do not), and the height-dependent default of the software
     conversion went unnoticed for months behind a 512-row test. A verdict is remembered for the life
-    of the process; a JetPack change is a new process."""
+    of the process; a JetPack change is a new process.
+
+    A run that got no verdict is not repeated for PROBE_RETRY_S. It blocks its caller -- the main
+    loop, on every recording-settings change -- for up to `timeout_s`, and an encoder that hung once
+    is likely to hang again: asked again sooner, the answer is None at once."""
     key = (int(width), int(height))
     if key in _probe_verdicts:
         return _probe_verdicts[key]
+    if time.monotonic() < _probe_retry_at.get(key, 0.0):
+        return None
     missing = [e for e in _PROBE_ELEMENTS if Gst.ElementFactory.find(e) is None]
     if missing or not nv12_geometry_ok(width, height):
         log.info("recorder: NV12 feed not probed at %dx%d (%s)", width, height,
@@ -398,10 +412,13 @@ def probe_nv12_feed(width: int, height: int, cfg=None, timeout_s: float = 10.0) 
         _probe_verdicts[key] = False
         return False
     if failure is not None or len(got) < len(frames):
-        log.warning("recorder: NV12 feed probe inconclusive at %dx%d (%s); keeping the videoconvert feed",
-                    width, height, failure or f"{len(got)} of {len(frames)} frames came back")
+        _probe_retry_at[key] = time.monotonic() + PROBE_RETRY_S
+        log.warning("recorder: NV12 feed probe inconclusive at %dx%d (%s); keeping the videoconvert feed "
+                    "(not asked again for %d s)", width, height,
+                    failure or f"{len(got)} of {len(frames)} frames came back", PROBE_RETRY_S)
         return None
     log.info("recorder: NV12 feed verified bit-exact at %dx%d (%d frames, every 8-bit code)",
              width, height, len(frames))
     _probe_verdicts[key] = True
+    _probe_retry_at.pop(key, None)
     return True

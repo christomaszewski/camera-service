@@ -275,9 +275,10 @@ Measured in the core on a live 640×512 16-bit 60 fps stream, R39 Orin
 - **It is opt-in** because a recording made with it needs a build that knows `gray16_split_mode` to be
   read back. An older replay or export sees an 8-bit frame of twice the width.
 - **When it applies.** With the hardware encoder (`encoder: auto` or `hw-hevc-lossless`) it rides the
-  NV12 feed, and only once that feed is proven bit-exact on the host at the split geometry (or asked
-  for outright with `nvenc_feed: nv12`): one wrong code in the high half would be 256 counts. With an
-  explicit `encoder: x265-lossless` it runs on the CPU, which is how a dev host exercises it.
+  NV12 feed, and only once that feed is proven bit-exact on the host at the split geometry — also
+  under `nvenc_feed: nv12`, which does not waive the proof here: one wrong code in the high half would
+  be 256 counts. With an explicit `encoder: x265-lossless` it runs on the CPU, which is how a dev host
+  exercises it.
   Otherwise — no hardware encoder, the proof failing, `nvenc_feed: videoconvert`, `ffv1`, `x264`, an odd
   width or height — the 16-bit frame is recorded exactly as before, and the log says why.
 - Qualify the 8-bit path at the split geometry like any other:

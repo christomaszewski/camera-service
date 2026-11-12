@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -39,6 +40,7 @@ _REAL_GST = rec.Gst
 def teardown_function():
     rec.Gst = _REAL_GST
     rec._probe_verdicts.clear()
+    rec._probe_retry_at.clear()
 
 
 def _fragment(present, feed, encoder="auto", bits=8, is_color=False, threads=4):
@@ -74,15 +76,35 @@ def test_nv12_feed_never_applies_to_another_encoder_or_to_colour():
 
 
 def test_the_luma_copy_runs_on_one_thread_and_a_real_conversion_keeps_the_knob():
-    # mono/Bayer into its full-range container is a copy: more threads only cost CPU (measured)
+    # mono/Bayer into the hardware encoder's full-range NV24 is a copy: more threads only cost CPU
+    # (measured there, and only there: every other conversion keeps the knob)
     assert "videoconvert n-threads=1 ! video/x-raw,format=NV24" in _fragment(_JETSON, "videoconvert", threads=6)[0]
-    assert "videoconvert n-threads=1 ! video/x-raw,format=I420" in _fragment(_DEV, "videoconvert", "x265-lossless", threads=6)[0]
+    assert "videoconvert n-threads=6 ! video/x-raw,format=I420" in _fragment(_DEV, "videoconvert", "x265-lossless", threads=6)[0]
+    assert "videoconvert n-threads=6 ! avenc_ffv1" in _fragment(_DEV, "videoconvert", "ffv1", bits=16, threads=6)[0]
+    knob = lambda n: SimpleNamespace(videoconvert_threads=n)    # noqa: E731
+    assert [rec.convert_threads(knob(n), "hw-hevc-lossless") for n in (0, 4, 64)] == [1, 1, 1]
+    assert [rec.convert_threads(knob(n), "hw-hevc-lossless", is_color=True) for n in (0, 4, 64)] == [0, 4, 64]
+    assert [rec.convert_threads(knob(n), enc) for n in (0, 6) for enc in ("x265-lossless", "ffv1", "x264")] == [0] * 3 + [6] * 3
+    assert rec.convert_threads(knob(-3), "ffv1") == 0 and rec.convert_threads(SimpleNamespace(), "ffv1") == 4
     # a real conversion is not
     assert "videoconvert n-threads=6 ! video/x-raw,format=I420 ! x264enc" in _fragment(
         _DEV | {"x264enc", "h264parse"}, "videoconvert", "x264", threads=6)[0]
     assert "videoconvert n-threads=6 ! video/x-raw,format=NV24 ! nvvidconv" in _fragment(
         _JETSON, "videoconvert", "hw-hevc-lossless", is_color=True, threads=6)[0]
     assert "videoconvert n-threads=6 ! x265enc" in _fragment(_DEV, "videoconvert", "x265-lossless", is_color=True, threads=6)[0]
+
+
+def test_the_hardware_fragment_carries_the_encoder_knobs_for_recorder_and_probe_alike():
+    plain = rec._hw_hevc_lossless(SimpleNamespace(), 0, 0)
+    assert plain == ("nvvidconv ! video/x-raw(memory:NVMM),format=NV24 ! "
+                     "nvv4l2h265enc enable-lossless=1 maxperf-enable=1 ! h265parse")
+    tuned = rec._hw_hevc_lossless(SimpleNamespace(nvenc_maxperf=False, nvenc_preset="fast"), 48, 2)
+    level = rec._preset_level("fast")
+    assert level is not None
+    assert f"enable-lossless=1 maxperf-enable=0 preset-level={level} iframeinterval=48 num-B-Frames=2 ! h265parse" in tuned
+    # the recorder's fragment ends in exactly that, whichever feed leads into it
+    for feed in ("videoconvert", "nv12"):
+        assert rec._hw_hevc_lossless(SimpleNamespace(nvenc_maxperf=True, nvenc_preset=""), 0, 0) in _fragment(_JETSON, feed)[0]
 
 
 def test_feed_names_geometry_and_caps():
@@ -287,11 +309,52 @@ def test_probe_fails_a_path_that_rescales_the_plane(monkeypatch):
     assert rec._probe_verdicts == {(W, H): False}
 
 
+def _again(monkeypatch, chain, **kw):
+    """The probe once more, as if the wait after an inconclusive run were over."""
+    rec._probe_retry_at.clear()
+    return _probe(monkeypatch, chain, **kw)
+
+
 def test_probe_is_inconclusive_when_it_cannot_run(monkeypatch):
     assert _probe(monkeypatch, "identity ! no_such_element_here") is None      # does not even parse
     # frames go in, nothing comes back: a timeout is not a verdict
-    assert _probe(monkeypatch, "fakesink name=swallow async=false   appsrc name=never ! h265parse", timeout_s=0.5) is None
-    assert _probe(monkeypatch, _EXACT, width=W + 2) is None                    # geometry the feed cannot carry
+    assert _again(monkeypatch, "fakesink name=swallow async=false   appsrc name=never ! h265parse", timeout_s=0.5) is None
+    # an element that will not start (it cannot open its file)
+    assert _again(monkeypatch, "tee name=pt  pt. ! queue ! filesink location=/proc/no/such/dir/x  pt. ! queue ! h265parse",
+                  timeout_s=0.5) is None
+    # the pipeline starts and then fails on the bus: these caps are not what the feed carries
+    assert _again(monkeypatch, "capsfilter caps=video/x-raw,format=RGB ! h265parse", timeout_s=0.5) is None
+    # ...or an element gives up after the first frame: every frame was taken, an error is on the bus
+    assert _again(monkeypatch, "identity error-after=1 ! " + _EXACT, timeout_s=0.5) is None
+    assert _again(monkeypatch, _EXACT, width=W + 2) is None                    # geometry the feed cannot carry
     monkeypatch.setattr(rec, "_PROBE_ELEMENTS", ("no_such_element_here",))
     assert rec.probe_nv12_feed(W, H) is None                                   # no encoder on this host
     assert rec._probe_verdicts == {}
+
+
+def test_probe_that_is_refused_a_frame_is_inconclusive(monkeypatch):
+    class _Refusing:
+        def get_by_name(self, _name): return self
+        def set_state(self, _state): return Gst.StateChangeReturn.SUCCESS
+        def emit(self, _signal, *_args): return Gst.FlowReturn.FLUSHING
+    monkeypatch.setattr(rec.Gst, "parse_launch", lambda _desc: _Refusing())
+    assert _probe(monkeypatch, _EXACT) is None and rec._probe_verdicts == {}
+
+
+def test_an_inconclusive_probe_is_not_run_again_at_once(monkeypatch):
+    """It blocks the main loop for as long as it waits: an encoder that hung once must not be asked on
+    every recording-settings change."""
+    stuck = "fakesink name=swallow async=false   appsrc name=never ! h265parse"
+    assert _probe(monkeypatch, stuck, timeout_s=0.5) is None
+    assert rec._probe_retry_at[(W, H)] > time.monotonic() + rec.PROBE_RETRY_S - 5
+    started = time.monotonic()
+    assert _probe(monkeypatch, _EXACT) is None                 # would pass if it ran: it does not run
+    assert _probe(monkeypatch, stuck, timeout_s=30) is None    # nor wait
+    assert time.monotonic() - started < 0.2
+    assert _probe(monkeypatch, _EXACT, width=2 * W) is True    # another geometry is another question
+    rec._probe_retry_at[(W, H)] = time.monotonic() - 1         # the wait is over
+    assert _probe(monkeypatch, _EXACT) is True
+    assert (W, H) not in rec._probe_retry_at and rec._probe_verdicts[(W, H)] is True
+    # a failed proof is a verdict, not something to wait out
+    rec._probe_verdicts.clear()
+    assert _probe(monkeypatch, _SQUEEZED) is False and rec._probe_retry_at == {}

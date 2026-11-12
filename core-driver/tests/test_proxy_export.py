@@ -126,6 +126,20 @@ def test_preflight_rejects_packed_bayer_and_mislabeled_high_depth():
             raises(lambda: preflight(request(root), PROFILES), "unsupported or incomplete recordings")
 
 
+def test_preflight_takes_a_16_bit_split_only_where_it_can_be_undone():
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        session(root, pixel_format="GRAY16_LE", bits_per_pixel=16, gray16_split_mode="fold")
+        item = preflight(request(root), PROFILES)["recordings"][0]["sessions"][0]
+        assert item["source_pixel_format"] == "GRAY16_LE" and item["pixel_format"] == "GRAY8"
+    for header, text in (({"pixel_format": "Mono8", "gray16_split_mode": "fold"}, "a 16-bit split requires a 16-bit recording"),
+                         ({"pixel_format": "GRAY16_LE", "bits_per_pixel": 16, "gray16_split_mode": "planes"}, "gray16_split_mode")):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session(root, **header)
+            raises(lambda: preflight(request(root), PROFILES), text)
+
+
 def test_preflight_declares_debayered_color_and_original_pattern():
     for fmt, pattern, declared in (("BayerRG8", "rggb", None), ("BayerGR8", "grbg", None),
                                    ("BayerGB8", "gbrg", None), ("BayerBG8", "bggr", None),

@@ -24,7 +24,8 @@ split is 56% of raw where the plain one is 63%; plain is not offered.
 
 NEVER put a lossy codec behind this: one code of error in the high half is 256 counts in the sample.
 The recorder only splits in front of a lossless 8-bit encoder, and only uses the hardware one behind a
-feed it has proven bit-exact on the host (recorder.probe_nv12_feed).
+feed it has proven bit-exact on the host at the split geometry (recorder.probe_nv12_feed) -- a proof
+that `nvenc_feed: nv12` does not waive.
 
 split/join are exact inverses for every 16-bit value and both byte orders. They need numpy, imported
 when first used so that naming a mode does not.
@@ -69,9 +70,10 @@ def _planes(big_endian: bool):
 
 
 def _fold(np, hi, low, out) -> None:
-    """out = low mirrored where hi is odd, written in place (this runs on the capture thread: no
-    temporaries). 0 - (hi & 1) is 0x00 or 0xFF in uint8, and low ^ 0xFF == 255 - low, so the mirror is
-    one XOR and is its own inverse."""
+    """out = low mirrored where hi is odd, computed in place: this runs on the capture thread, and the
+    fold itself allocates nothing. (split() still hands back `bytes`, which the recorder copies once
+    more into its buffer -- two full-frame copies a zero-copy hand-over could save.) 0 - (hi & 1) is
+    0x00 or 0xFF in uint8, and low ^ 0xFF == 255 - low, so the mirror is one XOR and its own inverse."""
     np.bitwise_and(hi, 1, out=out)
     np.negative(out, out=out)
     np.bitwise_xor(out, low, out=out)

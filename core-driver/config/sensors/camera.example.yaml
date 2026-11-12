@@ -95,7 +95,7 @@ recording:
   # nvenc_feed: auto       # 8-bit mono/Bayer on the hardware encoder: auto | nv12 | videoconvert. auto feeds
   #                          NV12 (half the recorder's CPU) once a start-up probe proves it bit-exact here
   # videoconvert_threads: 4  # threads for a real colour conversion before the encoder (x264, colour); 0 = all
-  #                            cores. The mono/Bayer copy into its lossless container always uses one
+  #                            cores. The mono/Bayer copy in front of the HARDWARE lossless encoder always uses one
 
 # ---- lifecycle: standby / active ----------------------------------------------------------------
 # The camera streams to consumers (ros2/webrtc) in EITHER state; a transition switches the lossless

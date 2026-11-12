@@ -15,6 +15,7 @@ from pathlib import Path
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -124,6 +125,8 @@ def test_split_rides_the_hardware_encoder_behind_a_proven_nv12_feed():
     ("the feed is not proven here", {"verdict": False}),
     ("the proof could not run", {"verdict": None}),
     ("the feed is switched off", {"recording": {"nvenc_feed": "videoconvert"}}),
+    ("the feed is taken on trust, which the split never does", {"recording": {"nvenc_feed": "nv12"}, "verdict": False}),
+    ("the feed is taken on trust and the proof could not run", {"recording": {"nvenc_feed": "nv12"}, "verdict": None}),
     ("no hardware encoder on this host", {"present": ()}),
     ("ffv1 was asked for", {"recording": {"encoder": "ffv1"}}),
     ("a lossy encoder was asked for", {"recording": {"encoder": "x264"}, "present": ("x264",)}),
@@ -137,6 +140,54 @@ def test_anything_short_of_that_records_the_16_bit_frame_as_before(why, kwargs):
         assert (p._rec_enc, p._split_mode, p._rec_feed, p._splitter) == ("ffv1", "off", None, None), why
         assert "format=GRAY16_LE" in p._session_desc_probe and f"width={p._width}," in p._session_desc_probe
         assert p.recording_settings()["resolved"]["gray16_split"] == "off"
+
+
+def test_asking_for_the_nv12_feed_outright_does_not_waive_the_proof_for_the_split():
+    """nvenc_feed: nv12 vouches for an 8-bit camera's geometry. The split runs at twice the width,
+    where one wrong code is 256 counts: it is proven there, or it is not used."""
+    with tempfile.TemporaryDirectory() as tmp:
+        p, probes = _pipe(tmp, recording={"nvenc_feed": "nv12"})
+        assert (p._rec_enc, p._split_mode, p._rec_feed) == ("hw-hevc-lossless", "fold", "nv12")
+        assert probes == [(2 * W, H)]
+    with tempfile.TemporaryDirectory() as tmp:               # a truthy answer that is not a pass
+        p, _ = _pipe(tmp, recording={"nvenc_feed": "nv12"}, verdict="probably")
+        assert (p._rec_enc, p._split_mode) == ("ffv1", "off")
+    with tempfile.TemporaryDirectory() as tmp:               # switched off: the proof is not even run
+        p, probes = _pipe(tmp, recording={"nvenc_feed": "videoconvert"})
+        assert (p._rec_enc, p._split_mode) == ("ffv1", "off") and probes == []
+
+
+def test_a_frame_the_split_cannot_take_is_a_counted_drop_not_an_exception():
+    with tempfile.TemporaryDirectory() as tmp:
+        p, _ = _pipe(tmp, recording={"encoder": "x265-lossless"}, present=("x265-lossless",))
+        lc = Lifecycle(p, recording_enabled=True)
+        p.pipeline.set_state(Gst.State.PLAYING)
+        try:
+            assert lc.request("activate")["ok"]
+            sess = p._session
+            stamp = lambda i: FrameStamp(i, T0 + i * IV, TimestampSource.SYSTEM, T0, T0, None)    # noqa: E731
+            p._on_frame(stamp(0), bytes(W * H * 2))
+            p._on_frame(stamp(1), bytes(W * H * 2 - 2))      # a short frame: the capture thread survives it
+            p._on_frame(stamp(2), bytes(W * H * 2))
+            assert sess.frames == 2 and not sess.error
+            assert p.drops.enqueue_failures == 1
+        finally:
+            if p._session is not None:
+                p.deactivate(wait_eos=False)
+            p.pipeline.set_state(Gst.State.NULL)
+
+
+def test_the_recorder_caps_take_the_frame_rate_the_pipeline_was_built_with():
+    with tempfile.TemporaryDirectory() as tmp:
+        p, _ = _pipe(tmp)
+        assert p._framerate == "25/1" and p._raw_caps.endswith("framerate=25/1")
+        assert f"format=NV12,width={2 * W},height={H},framerate=25/1" in p._rec_caps
+        p._raw_caps += ",colorimetry=bt709"                  # whatever the source caps grow to carry
+        caps, _, _ = p._feed_shape(SimpleNamespace(feed="nv12", split_mode="fold"))
+        assert caps == p._rec_caps
+        caps, frame_bytes, chroma = p._feed_shape(SimpleNamespace(feed=None, split_mode="fold"))
+        assert caps == f"video/x-raw,format=GRAY8,width={2 * W},height={H},framerate=25/1"
+        assert frame_bytes == 2 * W * H and chroma is None
 
 
 def test_an_explicit_x265_lossless_takes_the_split_without_a_feed():
