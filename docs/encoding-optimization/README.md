@@ -19,7 +19,7 @@ preview streams, and to fix slow WebRTC recovery after the radio link drops.
 - **Related review:** `docs/review-v1.13.0/` on the same branch. Findings it numbers (DP-1, PB-11, BR-9 …)
   are cited where they bear on this work.
 - **Scripts:** `scripts/` holds three measurement scripts that run today on the software path and take
-  `--encoder hw-hevc-lossless` on a Jetson. See section 5.
+  `--encoder hw-hevc-lossless` on a Jetson. See section 6.
 
 ### Decisions the owner has already made
 
@@ -57,7 +57,7 @@ radiometric counts, and the originals are kept.
 
 ### 1.2 What the Orin hardware encoder accepts
 
-From NVIDIA's Jetson Linux r39.2 documentation (links in section 6):
+From NVIDIA's Jetson Linux r39.2 documentation (links in section 7):
 
 - H.265 hardware encode is supported on Orin.
 - Listed inputs: YUV420, YUV444 / NV24 (8-bit 4:4:4, tagged "Jetson Orin only"), P010_10LE (10-bit 4:2:0).
@@ -165,7 +165,7 @@ rework before it can merge: see BR-9, BR-10 and BR-11 in `docs/review-v1.13.0/07
 
 ### 1.5 What to do on the Orin, in order
 
-1. Run the two scripts in section 5 inside the `cam-core` image with `--encoder hw-hevc-lossless`, first on
+1. Run the two scripts in section 6 inside the `cam-core` image with `--encoder hw-hevc-lossless`, first on
    synthetic frames, then on real thermal footage (`--raw-file`). Record: bit-exact count, size, and CPU.
    For CPU, do not trust the script's process figure alone — it excludes kernel-side encoder work. Watch
    `tegrastats` and `top -H` during the run and compare against the FFV1 run.
@@ -342,7 +342,7 @@ Add the measured rows to `docs/recording-tuning.md` when done, next to the exist
 - **On the Ubuntu 24.04 based bridge image, ICE never declares an established connection failed.** Checked
   at runtime with the same GStreamer 1.24.2 and libnice 0.1.21 packages: the ICE agent reports
   `consent-freshness = False` and `keepalive-conncheck = False`. GStreamer only enables consent freshness
-  when built against a libnice that carries a specific fix (a build-time flag; links in section 6). The
+  when built against a libnice that carries a specific fix (a build-time flag; links in section 7). The
   Ubuntu 26.04 based images (`jp6m`, `dev`) were not checked.
 - The signalling server has no reply deadline, so a viewer that vanishes is removed only when TCP errors:
   either the viewer's machine resets the old connection once the link returns, or the kernel gives up
@@ -455,7 +455,123 @@ bridge keeps running but nobody can connect).
 
 ---
 
-## 3. Suggested order
+## 3. Dependency updates to investigate
+
+Checked on 2026-11-12 against upstream's release listings, release notes and source.
+
+### 3.1 Where the pins stand
+
+| Component | Pinned here | Latest stable | In development |
+|---|---|---|---|
+| GStreamer (source-built) | 1.28.8 (2026-10-08) | **1.28.9** (2026-11-06) | 1.29.2 snapshot (2026-06-28); 1.30 is announced for Q4 2026 and not released |
+| gst-plugins-rs (WebRTC, RTP) | tag `0.15.4` (2026-09-22) | `0.15.4` is the newest numbered release and the newest on crates.io | newer tags `0.15.4+fixup` (2026-09-24) and `gstreamer-1.28.9` (2026-11-06); `main` is heading to 0.16 |
+| Aravis (GigE) | 0.8.36 | 0.8.36, as far as could be found | 0.9.2, a development series with an API break |
+| libnice | 0.1.21 (Ubuntu 24.04 package) | 0.1.23 (2025-11-26) | — |
+
+- gst-plugins-rs is now tagged alongside each GStreamer release (`gstreamer-1.28.x`) as well as by its own
+  version number.
+- **The GStreamer source pin only reaches the `dev` images** (`cam-dev` and the WebRTC bridge's `modern`
+  target), which are the replay platform and CI. The vehicle images use their Ubuntu base's GStreamer:
+  1.20 on `jp6`, 1.24 on `jp7` (tied to NVIDIA's plugins), 1.28 on `jp6m` (`docs/TESTING.md`).
+
+### 3.2 GStreamer 1.28.9 — what is relevant
+
+Bug fixes and security fixes only. The ones on code paths this service uses:
+
+- `unixfdsink`: a race when starting and stopping quickly (the transport element).
+- `h264parse` / `h265parse` fixes and parser hardening found by fuzzing (recorder and RTSP stream-copy).
+- A use-after-free in RTP session handling (GST-SA-2026-0074 follow-up) and RTP depayloader fixes (WebRTC
+  bridge, RTSP sources).
+- `rtspsrc`: reuse of the non-compliant-URL fallback across tracks.
+- `appsink`: keeps queued sticky events across a flush (replay reads through appsinks).
+- v4l2: buffer leaks when a stream fails to start (USB cameras).
+- Rust plugins at `gstreamer-1.28.9`: `webrtcsink` differs from 0.15.4 by eight lines (support for a
+  Rockchip encoder); a `webrtcsrc` deadlock on ICE failure is fixed (the test consumer uses `webrtcsrc`); an
+  off-by-one in RTP two-byte header-extension parsing is fixed.
+- `0.15.4+fixup` is only a `Cargo.lock` correction. It matters if `--locked` is added to the bridge build
+  (review finding PB-17).
+
+### 3.3 What no newer version fixes
+
+`webrtcsink/imp.rs` and the signalling server were compared between 0.15.4, the `gstreamer-1.28.9` tag and
+`main`. Unchanged in all three:
+
+- A session is removed only on connection or ICE failure, or when signalling reports it ended. There is no
+  session timeout.
+- The signalling server pings after 30 s of idle and ignores the reply.
+- H.264 is pinned to constrained-baseline whenever the sink does the encoding.
+
+So W2 and W3 in section 2.6 are still needed.
+
+### 3.4 Worth evaluating when 1.30 and gst-plugins-rs 0.16 are released
+
+| Item | Why it might matter here |
+|---|---|
+| `webrtcsink` `rtx-percentage` (caps retransmission bandwidth) | A lossy radio link |
+| `webrtcsink`: a race fixed when releasing a session's `webrtcbin`, and reference leaks fixed at teardown | W2 ends sessions far more often than today |
+| `webrtcsink`: encoders from codec discovery are kept and reused | Possibly quicker session start; unmeasured |
+| `webrtcbin2`, a new WebRTC bin with its own ICE, DTLS and RTP session code | Could change the stale-session behaviour of section 2.4; `webrtcsink` does not use it yet |
+| `v4l2src` puts capture timestamps on buffers | Could simplify USB timestamping (`sources/usb.py`) |
+| A general-purpose compress/decompress plugin | A possible cheap middle ground for R1 (uncompressed 16-bit); not examined |
+| Matroska demuxer can build a seek index on demand | Starting a windowed replay part-way into a recording |
+| `h264seiinserter` / `h265seiinserter` with user-data SEI | Carrying capture timestamps inside the stream |
+| `openjpeg` high-bit-depth support | A CPU JPEG 2000 route for 16-bit; likely too slow |
+| The Rust RTP payloaders become the default (rank PRIMARY, MTU 1200) | **A behaviour change to test in the WebRTC bridge before adopting 1.30** |
+
+### 3.5 Aravis and libnice
+
+- **Aravis 0.9.x** adds network-interface selection for discovery and more robust GVSP/GVCP packet parsing.
+  It is a development series and breaks API (`create_stream_full` is replaced), and `camera.py` binds the
+  0.8 namespace. Stay on 0.8.36 until there is a new stable series.
+- **libnice.** GStreamer enables ICE consent freshness only when built against a libnice that carries a
+  specific fix, and Ubuntu 24.04's 0.1.21 does not qualify (section 2.4). Getting it on the 24.04 bridge
+  image means rebuilding the WebRTC stack against a newer libnice. W2 remains the practical fix.
+
+### 3.6 What to do
+
+1. **Bump 1.28.8 → 1.28.9 and the gst-plugins-rs tag `0.15.4` → `gstreamer-1.28.9`** on a branch.
+   - Find every place: `git grep -n '1\.28\.8'` (17 files outside these review and handoff docs, including `tools/gstreamer/build.sh`,
+     `tools/gstreamer/SHA256SUMS`, `tools/gstreamer/check.py` and the lane expectation in
+     `.github/workflows/certify.yml`) and `git grep -n '0\.15\.4'` (12 files, including
+     `plugins/webrtc-bridge/Dockerfile:12`, `tools/build-images.sh:88,97`, `cam-up`,
+     `docker-compose.dev.yml`, `plugins/webrtc-bridge/compose.yml` and three assertions in
+     `tools/test_dev_defaults.py`).
+   - The tag is consumed by `git clone --branch` in the bridge Dockerfile; confirm the new tag name works
+     there, and that whatever reports the Rust plugin version (`docs/TESTING.md` records
+     `0.15.4-1afff37`) still passes.
+   - New checksums, as published by upstream next to each archive on 2026-11-12. **Verify them against the
+     downloads**; `build.sh` already fails closed on a mismatch, and Debian's mirror (the script's fallback)
+     already carries 1.28.9.
+
+     ```
+     6dbf744f583131a34845cc641e803843766a9ba80ce00378a9043fd6d8d5fb38  gstreamer-1.28.9.tar.xz
+     c1fda668b520e6aef763c0eb962c032c9fe52bce322e8b00c69b4e9e847bddc1  gst-plugins-base-1.28.9.tar.xz
+     e518cd97483706a252e95e60312a22d23dec6f5e7673af6f5bde719c3a9ca7f4  gst-plugins-good-1.28.9.tar.xz
+     4a4e0b7bf84f868378c48f143a7ac3a98923b488a5b74f1a35ba46bc3c43f6b1  gst-plugins-bad-1.28.9.tar.xz
+     550a52536962186f5488e06b5c08f31ae0f18400aee32a3385156d31cb4b1189  gst-plugins-ugly-1.28.9.tar.xz
+     4b3df21fa70972a80891d2298cf32c14a62c3db4483d545c7ac018230399186b  gst-libav-1.28.9.tar.xz
+     b87ed564d857a226a3135bd2c42eae7b40eb64031cb9cbce124722af92cc8b9d  gst-rtsp-server-1.28.9.tar.xz
+     ```
+2. **Validate the bump.** All four CI lanes and the six service smokes; `tools/gstreamer/check.py`; and
+   `plugins/webrtc-bridge/tools/webrtc_test.sh` on the `modern` bridge image, which CI does not run.
+3. **Record what each vehicle image really runs.** On the Orin, for each of `jp6`, `jp7`, `jp6m` and `dev`:
+   `gst-inspect-1.0 --version`, `dpkg -l libnice10`, and the consent-freshness check from section 2.4, in
+   both the core and the bridge container. This settles which fixes above reach the vehicles at all.
+4. **When 1.30.0 is released**, work through the table in 3.4 on the `dev` image, starting with the
+   payloader change. Do not adopt it before it has had a point release.
+5. **Aravis:** nothing to do now.
+
+To re-check for newer releases:
+
+```
+curl -s https://gstreamer.freedesktop.org/src/gstreamer/ | grep -o 'gstreamer-1\.[0-9]*\.[0-9]*\.tar\.xz' | sort -uV | tail -5
+curl -s -A version-check https://crates.io/api/v1/crates/gst-plugin-webrtc | python3 -c "import sys,json; print([v['num'] for v in json.load(sys.stdin)['versions'][:5]])"
+curl -s 'https://gitlab.freedesktop.org/api/v4/projects/gstreamer%2Fgst-plugins-rs/repository/tags?per_page=5' | python3 -c "import sys,json; print([t['name'] for t in json.load(sys.stdin)])"
+```
+
+---
+
+## 4. Suggested order
 
 1. W1 on a real link, step 1 of section 1.5 on the Orin, and the Bayer hardware-path investigation in
    section 1.7. All three are measurements and decide the rest.
@@ -463,8 +579,10 @@ bridge keeps running but nobody can connect).
 3. R2 (byte split) if the Orin numbers justify it.
 4. W3 (encode once, opt-in), with W4 alongside since both touch `run.sh`.
 5. W5 and W6 as wanted.
+6. The dependency bump (section 3.6, steps 1 and 2) is independent of all of the above and can be done at
+   any time. Step 3 of that section belongs with the first Orin session.
 
-## 4. Open questions for the owner
+## 5. Open questions for the owner
 
 - Which thermal camera, and what range of counts does it actually use? That decides whether R3 is ever
   worth considering.
@@ -473,7 +591,7 @@ bridge keeps running but nobody can connect).
 - How many simultaneous viewers per camera, typically and at most? That sets the cap for W2.
 - Where does the dashboard code live? Its reconnect logic is half of the reconnect delay.
 
-## 5. Scripts
+## 6. Scripts
 
 Run from the repository root. Both need GStreamer with PyGObject and numpy, which the `cam-core` and
 `cam-dev` images have.
@@ -498,10 +616,12 @@ python3 docs/encoding-optimization/scripts/bayer_hw_path_cpu.py --print-fragment
 On a host without the Jetson elements the first script refuses `--encoder hw-hevc-lossless` with a clear
 message and the other two skip their hardware rows; all three were run that way on 2026-11-11.
 
-## 6. External sources
+## 7. External sources
 
 - [Jetson Linux API Reference r39.2 — video encode sample](https://docs.nvidia.com/jetson/archives/r39.2/ApiReference/l4t_mm_01_video_encode.html) (encoder input formats, the 10-bit alignment note)
 - [Jetson Linux Developer Guide r39.2 — Accelerated GStreamer](https://docs.nvidia.com/jetson/archives/r39.2/DeveloperGuide/SD/Multimedia/AcceleratedGstreamer.html) (per-platform encode examples)
 - [GStreamer: put usage of OPTION_CONSENT_FRESHNESS behind check](https://git.fasttube.de/FaSTTUBe/GST-Tensordecoder-ov_ep/commit/211928ca41d69ee7052b8a886a3156fae63f0d71) and [the libnice 0.1.22 requirement backport to 1.24](https://gitlab.freedesktop.org/gstreamer/gstreamer/-/merge_requests/6431)
 - [libnice 0.1.19 release notes](https://lists.freedesktop.org/archives/nice/2022-May/001511.html) (consent freshness)
+- [GStreamer 1.28 release notes](https://gstreamer.freedesktop.org/releases/1.28/), [GStreamer news (1.29 snapshots)](https://gstreamer.freedesktop.org/news/), [gst-plugins-rs changelog](https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs/-/raw/main/CHANGELOG.md)
+- [Aravis NEWS](https://raw.githubusercontent.com/AravisProject/aravis/main/NEWS.md), [libnice NEWS, 0.1.23](https://sources.debian.org/src/libnice/0.1.23-2/NEWS)
 - [Chromium: Intent to Ship H.265 in WebRTC](https://groups.google.com/a/chromium.org/g/blink-dev/c/3h8lL8a377c), [IETF draft: H.265 Profile for WebRTC](https://datatracker.ietf.org/doc/draft-ietf-avtcore-hevc-webrtc), [Microsoft Q&A on Edge](https://learn.microsoft.com/en-ca/answers/questions/5880331/h-265-(hevc)-not-published-sent-via-webrtc-chrome)
