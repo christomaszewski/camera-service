@@ -112,7 +112,7 @@ Or via the per-sensor stack: `cam-up <sensor>.yaml up -d webrtc-bridge` (cam-up 
 | `CAM_FORMAT` | `GRAY8` | **shm-raw only** — mono raw format when not debayering |
 | `CAM_FPS` | `25` | **shm-raw** geometry; on headered shm a caps rate **hint** (the header carries no rate; feeds the H.264 level derivation) |
 | `VIDEO_CAPS` | _(unset)_ | e.g. `video/x-h264` to pin the codec; unset → webrtcsink picks |
-| `CAM_WEBRTC_PROFILE` | `constrained-baseline` | per-viewer encoding: effectively fixed — webrtcsink forces constrained-baseline for raw input at codec discovery, so `high` **warns + falls back**. With `CAM_WEBRTC_ENCODE=shared` the bridge owns the encoder and `baseline` / `main` / `high` are honoured |
+| `CAM_WEBRTC_PROFILE` | `constrained-baseline` | per-viewer encoding: effectively fixed — webrtcsink forces constrained-baseline for raw input at codec discovery, so `high` **warns + falls back**. With `CAM_WEBRTC_ENCODE=shared` the bridge owns the encoder and `main` / `high` are honoured where the encoder can produce them: always on the hardware encoder; on `x264enc` only with `CAM_WEBRTC_X264_PRESET=superfast` or slower (its default `ultrafast` uses no tool above constrained-baseline — the bridge then pins constrained-baseline and says so). `baseline` means constrained-baseline |
 | `CAM_WEBRTC_MAX_LEVEL` | `5.2` | safety clamp on the **auto-derived** H.264 level (the level is computed from the streamed resolution+fps — never fixed) |
 | `CAM_WEBRTC_KEYFRAME_S` | `2.0` | nominal keyframe (IDR) interval in **seconds**, converted to frames using negotiated fps (`x264enc key-int-max`, NVENC `iframeinterval` + `idrinterval`, `openh264enc gop-size`). Applied after `webrtcsink` defaults, which otherwise overwrite x264's GOP with 2560 frames. On headered/raw shm, set `CAM_FPS` (`webrtc-bridge` plugin `fps`) to the effective published rate. Paused/slower/overloaded feeds take longer to emit that many frames; this is not a wall-time recovery bound. `0` = leave the sink/encoder default |
 | `CAM_WEBRTC_X264_PRESET` | `ultrafast` | `x264enc speed-preset` for the **software fallback** path (no NVENC). Preserves `webrtcsink`'s effective default to minimize CPU work. Choose `superfast` or slower for better compression only with CPU headroom; multiple high-resolution feeds can otherwise fall behind |
@@ -123,11 +123,12 @@ Or via the per-sensor stack: `cam-up <sensor>.yaml up -d webrtc-bridge` (cam-up 
 | `CAM_WEBRTC_MAX_SESSIONS` | _(off)_ | at most this many viewer sessions: a newcomer beyond it **ends the oldest**. Set it to the number of operators who watch one camera |
 | `CAM_WEBRTC_IDLE_FPS` | `1` | frames per second the bridge prepares (debayer / scale / convert) while **nobody is watching**; `0` = none, `off` = every frame, as before this knob existed |
 | `CAM_WEBRTC_IDLE_GRACE_S` | `5` | how long after the last viewer leaves before the idle rate applies (a reconnect inside it never sees a throttled chain) |
-| `CAM_WEBRTC_ENCODE` | _(per viewer)_ | `shared` = **one encoder for every viewer** at a fixed bitrate instead of one per viewer. H.264 (hardware or `x264enc`) and H.265 (hardware only); anything else logs why and encodes per viewer |
+| `CAM_WEBRTC_ENCODE` | _(per viewer)_ | `shared` = **one encoder for every viewer** at a fixed bitrate instead of one per viewer. H.264 (hardware or `x264enc`) and H.265 (hardware only); anything else logs why and encodes per viewer. Which H.264 encoder follows the element ranks, as per-viewer encoding does: the hardware one unless `GST_PLUGIN_FEATURE_RANK` ranks it below `x264enc` or `NONE` |
 | `CAM_WEBRTC_BITRATE` | _(start bitrate, else 4 Mbit/s)_ | the shared encoder's bitrate (bit/s). Only with `CAM_WEBRTC_ENCODE=shared` |
 | `SIGNALLING_PORT` | `8443` | signalling server port |
 | `RUN_SIGNALLING` | `1` | run the bundled signalling server in-container |
 | `CAM_WEBRTC_STATUS` | `10` | seconds between status heartbeat lines — pipeline state, frames received from the core, negotiated caps, connected viewers, and per-interval **latency percentiles** (see Latency below) (`0` = off). Startup also logs an encoder **element inventory** and warns when `GST_PLUGIN_FEATURE_RANK` names an element the registry doesn't have |
+| `CAM_DRY_RUN` | `0` | `1` = assemble the pipeline exactly as a real start would, print it (`webrtc-bridge: pipeline: …`) and exit: nothing is waited for, started or opened. For reading what a configuration turns into; the unit tests use it |
 | `GST_DEBUG` | _(unset)_ | standard GStreamer debug spec for deep dives (e.g. `3,webrtcsink:6`) — forwarded by compose, settable from sensor YAML params |
 
 ## Fleet discovery (Zenoh)
@@ -193,6 +194,9 @@ link. What the bridge adds around that (measured on an R39 AGX Orin —
   deployed stack. The log says `ending viewer session <id>: no receiver feedback for 20 s`.
   Silence only counts while frames are going out: when the camera itself stalls (a reconnect, a
   paused replay) a live viewer has nothing to acknowledge, and keeps its session.
+  The check reads `webrtcsink`'s statistics by field name, so it ends nobody for silence until this
+  process has seen receiver feedback from some session at all — on a build whose statistics it cannot
+  read it does nothing, and says so once in the log, rather than ending every live viewer.
   `CAM_WEBRTC_MAX_SESSIONS` is the blunt companion: a hard cap, the oldest session giving way.
 - **Idle gate (`CAM_WEBRTC_IDLE_FPS`, default 1).** With no viewer `webrtcsink` encodes nothing, but
   the chain in front of it ran on every frame: a 5 MP Bayer camera at 24 fps cost **83% of a core for
@@ -218,6 +222,10 @@ link. What the bridge adds around that (measured on an R39 AGX Orin —
   the bridge has registered: the sink's discovery of an encoded stream needs a keyframe). The heartbeat
   shows ` shared-encoder(N keyframes sent, M forced for K requests)`. Codecs without a shareable
   encoder in the container (VP8/VP9, H.265 without NVENC) log the reason and encode per viewer.
+  The H.264 level offered is the one the encoder writes, which on the hardware encoder is not always
+  the minimum for the geometry: it writes nothing below 2.1, and a higher level when
+  `CAM_WEBRTC_BITRATE` exceeds the level's limit (6 Mbit/s at 480×400 is level 3, not 2.1). The log
+  says so when the two differ.
 
 ## Latency (measure + display)
 
@@ -262,10 +270,18 @@ alone, also while the camera stalls for 20 s, and end the silent one.
 An **idle gate** scenario requires the heartbeat to report `idle` before the consumer connects, and the
 consumer must still decode.
 A **shared encoder** scenario decodes through `CAM_WEBRTC_ENCODE=shared` and requires the log to show
-the caps taken from the stream and keyframes forced on request.
+the caps taken from the stream and keyframes forced on request; where the host hands containers the
+Jetson encoder (CDI on JP7, or `CAM_TEST_NVENC_ARGS`), two more share `nvv4l2h264enc` at the geometry
+and bitrate where its level handling used to break the pipeline.
 Proves the whole egress path without a browser. PASS = each scenario decoded ≥30 frames. Each
 scenario waits for the bridge to register with the signalling server before it connects — codec
 discovery takes one second or ten depending on what the image carries.
+
+The hardware-free suite covers the same ground without `webrtcsink`
+(`tools/ci_test.sh`; `tools/test_*.py` here): the three policies as pure modules, `run.sh`'s decisions
+through `CAM_DRY_RUN=1` ([`test_run_sh.py`](tools/test_run_sh.py)), and the launcher's glue on real
+GStreamer with a stand-in sink ([`test_bridge_sessions.py`](tools/test_bridge_sessions.py)) — the
+session check, the gate's probe, the shared chain's single caps announcement and its keyframes.
 
 Discovery has its own test (needs a Linux host for host networking + a Zenoh router):
 
@@ -281,7 +297,10 @@ Brings up a `rmw_zenohd` router + core + bridge, and a Zenoh probe
 ## Jetson notes
 
 - **HW encoder:** `webrtcsink` discovers encoders and picks the highest-RANKED one for the negotiated
-  codec — by default the CPU `x264enc`. NVENC needs two things. (1) **The platform grant** that puts
+  codec — by default the CPU `x264enc`. (Measured on the R39 jp7 image, 2026-11: `nvv4l2h264enc`
+  itself ranks 257 against `x264enc`'s 256 there, and is picked for a pinned H.264 stream without the
+  rank setting below; the setting makes the choice explicit, and `nvv4l2h264enc:NONE` is how to keep
+  NVENC for the recorder.) NVENC needs two things. (1) **The platform grant** that puts
   `nvv4l2h264enc` in this container: on JP7 the `webrtc-bridge` CDI device entry in
   [docker-compose.jp7.yml](../../docker-compose.jp7.yml) — **validated end-to-end on an R39 AGX Orin**
   (webrtcsink picked `nvv4l2h264enc`, a `webrtcsrc` consumer decoded the stream); on JP6 the

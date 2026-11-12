@@ -396,6 +396,35 @@ What the implementation found that the prototypes had not:
 - **`webrtc_test.sh` raced codec discovery**: it slept 12 s and then connected to "the first producer",
   which on the jp7 images had not registered yet. It now waits for the registration.
 
+A code review before the branch was pushed, with every finding checked on the Orin, changed these:
+
+- **The hardware shared encoder failed at SD preview sizes and at high bitrates**, which the runs above
+  (1080p, 5 MP, 1280 wide, 2–8 Mbit/s) had not touched. Two habits of `nvv4l2h264enc`: it announces level
+  3 as `3.0`, which a filter pinned to `3` refuses (640×480, a 5 MP camera scaled to 640); and it writes
+  into the stream the level its bitrate needs, never less than 2.1, while announcing the one it was asked
+  for — the parser then announces the real one and `webrtcsink` refuses that (320 wide at any bitrate;
+  480×400 at 6 Mbit/s writes level 3; 640×534 at 20 Mbit/s writes 3.2). The bridge now pins the level the
+  encoder will write, in both spellings. Swept afterwards, H.264 from 160 to 2448 wide at 0.15–30 Mbit/s
+  and H.265 at five points: every one negotiates and decodes, and the SDP level matches the stream.
+- **`x264enc` at `ultrafast` cannot produce main or high.** It labels its caps with the profile asked for
+  and writes constrained-baseline (`profile-level-id` 42c0..); that it negotiated at all rested on the
+  parser keeping the label. The bridge pins what the encoder will produce and says so; `superfast` and
+  slower give main (4d40..) and high (6400..) as asked. `baseline` means constrained-baseline.
+- **Which encoder is shared follows the element ranks**, as per-viewer encoding does (on this image
+  `nvv4l2h264enc` ranks 257 to `x264enc`'s 256, so the hardware encoder is the default in both modes):
+  `GST_PLUGIN_FEATURE_RANK` can keep NVENC for the recorder.
+- **The reaper fails open.** It reads `webrtcsink`'s statistics by field name; on a build where they read
+  differently every viewer would have been ended every 20 s. It now ends nobody for silence until it has
+  seen receiver feedback from some session, and logs once when it has none to go on. (With congestion
+  control `disabled` or `homegrown` a live viewer keeps its session, also at a 5 s threshold.)
+- **The 16-bit split is always proven.** `nvenc_feed: nv12` used to waive the start-up proof for the split
+  as it does for 8-bit; the split runs at twice the camera's width, where nobody qualified the feed, and
+  one wrong code there is 256 counts.
+- **An inconclusive NV12 probe is not repeated for five minutes.** It blocks the main loop for up to 10 s,
+  and ran again on every recording-settings change.
+- The single-thread luma copy applies to the hardware encoder only, where it was measured; `x265-lossless`
+  keeps `videoconvert_threads`.
+
 Three of these change what a deployed bridge does **by default** and want a release note: the 500 kbit/s
 floor, sessions ended after 20 s without receiver feedback, and the idle gate (with no viewer the chain
 ahead of `webrtcsink` runs at 1 fps). The shared encoder and the 16-bit split are opt-in; the NV12 feed is
@@ -408,12 +437,15 @@ start-up is covered here by waiting for the bridge to register. The rest of the 
 the FFV1 knobs, the per-thread CPU breakdown) is not in this work and will conflict with it in
 `bridge_stream.py` and `run.sh` when rebased.
 
-Tests: the hardware-free suite (694 tests) passes on GStreamer 1.28.8 (dev image), 1.24.2 (jp7 image) and
-1.20.3 (a `cam-core:jp6` image built on the Orin: the JetPack 6 userspace, not JetPack 6 hardware).
-`plugins/webrtc-bridge/tools/webrtc_test.sh` passes on the Orin against the jp7 core (unixfd) and against
-that jp6 core (headered shm), including three new scenarios: the idle gate, the shared encoder, and a
-viewer that must survive a stalled camera and be ended once frozen with `SIGSTOP`. The reaper, idle-gate
-and shared-encoder commits each pass it on their own (jp7 images).
+Tests: the hardware-free suite (755 tests, no skips) passes on GStreamer 1.28.8 (dev image), 1.24.2 (jp7
+image) and 1.20.3 (a `cam-core:jp6` image built on the Orin: the JetPack 6 userspace, not JetPack 6
+hardware). It executes all but one of the 841 statements this work adds on 1.28.8 — the bridge launcher's
+session, gate and shared-encoder code included, on real GStreamer with a stand-in for `webrtcsink`, and
+`run.sh`'s decisions through `CAM_DRY_RUN=1`. `plugins/webrtc-bridge/tools/webrtc_test.sh` passes on the
+Orin against the jp7 core (unixfd) and that jp6 core (headered shm), with scenarios for the idle gate, the
+shared encoder (software, a profile its preset cannot produce, and the hardware encoder at the geometry
+and bitrate that used to break it) and a viewer that must survive a stalled camera and be ended once
+frozen with `SIGSTOP`.
 
 Still open, on top of section 7: none of this has run on JetPack 6 hardware (the NV12 proof decides there
 at start-up, so the feed cannot silently be wrong, but its cost and the split are unmeasured); the split's
