@@ -451,3 +451,23 @@ Still open, on top of section 7: none of this has run on JetPack 6 hardware (the
 at start-up, so the feed cannot silently be wrong, but its cost and the split are unmeasured); the split's
 size on real thermal footage; the reaper and the floor over a real radio link; the shared stream in a
 browser.
+
+## 10. A second round: five more candidates
+
+Evaluated on the same Orin on 2026-11-12, each against a measurement; one was adopted.
+
+| Candidate | Measured | Verdict |
+|---|---|---|
+| **ROS 2 bridge idles with no subscriber** | 5 MP Bayer at 24 fps, nobody subscribed: 65% of a core with debayer on and 12% with it off, before; under 1% after. A subscriber still receives 150 of 150 frames; a 5 Hz `publish_rate` gives 5 Hz | **Adopted** (`idle_gate` / `CAM_ROS_IDLE_GATE`, default on). The `publish_rate` throttle moved ahead of the debayer with it |
+| Debayer at half resolution before the downscale (WebRTC bridge) | One RGB pixel per 2x2 cell in numpy, as a pump in place of `bayer2rgb`: 24.5 ms a frame in the live bridge against about 21 ms for `bayer2rgb` plus the scale it replaces. Bridge with one viewer at `CAM_WEBRTC_MAX_SIZE=1280`: 108% of a core before, 131% with it | **Rejected as built.** The idea needs a compiled element (an estimated 2 ms a frame, some 18 ms saved on a 5 MP stream); Python is slower than what it replaces. Paced, the numpy step cost three times its 8 ms benchmark |
+| Skip the unixfd publish when no consumer is attached | 6 ms per 5 MP frame (section 2.3). `unixfdsink` exposes neither a client count nor a signal | **Not done.** The only way to know is to scan the process's own sockets; a deployment with no bridge can set `transport.plugin_endpoint.enabled: false` and pay nothing |
+| Vectorised colour conversion in the ROS 2 bridge | 1080p30 I420 with one subscriber: 22.4 ms a frame with the per-pixel loop, 19.4 ms through `GstVideoConverter` | **Rejected.** 3 ms of 22: the cost is the 6 MB copy into the message and its publication, not the conversion, and the converter changes the colours (it honours the caps' colorimetry) |
+| The split's extra frame copies | 0.044 ms + 0.051 ms a frame at 640x512, of 7.8 ms | **Not worth code** |
+
+What this leaves as the larger remaining costs: publishing full-resolution RGB images over ROS (22 ms a
+1080p frame, mostly copies), and `bayer2rgb` at sensor resolution in the WebRTC bridge whenever a viewer is
+connected. Both want compiled code or a different message path, not tuning.
+
+One thing to watch when measuring on this host: with an image build running, the same bridge measured
+47% and 73% of a core minutes apart. Per-frame CPU figures here were taken on an idle machine, or back to
+back under the same load.
