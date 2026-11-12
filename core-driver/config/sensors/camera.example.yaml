@@ -192,6 +192,8 @@ plugins:
       #                                          bufferbloat) | disabled (fixed START rate)
       # CAM_WEBRTC_NORMALIZE: auto             # 16-bit preview: percentile-stretch GRAY16 -> GRAY8
       #                                          ("auto" = 1–99% EMA window, or pin "lo:hi" e.g. "5:99.5")
+      # CAM_WEBRTC_MIN_BITRATE: 500000         # floor under gcc's per-viewer target (the default; lower it
+      #                                          for a radio that really carries less)
 
   # - name: ros1-bridge    # legacy ROS 1 (Noetic) publisher — JP6-class hosts; needs the shared
   #   enabled: true        #   roscore (cam-up --roscore / tools/roscore.sh)

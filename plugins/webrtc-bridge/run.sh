@@ -38,8 +38,8 @@
 # CAM_WIDTH/HEIGHT/FORMAT (shm-raw only), CAM_FPS (shm-raw geometry; caps rate HINT on headered shm),
 # SIGNALLING_PORT, VIDEO_CAPS (e.g. "video/x-h264" to pin the codec), RUN_SIGNALLING (1=start the
 # bundled signalling server, default 1), CAM_WEBRTC_{MIN,MAX,START}_BITRATE (bit/sec; bound
-# webrtcsink's adaptive-bitrate range -- the element default max is 8 Mbps, raise it for 4K),
-# CAM_WEBRTC_CONGESTION ({gcc|homegrown|disabled}, default gcc).
+# webrtcsink's adaptive-bitrate range -- the element default max is 8 Mbps, raise it for 4K; the floor
+# defaults to 500 kbit/s here, see below), CAM_WEBRTC_CONGESTION ({gcc|homegrown|disabled}, default gcc).
 # CAM_WEBRTC_KEYFRAME_S (IDR every N s on every encoder, default 2.0; 0 = encoder default) and
 # CAM_WEBRTC_X264_PRESET (x264enc speed-preset nick for the software fallback, default ultrafast).
 # H.264: CAM_WEBRTC_PROFILE (effectively FIXED at constrained-baseline -- webrtcsink forces it for raw
@@ -66,9 +66,24 @@ W="${CAM_WIDTH:-512}"; H="${CAM_HEIGHT:-512}"; FMT="${CAM_FORMAT:-GRAY8}"; FPS="
 PORT="${SIGNALLING_PORT:-8443}"
 VCAPS="${VIDEO_CAPS:-}"
 BAYER="${CAM_BAYER:-}"
-# Adaptive-bitrate bounds for webrtcsink's congestion control (all bit/sec; unset -> element defaults).
+# Adaptive-bitrate bounds for webrtcsink's congestion control (all bit/sec; unset -> element defaults,
+# except the floor).
 MINBR="${CAM_WEBRTC_MIN_BITRATE:-}"; MAXBR="${CAM_WEBRTC_MAX_BITRATE:-}"; STARTBR="${CAM_WEBRTC_START_BITRATE:-}"
 CC="${CAM_WEBRTC_CONGESTION:-}"
+# The floor. webrtcsink's own default is 1 kbit/s, and that is where a lossy fade leaves the stream:
+# above 10% loss the congestion controller halves the target every 200 ms, and from 1 kbit/s it climbs
+# back at a few percent a step. Measured on an Orin, 10 s of 50% loss: 34 s after the loss ended to get
+# back above 1 Mbit/s -- half a minute of 30 frames a second of mush -- against 5 s from a 500 kbit/s
+# floor. So the bridge sets 500 kbit/s unless told otherwise, lowered to the start or max bitrate when
+# one of those is configured below it (the sink does not accept a floor above them).
+# CAM_WEBRTC_MIN_BITRATE=1000 restores the element's behaviour.
+if [ -z "$MINBR" ]; then
+  MINBR=500000
+  for bound in "$STARTBR" "$MAXBR"; do
+    case "$bound" in ''|*[!0-9]*) continue ;; esac
+    if [ "$bound" -lt "$MINBR" ]; then MINBR="$bound"; fi
+  done
+fi
 
 # Debayer to color for a CFA camera unless explicitly disabled. HOW differs by transport:
 #   shm-raw:   raw shm has no caps, so the config IS the format -- CAM_BAYER non-empty statically
@@ -254,7 +269,7 @@ else
   PIPELINE="${SRC} ! queue leaky=downstream max-size-buffers=2 ! ${ADAPT_EL}${DEBAYER_EL}${SCALE_EL}videoconvert name=fmt_next ! video/x-raw,format=I420 ! ${OVERLAY_EL}${SINK}"
 fi
 
-echo "webrtc-bridge: ${TRANSPORT} ${SOCK}${BAYER:+ bayer=${BAYER}}${DEBAYER_EL:+ (debayer->color)}${ADAPT_EL:+ (format-adaptive)}${NORM:+ normalize=${NORM}}${OVERLAY:+ (latency-overlay)}${MAXSZ:+ max-size=${MAXSZ}} -> webrtcsink (signalling :${PORT})"
+echo "webrtc-bridge: ${TRANSPORT} ${SOCK}${BAYER:+ bayer=${BAYER}}${DEBAYER_EL:+ (debayer->color)}${ADAPT_EL:+ (format-adaptive)}${NORM:+ normalize=${NORM}}${OVERLAY:+ (latency-overlay)}${MAXSZ:+ max-size=${MAXSZ}} -> webrtcsink (signalling :${PORT}, min-bitrate ${MINBR})"
 
 # Default launcher: a small Python process (tools/bridge_stream.py) that OWNS this pipeline and, once it
 # is streaming, advertises the stream over Zenoh for fleet discovery (docs/DISCOVERY.md). It shares this

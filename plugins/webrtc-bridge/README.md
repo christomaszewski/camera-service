@@ -116,6 +116,9 @@ Or via the per-sensor stack: `cam-up <sensor>.yaml up -d webrtc-bridge` (cam-up 
 | `CAM_WEBRTC_MAX_LEVEL` | `5.2` | safety clamp on the **auto-derived** H.264 level (the level is computed from the streamed resolution+fps — never fixed) |
 | `CAM_WEBRTC_KEYFRAME_S` | `2.0` | nominal keyframe (IDR) interval in **seconds**, converted to frames using negotiated fps (`x264enc key-int-max`, NVENC `iframeinterval` + `idrinterval`, `openh264enc gop-size`). Applied after `webrtcsink` defaults, which otherwise overwrite x264's GOP with 2560 frames. On headered/raw shm, set `CAM_FPS` (`webrtc-bridge` plugin `fps`) to the effective published rate. Paused/slower/overloaded feeds take longer to emit that many frames; this is not a wall-time recovery bound. `0` = leave the sink/encoder default |
 | `CAM_WEBRTC_X264_PRESET` | `ultrafast` | `x264enc speed-preset` for the **software fallback** path (no NVENC). Preserves `webrtcsink`'s effective default to minimize CPU work. Choose `superfast` or slower for better compression only with CPU headroom; multiple high-resolution feeds can otherwise fall behind |
+| `CAM_WEBRTC_MIN_BITRATE` | `500000` | floor (bit/s) under the congestion controller's per-viewer encoder target. The element's own default is 1 kbit/s, which a lossy fade reaches within seconds and takes half a minute to climb back from (see [Viewer sessions](#viewer-sessions)). Lowered automatically to `CAM_WEBRTC_START_BITRATE` / `CAM_WEBRTC_MAX_BITRATE` when either is set below it; `1000` restores the element's behaviour |
+| `CAM_WEBRTC_MAX_BITRATE` / `CAM_WEBRTC_START_BITRATE` | _(element: 8 Mbit/s / 2 Mbit/s)_ | the other two bounds of the per-viewer bitrate adaptation (bit/s) |
+| `CAM_WEBRTC_CONGESTION` | `gcc` | `gcc` \| `homegrown` \| `disabled` (a fixed `start-bitrate`) |
 | `SIGNALLING_PORT` | `8443` | signalling server port |
 | `RUN_SIGNALLING` | `1` | run the bundled signalling server in-container |
 | `CAM_WEBRTC_STATUS` | `10` | seconds between status heartbeat lines — pipeline state, frames received from the core, negotiated caps, connected viewers, and per-interval **latency percentiles** (see Latency below) (`0` = off). Startup also logs an encoder **element inventory** and warns when `GST_PLUGIN_FEATURE_RANK` names an element the registry doesn't have |
@@ -161,6 +164,19 @@ A viewer connects to the signalling server (`ws://<host>:8443`) and gets the str
 use the gst-plugins-rs [`gstwebrtc-api`](https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs/-/tree/main/net/webrtc/gstwebrtc-api)
 JS client / demo page pointed at that server. (This 0.13.x build has no embedded web server; newer
 webrtcsink has `run-web-server` — verify with `gst-inspect-1.0 webrtcsink`.)
+
+## Viewer sessions
+
+`webrtcsink` builds an encoder **per viewer session** and adapts each one's bitrate to that viewer's
+link. What the bridge adds around that (measured on an R39 AGX Orin —
+[docs/encoding-optimization/RESULTS.md](../../docs/encoding-optimization/RESULTS.md)):
+
+- **Bitrate floor (`CAM_WEBRTC_MIN_BITRATE`, default 500 kbit/s).** The congestion controller halves
+  the encoder target on loss with nothing under it but the element's 1 kbit/s minimum: ten seconds of
+  50% loss took a 4.7 Mbit/s stream to 1 kbit/s, and it needed 34 s after the link came back to pass
+  1 Mbit/s again — 30 frames a second of unrecognisable picture in between. With the floor at
+  500 kbit/s the same fade recovers in 5 s. The floor is a rate the link is assumed to carry: on a
+  radio that genuinely drops below it, set it lower.
 
 ## Latency (measure + display)
 
@@ -251,7 +267,8 @@ Brings up a `rmw_zenohd` router + core + bridge, and a Zenoh probe
   element (gst-plugins-rs `rtp` plugin, built in the Dockerfile) that this requires. Besides quality,
   CC is a **latency** guard: a fixed bitrate above a (WiFi) link's momentary capacity queues RTP in
   the network and the stream's glass-to-glass latency grows without recovering; GCC backs the encoder
-  off instead. The bounds knobs (bit/sec): `CAM_WEBRTC_MIN_BITRATE` / `CAM_WEBRTC_MAX_BITRATE` /
+  off instead. The bounds knobs (bit/sec): `CAM_WEBRTC_MIN_BITRATE` (default 500 kbit/s here — the
+  element's 1 kbit/s floor is where a lossy fade leaves the stream) / `CAM_WEBRTC_MAX_BITRATE` /
   `CAM_WEBRTC_START_BITRATE`, plus `CAM_WEBRTC_CONGESTION` (`gcc`|`homegrown`|`disabled`). The
   element default `max-bitrate` is 8 Mbps, which caps quality on a fast link at high res — raise
   `CAM_WEBRTC_MAX_BITRATE` (e.g. `20000000`) for 4K. (Images built before the rtp plugin was added

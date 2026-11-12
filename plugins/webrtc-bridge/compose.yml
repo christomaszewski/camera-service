@@ -123,6 +123,8 @@ services:
       - CAM_WEBRTC_MAX_BITRATE=${CAM_WEBRTC_MAX_BITRATE:-}
       - CAM_WEBRTC_START_BITRATE=${CAM_WEBRTC_START_BITRATE:-}
       - CAM_WEBRTC_CONGESTION=${CAM_WEBRTC_CONGESTION:-}
+      # The floor defaults to 500 kbit/s in run.sh (webrtcsink's own 1 kbit/s is where a lossy fade
+      # leaves the stream for half a minute).
       # Loss tolerance: nominal keyframe interval in seconds, converted to frames from negotiated
       # fps (default 2.0; 0 leaves the sink/encoder default). x264 retains webrtcsink's effective
       # ultrafast preset; choose a slower preset only when CPU headroom permits.
