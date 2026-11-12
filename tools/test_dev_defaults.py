@@ -85,7 +85,7 @@ class DevDefaults(unittest.TestCase):
             self.assertEqual(services[name]['build']['target'], 'modern')
         self.assertEqual(services['core-driver']['build']['args']['BASE'], 'ubuntu:26.04')
         self.assertEqual(services['webrtc-bridge']['build']['args']['BASE_IMAGE'], 'ubuntu:26.04')
-        self.assertEqual(services['webrtc-bridge']['build']['args']['GST_RS_TAG'], '0.15.4')
+        self.assertEqual(services['webrtc-bridge']['build']['args']['GST_RS_TAG'], 'gstreamer-1.28.9')
         for name in ('webrtc-bridge', 'ros2-bridge'):
             self.assertEqual(services[name]['environment']['CAM_PLATFORM'], 'dev')
             self.assertEqual(services[name]['environment']['CAM_TRANSPORT'], 'unixfd')
@@ -151,7 +151,7 @@ class DevDefaults(unittest.TestCase):
                 self.assertEqual(svc['core-driver']['runtime'], runtime)
                 self.assertEqual(svc['core-driver']['build']['args']['BASE_IMAGE'], base)
                 self.assertNotEqual(svc['webrtc-bridge']['build'].get('target'), 'modern')
-                self.assertEqual(svc['webrtc-bridge']['build']['args']['GST_RS_TAG'], '0.15.4')
+                self.assertEqual(svc['webrtc-bridge']['build']['args']['GST_RS_TAG'], 'gstreamer-1.28.9')
                 self.assertEqual(svc['ros2-bridge']['environment']['CAM_PLATFORM'], platform)
 
     def test_raw_compose_includes_ros_source(self):
@@ -234,7 +234,7 @@ class DevDefaults(unittest.TestCase):
                     self.assertEqual(core[core.index('--target') + 1], 'modern')
                     self.assertIn('BASE=ubuntu:26.04', core)
                     self.assertIn('BASE_IMAGE=ubuntu:26.04', web)
-                    self.assertIn('GST_RS_TAG=0.15.4', web)
+                    self.assertIn('GST_RS_TAG=gstreamer-1.28.9', web)
                 else:
                     self.assertIn('cam-core', by_image)
                     self.assertNotIn('cam-dev', by_image)

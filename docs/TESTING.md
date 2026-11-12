@@ -2,7 +2,7 @@
 
 CI runs on pull requests, pushes to `main` and `jp6-modern`, and manual dispatch. It builds
 the repository's development image for three native Linux runtimes: Ubuntu 22.04 / GStreamer
-1.20, Ubuntu 24.04 / GStreamer 1.24, and Ubuntu 26.04 / pinned GStreamer 1.28.8. None requires
+1.20, Ubuntu 24.04 / GStreamer 1.24, and Ubuntu 26.04 / pinned GStreamer 1.28.9. None requires
 a camera, GPU, ROS stack, external Zenoh router, or saved field recording. Image build caches
 are separate per runtime.
 
@@ -12,7 +12,7 @@ From the repository root, with Docker running:
 
 ```sh
 docker build -f core-driver/Dockerfile.dev -t cam-dev:dev .
-CAM_DEV_IMAGE=cam-dev:dev CAM_EXPECT_GST=1.28.8 bash tools/ci_test.sh
+CAM_DEV_IMAGE=cam-dev:dev CAM_EXPECT_GST=1.28.9 bash tools/ci_test.sh
 
 docker build -f core-driver/Dockerfile.dev --target distro \
   --build-arg BASE=ubuntu:22.04 -t cam-ci:legacy .
@@ -77,6 +77,14 @@ hardware or full-stack checks. In particular, `nvenc_lossless_test.py` uses soft
 its stricter frame-count check does not qualify hardware decoding.
 
 ## Media dependency update: 2026-10-16
+
+**1.28.9 (2026-11-12).** The pins moved to GStreamer 1.28.9 (seven source archives, upstream's
+checksums verified by the build) and the gst-plugins-rs tag `gstreamer-1.28.9` (plugins still report
+`0.15.4`, now `0.15.4-5d373ca`). On an R39 AGX Orin: the gated suite (765 tests, no skips) and all six
+service smoke tests pass on the 1.28.9 dev image; `webrtc_test.sh` passes on the 1.28.9 dev core and
+bridge, and with the Ubuntu 24.04 bridge rebuilt on the new tag against the jp7 and jp6 cores
+(GStreamer 1.24.2 there, as before: the source pin reaches the dev images only). CI's x86 lanes were
+not run locally. The record below is the 1.28.8 adoption.
 
 Candidate branch: `codex/gstreamer-1.28.8`. Keep this branch separate until the intended
 Jetson platforms pass the hardware checks below. The pins are GStreamer **1.28.8** (all seven

@@ -36,12 +36,12 @@ jobs:
             runner: ubuntu-latest
             target: modern
             base: ubuntu:26.04
-            gstreamer: '1.28.8'
+            gstreamer: '1.28.9'
           - runtime: modern-arm64
             runner: ubuntu-24.04-arm
             target: modern
             base: ubuntu:26.04
-            gstreamer: '1.28.8'
+            gstreamer: '1.28.9'
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4

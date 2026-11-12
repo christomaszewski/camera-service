@@ -9,7 +9,7 @@
 # The dev target overlays pinned GStreamer; vehicle targets retain distro GStreamer.
 # Revalidate the new Rust plugins on Jetson before promoting this pin to vehicle deployments.
 ARG BASE_IMAGE=ubuntu:24.04
-ARG GST_RS_TAG=0.15.4
+ARG GST_RS_TAG=gstreamer-1.28.9
 # JP6 hosts: bake the multimedia + nv GStreamer plugin layer (see core-driver/Dockerfile's l4t stage --
 # the same one, so webrtcsink can rank nvv4l2h264enc in this container too).
 ARG L4T_MULTIMEDIA=
@@ -138,7 +138,7 @@ COPY plugins/webrtc-bridge/ /app/
 COPY core-driver/cam_driver/thermal_preview.py /app/tools/_thermal_preview.py
 CMD ["bash", "run.sh"]
 
-# Dev selects this target with BASE_IMAGE=ubuntu:26.04 and GST_RS_TAG=0.15.4.
+# Dev selects this target with BASE_IMAGE=ubuntu:26.04 and GST_RS_TAG=gstreamer-1.28.9.
 FROM distro AS modern
 # The overlay is compiled against 26.04. Fail instead of loading it into an older userspace.
 RUN . /etc/os-release && test "$ID:$VERSION_ID" = ubuntu:26.04 \

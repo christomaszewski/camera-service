@@ -254,7 +254,7 @@ clock-source change; the sidecar keeps the true stamps).
 ### Dev container (run the producer without a Jetson)
 
 [core-driver/Dockerfile.dev](core-driver/Dockerfile.dev) defaults to Ubuntu 26.04 with pinned
-GStreamer 1.28.8 and Aravis, with no NVIDIA stack. The dev platform uses `cam-dev:dev`,
+GStreamer 1.28.9 and Aravis, with no NVIDIA stack. The dev platform uses `cam-dev:dev`,
 `webrtc-bridge:dev` and `ros2-bridge:dev`, with unixfd transport selected for both bridges.
 It runs fake/live software capture, timestamps, CSV/JSON and FFV1 recording on ARM64 or x86.
 NVENC and physical PTP/chunk timestamps still need Jetson/sensor hardware.
