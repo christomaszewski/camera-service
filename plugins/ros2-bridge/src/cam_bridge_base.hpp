@@ -26,14 +26,21 @@
 
 namespace cam_ros2_bridge {
 
+// YUV layouts the bridge converts to rgb8 -- sensor_msgs has no encoding for planar/semi-planar YUV,
+// and the decode branch delivers I420 for every color (encoded/RTSP) source. NONE = a directly-mappable
+// format (mono/rgb/bgr/rgba/bgra), handled without conversion.
+enum class Yuv { NONE, I420, NV12, YUY2, UYVY, YV12, NV24 };
+
 // One frame, normalized across transports. `data` points into the still-mapped GstBuffer (valid only
-// for the duration of the extract()/publish() call); publish() copies it into the ROS message.
+// for the duration of the extract()/publish() call); publish() copies or converts it directly into
+// the ROS message. `encoding` describes the output; `yuv` describes the input when conversion is needed.
 struct FrameMeta {
   const uint8_t* data = nullptr;   // start of the pixel plane (past any header)
   size_t size = 0;                 // bytes available at `data`
   int width = 0;
   int height = 0;
   std::string encoding;            // sensor_msgs encoding: mono8/mono16/bayer_*8/rgb8
+  Yuv yuv = Yuv::NONE;
   bool big_endian = false;
   int64_t stamp_ns = 0;            // absolute capture time (PTP epoch when locked)
   uint64_t frame_id = 0;
@@ -41,11 +48,6 @@ struct FrameMeta {
 
 // sensor_msgs encoding -> bytes per pixel (for the row stride). Bayer is a single 8-bit plane.
 int bytes_per_pixel(const std::string& encoding);
-
-// YUV layouts the bridge converts to rgb8 -- sensor_msgs has no encoding for planar/semi-planar YUV,
-// and the decode branch delivers I420 for every color (encoded/RTSP) source. NONE = a directly-mappable
-// format (mono/rgb/bgr/rgba/bgra), handled without conversion.
-enum class Yuv { NONE, I420, NV12, YUY2, UYVY, YV12, NV24 };
 
 // Convert a YUV plane (full-range BT.601, as decoded MJPEG/JPEG produces) into a packed rgb8 buffer in
 // `out` (resized to w*h*3). Returns false if `src_size` is too small for w*h in `fmt`.
@@ -97,7 +99,6 @@ class CamBridgeBase : public rclcpp::Node {
   bool debayer_ = false;
   double publish_rate_ = 0.0;   // max publish rate in Hz; 0 = publish every frame
   bool idle_gate_ = true;       // drop frames at the source while the topic has no subscriber
-  std::vector<uint8_t> convert_buf_;   // scratch for YUV->rgb8 (reused per frame; single stream thread)
 
  private:
   static GstFlowReturn on_new_sample_static(GstAppSink* sink, gpointer self);

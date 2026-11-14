@@ -47,4 +47,14 @@ install(TARGETS cam_bridge_components
   RUNTIME DESTINATION bin)
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
+if(BUILD_TESTING)
+  enable_testing()
+  pkg_check_modules(GST_ALLOCATORS REQUIRED IMPORTED_TARGET gstreamer-allocators-1.0)
+  add_executable(test_image_copy tests/test_image_copy.cpp)
+  target_include_directories(test_image_copy PRIVATE src)
+  target_link_libraries(test_image_copy cam_bridge_components PkgConfig::GST_ALLOCATORS)
+  add_test(NAME image_copy COMMAND test_image_copy $<TARGET_FILE:cam_bridge_components>)
+  set_tests_properties(image_copy PROPERTIES TIMEOUT 45)
+endif()
+
 ament_package()

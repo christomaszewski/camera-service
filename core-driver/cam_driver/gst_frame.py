@@ -1,8 +1,9 @@
-"""An opt-in replay frame that retains decoder memory instead of materializing Python bytes.
+"""A frame carried in GStreamer memory instead of materializing Python bytes.
 
 Every outgoing buffer has its own metadata and shares only the immutable pixel memory. Holding
 the source buffer keeps that memory alive across decoder pool reuse, pause, and reader teardown.
-Live sources continue to use bytes; pixel transforms can explicitly request bytes when needed.
+Live sources detach from capture pools with owned_copy(); replay can retain decoder memory.
+Pixel transforms can explicitly request bytes when needed.
 """
 from __future__ import annotations
 
@@ -24,6 +25,21 @@ class GstFrame:
 
     def __bytes__(self) -> bytes:
         return self._buffer.extract_dup(0, self._size)
+
+    @classmethod
+    def owned_copy(cls, buffer, offset=0, size=None):
+        """Release a live capture pool promptly, sharing only our own pixel allocation.
+
+        A recorder can retain more frames than a V4L2/decoder/shm pool contains. Copy
+        pixels in GStreamer without carrying parent-buffer metadata or Python bytes;
+        downstream outputs then share this allocation instead of copying it again.
+        """
+        size = buffer.get_size() - offset if size is None else size
+        owned = buffer.copy_region(Gst.BufferCopyFlags.MEMORY | Gst.BufferCopyFlags.DEEP,
+                                   offset, size)
+        if owned is None:
+            raise RuntimeError("could not copy live frame out of its capture pool")
+        return cls(owned)
 
     def to_buffer(self, pts: int, frame_id: int, prefix: bytes = b""):
         # MEMORY alone deliberately excludes decoder PTS, duration, flags, and metadata: the
@@ -47,14 +63,14 @@ class GstFrame:
         # This fallback is only used for frames selected for publication on those runtimes.
         ok, info = self._buffer.map(Gst.MapFlags.READ)
         if not ok:
-            raise RuntimeError("could not map replay frame for unixfd transport")
+            raise RuntimeError("could not map frame for unixfd transport")
         try:
             data = memoryview(info.data)
             offset = 0
             while offset < len(data):
                 n = os.pwrite(fd, data[offset:], offset)
                 if n <= 0:
-                    raise OSError("could not write replay frame to memfd")
+                    raise OSError("could not write frame to memfd")
                 offset += n
         finally:
             self._buffer.unmap(info)

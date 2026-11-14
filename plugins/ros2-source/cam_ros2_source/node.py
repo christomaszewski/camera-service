@@ -41,6 +41,7 @@ from . import framing as F  # noqa: E402
 log = logging.getLogger("ros2-source")
 TRANSPORTS = ("raw", "header", "unixfd")
 STATS_EVERY_S = 10.0
+CONVERT_QUEUE_FRAMES = 2
 
 
 def _truthy(v: str) -> bool:
@@ -83,6 +84,10 @@ class Feeder:
         self._converted = 0
         self._bypassed = 0
         self._dropped = 0
+        self._cv_submitted = 0
+        self._cv_completed = 0
+        self._cv_last_forwarded = 0
+        self._cv_leaked = 0
         self._unsupported: set[str] = set()
         self._lock = threading.Lock()
         self.failed: str | None = None           # a fatal output error (exit for a restart)
@@ -129,24 +134,42 @@ class Feeder:
         log.error("%s", self.failed)
 
     def stop(self) -> None:
-        for pl in (self.cv_pipeline, self.out_pipeline):
-            if pl is not None:
-                pl.set_state(Gst.State.NULL)
-        self.cv_pipeline = self.out_pipeline = None
+        self._stop_convert()
+        if self.out_pipeline is not None:
+            self.out_pipeline.set_state(Gst.State.NULL)
+        self.out_pipeline = None
 
     # ---- convert pipeline -------------------------------------------------------------------------
+    def _stop_convert(self) -> None:
+        if self.cv_pipeline is None:
+            return
+        # NULL joins the streaming thread before its counters are read or reset. Include both the
+        # queued tail and an unfinished conversion, without recounting gaps already observed below.
+        self.cv_pipeline.set_state(Gst.State.NULL)
+        with self._lock:
+            self._dropped += self._cv_submitted - self._cv_completed - self._cv_leaked
+            self._cv_submitted = self._cv_completed = self._cv_last_forwarded = self._cv_leaked = 0
+        self.cv_pipeline = self.cv_in = None
+        self.cv_caps = ""
+
     def _ensure_convert(self, in_caps: str, decoder: str) -> None:
         if self.cv_pipeline is not None and self.cv_caps == in_caps:
             return
         if self.cv_pipeline is not None:
             log.info("ros2-source: input changed to %s; rebuilding the convert pipeline", in_caps)
-            self.cv_pipeline.set_state(Gst.State.NULL)
+            self._stop_convert()
         dec = f"{decoder} ! " if decoder else ""
+        # Bound BEFORE decoding/conversion, not just at the appsink after that work. Keep the two
+        # newest waiting frames; a slow conversion never blocks the ROS executor or grows a backlog.
+        # These appsrc properties are available on the oldest supported GStreamer (1.20).
         desc = (f'appsrc name=in is-live=true format=time do-timestamp=false caps="{in_caps}" '
+                f'max-buffers={CONVERT_QUEUE_FRAMES} max-bytes=0 max-time=0 '
+                f'leaky-type=downstream block=false emit-signals=false '
                 f"! {dec}videoconvert ! videoscale ! {self.pinned.raw_caps()} "
                 f"! appsink name=cv emit-signals=true max-buffers=2 drop=true sync=false")
         self.cv_pipeline = Gst.parse_launch(desc)
         self.cv_in = self.cv_pipeline.get_by_name("in")
+        self.cv_in.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, self._on_conversion_buffer)
         self.cv_pipeline.get_by_name("cv").connect("new-sample", self._on_converted)
         bus = self.cv_pipeline.get_bus()
         bus.add_signal_watch()
@@ -155,6 +178,18 @@ class Feeder:
         if self.cv_pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
             raise RuntimeError(f"convert pipeline failed to start: {desc}")
         log.info("ros2-source: converting %s -> %s", in_caps, self.pinned.raw_caps())
+
+    def _on_conversion_buffer(self, _pad, info):
+        # appsrc's dropped property only exists in 1.28+. Sequence gaps give exact leak counts on
+        # 1.20 too; inspect before a decoder can replace the input buffer/offset. enough-data is not
+        # a drop notification (the consumer can make room while that signal is being emitted).
+        seq = int(info.get_buffer().offset)
+        with self._lock:
+            leaked = seq - self._cv_last_forwarded - 1
+            self._cv_leaked += leaked
+            self._dropped += leaked
+            self._cv_last_forwarded = seq
+        return Gst.PadProbeReturn.OK
 
     def _on_cv_error(self, _bus, msg) -> None:
         err, dbg = msg.parse_error()
@@ -170,6 +205,8 @@ class Feeder:
         pts = int(buf.pts) if buf.pts != Gst.CLOCK_TIME_NONE else 0
         self._emit(buf.extract_dup(0, buf.get_size()), self._pts_base + pts)
         self._converted += 1
+        with self._lock:
+            self._cv_completed += 1
         return Gst.FlowReturn.OK
 
     # ---- input -------------------------------------------------------------------------------------
@@ -233,8 +270,12 @@ class Feeder:
         buf = Gst.Buffer.new_wrapped(payload)
         buf.pts = self._rel_pts(stamp)
         buf.duration = Gst.CLOCK_TIME_NONE
-        if self.cv_in.emit("push-buffer", buf) != Gst.FlowReturn.OK:
-            self._dropped += 1
+        with self._lock:
+            buf.offset = self._cv_submitted + 1
+            if self.cv_in.emit("push-buffer", buf) == Gst.FlowReturn.OK:
+                self._cv_submitted += 1
+            else:
+                self._dropped += 1
 
     def _drop_once(self, why: str) -> None:
         self._dropped += 1

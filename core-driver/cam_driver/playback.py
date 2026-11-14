@@ -23,7 +23,10 @@ import re
 import statistics
 import threading
 import time
+from array import array
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from itertools import pairwise
 from typing import Callable, List, Optional
 
 from .timestamps import FrameStamp, TimestampSource
@@ -182,10 +185,93 @@ def _run_names(dirpath: str) -> List[str]:
     return [os.path.basename(p)[:-5] for p in sorted(jsons, key=os.path.getmtime)]
 
 
-def load_stamps(csv_path: str) -> List[FrameStamp]:
+class CompactIntegers(Sequence):
+    """Dense signed 64-bit integers, retaining unusual Python integers without truncation."""
+
+    def __init__(self):
+        self._values = array("q")
+        self._overflow = {}
+
+    def append(self, value: int) -> None:
+        try:
+            self._values.append(value)
+        except OverflowError:
+            self._overflow[len(self)] = value
+            self._values.append(0)
+
+    def __len__(self):
+        return len(self._values)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        value = self._values[index]   # bounds/type check before consulting sparse values
+        if index < 0:
+            index += len(self)
+        return self._overflow.get(index, value)
+
+    def __eq__(self, other):
+        if isinstance(other, CompactIntegers):
+            return self._values == other._values and self._overflow == other._overflow
+        if isinstance(other, Sequence):
+            return len(self) == len(other) and all(a == b for a, b in zip(self, other))
+        return NotImplemented
+
+
+class FrameStamps(Sequence):
+    """CSV-order stamps with compact columns; construct a FrameStamp only when consumed.
+
+    Normal rows retain 42 bytes of column data instead of five Python integers plus a
+    dataclass/dict. Sequence indexing, iteration, slices and equality retain the old
+    list-facing behavior; callers do not need all FrameStamp objects resident at once.
+    """
+
+    _sources = tuple(TimestampSource)
+    _source_ids = {source: i for i, source in enumerate(_sources)}
+
+    def __init__(self):
+        self.frame_ids = CompactIntegers()
+        self.timestamps = CompactIntegers()
+        self._system = CompactIntegers()
+        self._camera = CompactIntegers()
+        self._chunk = CompactIntegers()
+        self._has_chunk = bytearray()
+        self._source = bytearray()
+
+    def append(self, stamp: FrameStamp) -> None:
+        self.frame_ids.append(stamp.frame_id)
+        self.timestamps.append(stamp.timestamp_ns)
+        self._system.append(stamp.system_ns)
+        self._camera.append(stamp.camera_ns)
+        self._chunk.append(stamp.chunk_ns if stamp.chunk_ns is not None else 0)
+        self._has_chunk.append(stamp.chunk_ns is not None)
+        self._source.append(self._source_ids[stamp.source])
+
+    def __len__(self):
+        return len(self.timestamps)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        return FrameStamp(self.frame_ids[index], self.timestamps[index],
+                          self._sources[self._source[index]], self._system[index],
+                          self._camera[index], self._chunk[index] if self._has_chunk[index] else None)
+
+    def __eq__(self, other):
+        if isinstance(other, FrameStamps):
+            return (self.frame_ids == other.frame_ids and self.timestamps == other.timestamps
+                    and self._system == other._system and self._camera == other._camera
+                    and self._chunk == other._chunk and self._has_chunk == other._has_chunk
+                    and self._source == other._source)
+        if isinstance(other, Sequence):
+            return len(self) == len(other) and all(a == b for a, b in zip(self, other))
+        return NotImplemented
+
+
+def load_stamps(csv_path: str) -> FrameStamps:
     """Reconstruct the per-frame FrameStamps verbatim from a sidecar CSV (row N = frame N
     of the recording; provenance string -> TimestampSource, unknown values -> SYSTEM)."""
-    stamps: List[FrameStamp] = []
+    stamps = FrameStamps()
     bad_sources = 0
     with open(csv_path, newline="") as f:
         for row in csv.DictReader(f):
@@ -208,11 +294,11 @@ def load_stamps(csv_path: str) -> List[FrameStamp]:
     return stamps
 
 
-def median_interval_ns(timestamps_ns: List[int]) -> int:
+def median_interval_ns(timestamps_ns: Sequence[int]) -> int:
     """Median inter-frame interval; robust to recorded gaps. Falls back to ~30 fps."""
     if len(timestamps_ns) < 2:
         return DEFAULT_INTERVAL_NS
-    diffs = [b - a for a, b in zip(timestamps_ns, timestamps_ns[1:]) if b > a]
+    diffs = [b - a for a, b in pairwise(timestamps_ns) if b > a]
     return int(statistics.median(diffs)) if diffs else DEFAULT_INTERVAL_NS
 
 

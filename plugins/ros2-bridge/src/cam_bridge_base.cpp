@@ -262,7 +262,7 @@ void CamBridgeBase::publish(const FrameMeta& m) {
   const int bpp = bytes_per_pixel(m.encoding);
   const size_t step = static_cast<size_t>(m.width) * bpp;
   const size_t need = step * m.height;
-  if (!m.data || m.size < need) {
+  if (!m.data || (m.yuv == Yuv::NONE && m.size < need)) {
     RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
                          "short frame: have %zu, need %zu (%s %dx%d)",
                          m.size, need, m.encoding.c_str(), m.width, m.height);
@@ -270,8 +270,9 @@ void CamBridgeBase::publish(const FrameMeta& m) {
   }
   // Publish a ConstSharedPtr: with intra-process comms enabled (set by the container when this
   // component is loaded), a same-process subscriber -- e.g. image_proc::DebayerNode on JP6 -- receives
-  // the shared buffer by pointer, no copy/serialization. The one copy here (GstBuffer -> message) is
-  // unavoidable: the GstBuffer is recycled, and sensor_msgs/Image can't loan the mmap'd memory.
+  // the shared buffer by pointer, no copy/serialization. The message owns its pixels because the
+  // GstBuffer is recycled: copy direct formats once, or convert YUV straight into that storage.
+  // Converting into a reusable scratch vector first would add an RGB-sized copy on every frame.
   auto msg = std::make_shared<sensor_msgs::msg::Image>();
   msg->header.stamp = rclcpp::Time(m.stamp_ns);   // PTP capture time when locked
   msg->header.frame_id = frame_id_;
@@ -280,7 +281,16 @@ void CamBridgeBase::publish(const FrameMeta& m) {
   msg->encoding = m.encoding;
   msg->is_bigendian = m.big_endian ? 1 : 0;
   msg->step = static_cast<uint32_t>(step);
-  msg->data.assign(m.data, m.data + need);
+  if (m.yuv != Yuv::NONE) {
+    if (!yuv_to_rgb8(m.yuv, m.data, m.size, m.width, m.height, msg->data)) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                           "short color frame (%s, %dx%d, %zu bytes)",
+                           m.encoding.c_str(), m.width, m.height, m.size);
+      return;
+    }
+  } else {
+    msg->data.assign(m.data, m.data + need);
+  }
   pub_.publish(msg);   // raw on <topic>; compressed_image_transport adds <topic>/compressed on demand
 }
 

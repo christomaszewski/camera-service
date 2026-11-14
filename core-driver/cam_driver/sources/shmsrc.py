@@ -142,11 +142,12 @@ class ShmSource(GstPipelineSource):
         if sample is None or self._mismatch is not None:
             return Gst.FlowReturn.OK
         buf = sample.get_buffer()
-        data = buf.extract_dup(0, buf.get_size())
+        size = buf.get_size()
+        pixel_offset = 0
         now = time.time_ns()
         if self._header:
             try:
-                hdr = transport.unpack_header(data)
+                hdr = transport.unpack_header(buf.extract_dup(0, min(size, transport.HEADER_SIZE)))
             except transport.TransportError as e:
                 self._bad_headers += 1
                 if self._bad_headers in (1, 100, 10_000):
@@ -157,9 +158,9 @@ class ShmSource(GstPipelineSource):
                 self._fail_config(f"the writer sends {hdr.pixfmt} {hdr.width}x{hdr.height}, config pins "
                                   f"{self._gst_format} {self.cfg.width}x{self.cfg.height}")
                 return Gst.FlowReturn.OK
-            pixels = data[transport.HEADER_SIZE:]
-            if len(pixels) != self._expected:
-                self._fail_config(f"a header frame carries {len(pixels)} pixel bytes, "
+            pixel_offset = transport.HEADER_SIZE
+            if size - pixel_offset != self._expected:
+                self._fail_config(f"a header frame carries {size - pixel_offset} pixel bytes, "
                                   f"{self._gst_format} {self.cfg.width}x{self.cfg.height} is {self._expected}")
                 return Gst.FlowReturn.OK
             try:
@@ -178,11 +179,10 @@ class ShmSource(GstPipelineSource):
                     return Gst.FlowReturn.OK
                 self._fail_config(what)
                 return Gst.FlowReturn.OK
-            if len(data) != self._expected:
-                self._fail_config(f"a unixfd frame is {len(data)} bytes, {self._gst_format} "
+            if size != self._expected:
+                self._fail_config(f"a unixfd frame is {size} bytes, {self._gst_format} "
                                   f"{self.cfg.width}x{self.cfg.height} is {self._expected}")
                 return Gst.FlowReturn.OK
-            pixels = data
             fid, ts = int(buf.offset), int(buf.offset_end)
             if fid != _OFFSET_NONE and ts not in (0, _OFFSET_NONE):
                 # the core's own unixfd convention: offset = frame id, offset_end = absolute capture ns
@@ -194,16 +194,15 @@ class ShmSource(GstPipelineSource):
                 self._last_source = TimestampSource.SYSTEM
                 stamp = self._new_stamp(buf)   # a plain unixfdsink writer: arrival, minted id
         else:
-            if len(data) != self._expected:
-                self._fail_config(f"a raw frame is {len(data)} bytes, {self._gst_format} "
+            if size != self._expected:
+                self._fail_config(f"a raw frame is {size} bytes, {self._gst_format} "
                                   f"{self.cfg.width}x{self.cfg.height} is {self._expected}")
                 return Gst.FlowReturn.OK
-            pixels = data
             stamp = self._new_stamp(buf)   # arrival, minted id: the USB/RTSP posture
         self._delivered += 1
         self._raw_delivered += 1
         if self._on_frame is not None:
-            self._on_frame(stamp, pixels)
+            self._on_frame(stamp, self._frame_payload(buf, pixel_offset))
         return Gst.FlowReturn.OK
 
     def _unixfd_mismatch(self, sample) -> str | None:

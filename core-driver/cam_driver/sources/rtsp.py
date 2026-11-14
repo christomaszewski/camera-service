@@ -166,11 +166,20 @@ class RtspSource(GstPipelineSource):
 
     def _pipeline_desc(self) -> str:
         caps, parser, sw_decoder = self._enc
-        decoder, conv = select_decoder(
-            sw_decoder, self._hw_decode_available(), getattr(self.cfg, "decoder", "auto"))
         w, h = self._width, self._height
-        log.info("rtsp decode branch: %s ! %s (%s)", decoder, conv,
-                 "HW NVDEC" if decoder == "nvv4l2decoder" else "software")
+        decode_branch = ""
+        if self._raw_output_required:
+            decoder, conv = select_decoder(
+                sw_decoder, self._hw_decode_available(), getattr(self.cfg, "decoder", "auto"))
+            log.info("rtsp decode branch: %s ! %s (%s)", decoder, conv,
+                     "HW NVDEC" if decoder == "nvv4l2decoder" else "software")
+            # A slow decoder must not backpressure the faithful recording branch.
+            decode_branch = (
+                f"st. ! queue leaky=downstream max-size-buffers=8 ! {parser} ! {decoder} ! {conv} ! "
+                f"video/x-raw,format=I420,width={w},height={h} ! "
+                f"appsink name=rawsink emit-signals=true max-buffers=4 drop=true sync=false ")
+        else:
+            log.info("rtsp: raw outputs disabled; recording without decoding")
         # Parse in the DECODE branch only (after the tee), not pre-tee: the decoder needs a parser
         # ahead of it, while the encoded branch must hand the recorder the RAW depayed bitstream so the
         # recorder's own parser frames it exactly once. A pre-tee parser would frame it twice (here + the
@@ -181,12 +190,7 @@ class RtspSource(GstPipelineSource):
         return (
             f"rtspsrc name=src location={self.cfg.url} latency={int(self.cfg.latency_ms)}{proto} ! "
             f"{self._depay} ! tee name=st "
-            # decode branch is BEST-EFFORT (consumers/preview): leaky so a slow/stalled decoder
-            # (e.g. nvv4l2decoder waiting for a keyframe at 4K) drops encoded AUs HERE instead of
-            # back-pressuring the non-leaky tee and starving the must-not-drop recording (encsink) below.
-            f"st. ! queue leaky=downstream max-size-buffers=8 ! {parser} ! {decoder} ! {conv} ! "
-            f"video/x-raw,format=I420,width={w},height={h} ! "
-            f"appsink name=rawsink emit-signals=true max-buffers=4 drop=true sync=false "
+            f"{decode_branch}"
             # encoded branch must-not-drop: it's the faithful recording
             f"st. ! queue ! appsink name=encsink emit-signals=true max-buffers=8 drop=false sync=false"
         )

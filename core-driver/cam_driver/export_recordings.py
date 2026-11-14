@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 import threading
 
@@ -68,25 +69,34 @@ def profile_definition(request, profile_root):
 
 
 def _rows(run):
-    # Reuse replay's parsing/validation of stamp fields; preserve CSV fields verbatim later.
+    """Validate metadata while retaining only compact stamps and numeric media PTS.
+
+    Arbitrary CSV fields remain in the source file, copied byte-for-byte after encoding.
+    A long run must not retain a dictionary and seven strings for every frame.
+    """
     stamps = playback.load_stamps(run.csv_path)
+    pts = playback.CompactIntegers()
     with open(run.csv_path, newline="") as stream:
         reader = csv.DictReader(stream)
-        fields, rows = reader.fieldnames, list(reader)
-    if not stamps or "pts_ns" not in (fields or ()):
-        raise ValueError("recording needs nonempty frame stamps and pts_ns")
-    times = [stamp.timestamp_ns for stamp in stamps]
-    pts = [int(row["pts_ns"]) for row in rows]
-    if min(times) < 0 or any(b < a for a, b in zip(times, times[1:])):
+        fields = reader.fieldnames
+        if not stamps or "pts_ns" not in (fields or ()):
+            raise ValueError("recording needs nonempty frame stamps and pts_ns")
+        for row in reader:
+            if row.get(None):
+                raise ValueError("CSV contains extra unlabelled fields")
+            point = int(row["pts_ns"])
+            if point < 0 or (pts and point <= pts[-1]):
+                raise ValueError("media PTS must be nonnegative and strictly increasing")
+            pts.append(point)
+    times = stamps.timestamps
+    if times[0] < 0 or any(times[i] < times[i - 1] for i in range(1, len(times))):
         raise ValueError("capture timestamps must be nonnegative and ordered")
-    if min(pts) < 0 or any(b <= a for a, b in zip(pts, pts[1:])):
-        raise ValueError("media PTS must be nonnegative and strictly increasing")
-    if any(row.get(None) for row in rows):
-        raise ValueError("CSV contains extra unlabelled fields")
+    if len(pts) != len(stamps):
+        raise ValueError("CSV changed while reading frame metadata")
     summary = run.header.get("session") or {}
-    if summary.get("frames_recorded", len(rows)) != len(rows):
+    if summary.get("frames_recorded", len(pts)) != len(pts):
         raise ValueError("CSV frame count differs from recording session attestation")
-    return fields, rows, stamps
+    return fields, pts, stamps
 
 
 def _bayer_pattern(header):
@@ -158,7 +168,7 @@ def preflight(request, profile_root):
                 from . import gray16_split
                 if gray16_split.stored_mode(hdr.get("gray16_split_mode")) != "off" and not gray16:
                     raise ValueError("a 16-bit split requires a 16-bit recording")
-                _, rows, stamps = _rows(run)
+                _, pts, stamps = _rows(run)
                 files = [run.base + ".json", run.csv_path, *run.mkv_paths]
                 paths = []
                 for value in files:
@@ -167,7 +177,7 @@ def preflight(request, profile_root):
                     if not checked.is_file():
                         raise ValueError(f"missing input file {rel}")
                     paths.append(rel)
-                session = {"id": ident, "files": paths, "frame_count": len(rows),
+                session = {"id": ident, "files": paths, "frame_count": len(pts),
                            "start_ns": stamps[0].timestamp_ns, "end_ns": stamps[-1].timestamp_ns,
                            "width": w, "height": h, "pixel_format": "GRAY8" if gray16 else pf,
                            "bayer_pattern": hdr.get("bayer_pattern"), "storage_format": "I420",
@@ -332,7 +342,7 @@ def _normalize_gray16(sample, stretch):
     return Gst.Buffer.new_wrapped(bytes(data)), output_caps
 
 
-def _encode(run, target, definition, rows, stamps):
+def _encode(run, target, definition, pts, stamps):
     if any(c in str(target) for c in '*?[]"\\\n\r'):
         raise ValueError("export destination contains characters unsupported by GStreamer")
     Gst = _gst()
@@ -344,7 +354,7 @@ def _encode(run, target, definition, rows, stamps):
         from .thermal_preview import PercentileStretch
         normalization = definition["gray16_normalization"]
         stretch = PercentileStretch(*normalization["percentiles"], smooth=normalization["smoothing"])
-    interval = playback.median_interval_ns([stamp.timestamp_ns for stamp in stamps])
+    interval = playback.median_interval_ns(stamps.timestamps)
     fps = 1e9 / interval
     keyframes = max(1, int(round(fps * settings["keyframe_interval_s"])))
     pipeline = Gst.parse_launch(
@@ -377,10 +387,10 @@ def _encode(run, target, definition, rows, stamps):
     pipeline.set_state(Gst.State.PLAYING)
     try:
         for sample in _decode(run):
-            if count >= len(rows):
+            if count >= len(pts):
                 raise ValueError(f"{run.base}: decoded more frames than the CSV contains")
             decode_pts_offset = _check_frame_pts(
-                sample, int(rows[count]["pts_ns"]), decode_pts_offset,
+                sample, pts[count], decode_pts_offset,
                 f"{run.base}: source frame {count}")
             if stretch is not None:
                 buf, caps = _normalize_gray16(sample, stretch)
@@ -398,15 +408,15 @@ def _encode(run, target, definition, rows, stamps):
                 src.set_property("caps", caps)
             # Capture stamps are unchanged. The original sidecar PTS is the authoritative
             # muxing timeline; decode PTS may include container offsets/rounding.
-            buf.pts = int(rows[count]["pts_ns"])
+            buf.pts = pts[count]
             buf.dts = Gst.CLOCK_TIME_NONE
-            buf.duration = (int(rows[count + 1]["pts_ns"]) - buf.pts) if count + 1 < len(rows) else interval
+            buf.duration = (pts[count + 1] - buf.pts) if count + 1 < len(pts) else interval
             buf.offset = stamps[count].frame_id
             if src.emit("push-buffer", buf) != Gst.FlowReturn.OK:
                 raise ValueError(failed[0] if failed else "h264 encoder stopped before all frames were accepted")
             count += 1
-        if count != len(rows):
-            raise ValueError(f"{run.base}: CSV has {len(rows)} rows but {count} frames decoded")
+        if count != len(pts):
+            raise ValueError(f"{run.base}: CSV has {len(pts)} rows but {count} frames decoded")
         src.emit("end-of-stream")
         if not completed.wait(60):
             raise ValueError("h264 encoder did not finish within 60 seconds")
@@ -442,10 +452,10 @@ def convert(request, profile_root):
         for session in recording["sessions"]:
             prefix = session["id"]
             run = playback.discover_sessions(str(root / recording["relative"]), prefix)[0]
-            fields, rows, stamps = _rows(run)
+            _, pts, stamps = _rows(run)
             source_hashes = {p: file_hash(safe_relative(root, p)) for p in session["files"]}
             target = outdir / prefix
-            _encode(run, target, definition, rows, stamps)
+            _encode(run, target, definition, pts, stamps)
             parts = sorted(outdir.glob(prefix + "-*.mkv"))
             header = dict(run.header)
             # Preserve capture metadata, regenerate storage-dependent fields and summaries.
@@ -454,10 +464,10 @@ def convert(request, profile_root):
                            "recording_settings": definition["encoding"], "recording_settings_file": None,
                            "cfa_tile_mode": "off", "gray16_split_mode": "off", "recording_feed": None,
                            "pts_offset_ns": 0,
-                           "first_pts_ns": int(rows[0]["pts_ns"]),
+                           "first_pts_ns": pts[0],
                            "first_timestamp_ns": stamps[0].timestamp_ns,
                            "first_frame_id": stamps[0].frame_id, "session_prefix": prefix,
-                           "session": {"frames_recorded": len(rows), "segments": len(parts),
+                           "session": {"frames_recorded": len(pts), "segments": len(parts),
                                        "truncated": False, "error": None},
                            "proxy": {"version": 1, "format": FORMAT, "profile": definition["id"],
                                      "profile_revision": definition["revision"],
@@ -483,24 +493,23 @@ def convert(request, profile_root):
                     bayer_conversion=definition["bayer_conversion"],
                     transformations=["decode", "undo-cfa-tiling", "debayer", "convert-to-i420", "lossy-h264"])
             Path(str(target) + ".json").write_text(json.dumps(header, indent=2, sort_keys=True) + "\n")
-            with open(str(target) + ".csv", "w", newline="") as stream:
-                writer = csv.DictWriter(stream, fields)
-                writer.writeheader()
-                writer.writerows(rows)
+            shutil.copyfile(run.csv_path, str(target) + ".csv")
             output = playback.discover_sessions(str(outdir), prefix)[0]
-            _, output_rows, output_stamps = _rows(output)
+            _, output_pts, output_stamps = _rows(output)
             decoded = 0
             pts_offset = None
             for sample in _decode(output):
-                if decoded >= len(rows):
+                if decoded >= len(pts):
                     raise ValueError(f"{prefix}: proxy decoded more frames than the input")
                 # Validate stored PTS across every part with one fixed offset and
                 # Matroska's millisecond precision. Capture nanoseconds stay in CSV.
                 pts_offset = _check_frame_pts(
-                    sample, int(rows[decoded]["pts_ns"]), pts_offset,
+                    sample, pts[decoded], pts_offset,
                     f"{prefix}: proxy frame {decoded}")
                 decoded += 1
-            if decoded != len(rows) or output_rows != rows or output_stamps != stamps:
+            csv_relative = Path(run.csv_path).relative_to(root).as_posix()
+            if (decoded != len(pts) or output_pts != pts or output_stamps != stamps
+                    or file_hash(output.csv_path) != source_hashes[csv_relative]):
                 raise ValueError(f"{prefix}: proxy frame count/stamp validation failed")
             if any(file_hash(root / p) != digest for p, digest in source_hashes.items()):
                 raise ValueError(f"{prefix}: source changed during export")

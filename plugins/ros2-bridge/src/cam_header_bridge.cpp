@@ -115,23 +115,12 @@ class CamHeaderBridge : public CamBridgeBase {
     const size_t src_size = map.size - hdr.header_len;
     out.width = hdr.width;
     out.height = hdr.height;
-    if (pix.yuv != Yuv::NONE) {                        // color: convert the YUV plane to rgb8
-      if (!yuv_to_rgb8(pix.yuv, src, src_size, hdr.width, hdr.height, convert_buf_)) {
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                             "short color frame (pixfmt %u, %dx%d, %zu bytes)",
-                             hdr.pixfmt, hdr.width, hdr.height, src_size);
-        return false;
-      }
-      out.data = convert_buf_.data();
-      out.size = convert_buf_.size();
-      out.encoding = "rgb8";
-    } else {
-      out.data = src;
-      out.size = src_size;
-      // A bayer camera is labeled by the CAM_ROS_ENCODING hint (the header only knows GRAY8); mono/color
-      // fall back to the header's pixfmt. image_proc (composed by the launch) does any debayering.
-      out.encoding = (!encoding_.empty() && pix.bytes_per_px == 1) ? encoding_ : pix.encoding;
-    }
+    out.data = src;
+    out.size = src_size;
+    out.yuv = pix.yuv;       // publish() converts directly into the message while this stays mapped
+    // A bayer camera is labeled by the CAM_ROS_ENCODING hint (the header only knows GRAY8); mono/color
+    // fall back to the header's pixfmt. image_proc (composed by the launch) does any debayering.
+    out.encoding = (!encoding_.empty() && pix.bytes_per_px == 1) ? encoding_ : pix.encoding;
     out.big_endian = pix.big_endian;
     out.stamp_ns = static_cast<int64_t>(hdr.timestamp_ns);
     out.frame_id = hdr.frame_id;

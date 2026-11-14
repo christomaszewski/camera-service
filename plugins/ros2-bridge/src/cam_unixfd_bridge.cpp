@@ -105,18 +105,9 @@ class CamUnixfdBridge : public CamBridgeBase {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "unrecognized caps on unixfd sample");
       return false;
     }
-    if (yuv != Yuv::NONE) {                          // color: convert the YUV plane to rgb8
-      if (!yuv_to_rgb8(yuv, map.data, map.size, w, h, convert_buf_)) {
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                             "short color frame (%s, %dx%d, %zu bytes)", enc.c_str(), w, h, map.size);
-        return false;
-      }
-      out.data = convert_buf_.data();
-      out.size = convert_buf_.size();
-    } else {
-      out.data = map.data;     // unixfd carries the bare plane (no header) -> offset 0
-      out.size = map.size;
-    }
+    out.data = map.data;     // unixfd carries the bare plane (no header) -> offset 0
+    out.size = map.size;
+    out.yuv = yuv;           // publish() converts directly into the message while this stays mapped
     out.width = w;
     out.height = h;
     out.encoding = enc;

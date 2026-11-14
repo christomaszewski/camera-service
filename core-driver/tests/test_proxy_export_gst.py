@@ -146,6 +146,18 @@ def test_multi_session_proxy_preserves_stamps_geometry_selection_and_source_byte
         camera.mkdir(parents=True)
         _write_session(camera, "early", 1, T0, 5, frame_id0=91)
         _write_session(camera, "late", 2, T0 + 3_000_000_000, 4, frame_id0=12)
+        # Preserve unknown metadata, quoted newlines and lexical integer formatting,
+        # without retaining a Python dictionary for every CSV row during export.
+        csv_path = camera / "early.csv"
+        with csv_path.open(newline="") as stream:
+            reader = csv.DictReader(stream)
+            fields, rows = reader.fieldnames, list(reader)
+        with csv_path.open("w", newline="") as stream:
+            writer = csv.DictWriter(stream, fields + ["annotation"])
+            writer.writeheader()
+            for row in rows:
+                row.update(pts_ns="00" + row["pts_ns"], annotation='note, with "quotes"\nand a newline')
+                writer.writerow(row)
         original = {p: file_hash(p) for p in camera.iterdir()}
         output = Path(temporary) / "output"
         output.mkdir()
@@ -164,6 +176,7 @@ def test_multi_session_proxy_preserves_stamps_geometry_selection_and_source_byte
             assert header["proxy"]["source_files"]
             with path.with_suffix(".csv").open() as stream, (camera / (prefix + ".csv")).open() as original_csv:
                 assert list(csv.DictReader(stream)) == list(csv.DictReader(original_csv))
+            assert path.with_suffix(".csv").read_bytes() == (camera / (prefix + ".csv")).read_bytes()
         cfg = parse_config({"camera": {"type": "replay"}, "replay": {
             "path": str(output / "recordings" / "old_camera"), "sessions": ["late"],
             "proxy": {"export": "pinned-generation"}, "speed": 0}, "control": {"enabled": False}})

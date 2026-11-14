@@ -21,6 +21,7 @@ gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
 from ..timestamps import FrameStamp, TimestampSource
+from ..gst_frame import GstFrame
 from .base import OnEncoded, OnFrame, Source
 
 log = logging.getLogger(__name__)
@@ -56,6 +57,9 @@ class GstPipelineSource(Source):
         self._reopen_frame_mark = 0      # _frame_id at the last reopen() sample
         self._reopen_raw_mark = 0        # _raw_delivered at the last reopen() sample
         self._decode_dead_cycles = 0     # consecutive reopens with AUs in but 0 decoded out
+        self._raw_output_required = True
+        self._owned_buffer_frames = False
+        self._frame_bytes_required = None
 
     # ---- subclass hook -----------------------------------------------------
     def _pipeline_desc(self) -> str:
@@ -73,7 +77,7 @@ class GstPipelineSource(Source):
         self._pipeline = Gst.parse_launch(desc)
         self._rawsink = self._pipeline.get_by_name("rawsink")
         self._encsink = self._pipeline.get_by_name("encsink")   # None for a raw source
-        if self._rawsink is None:
+        if self._rawsink is None and self._raw_output_required:
             raise RuntimeError(f"{type(self).__name__}: appsink 'rawsink' not found")
         if self.encoded_caps is not None:
             tee = self._pipeline.get_by_name("st")
@@ -87,6 +91,18 @@ class GstPipelineSource(Source):
         may not exist on the running GStreamer (e.g. rtspsrc add-reference-timestamp-meta on gst<1.24).
         Default no-op; RtspSource overrides to enable the NTP reference meta when available."""
 
+    def set_raw_output_required(self, required: bool) -> None:
+        """Resolve live encoded-source demand before starting (also kept on reconnect)."""
+        required = bool(required) or self.encoded_caps is None
+        if required == self._raw_output_required:
+            return
+        if self._started:
+            raise RuntimeError("raw output demand cannot change while the source is running")
+        self._raw_output_required = required
+        if self._pipeline is not None:
+            self._pipeline.set_state(Gst.State.NULL)
+            self.configure()
+
     @staticmethod
     def _hw_decode_available() -> bool:
         """True when the Jetson HW decoder (nvv4l2decoder) is present, so the consumer decode branch
@@ -94,16 +110,36 @@ class GstPipelineSource(Source):
         to HW on a JP7 host (with the GPU exposed) -- no code change. See formats.select_decoder."""
         return Gst.ElementFactory.find("nvv4l2decoder") is not None
 
-    def start(self, on_frame: OnFrame, on_encoded: OnEncoded = None) -> None:
+    def start(self, on_frame: OnFrame, on_encoded: OnEncoded = None, *, buffer_frames=False) -> None:
+        self._owned_buffer_frames = buffer_frames
         self._on_frame = on_frame
         self._on_encoded = on_encoded
         self._start_ns = time.time_ns()   # liveness baseline: the first frame must arrive within timeout
         self._last_data_ns = 0
         self._started = True
-        self._rawsink.connect("new-sample", self._on_raw)
+        if self._rawsink is not None:
+            self._rawsink.connect("new-sample", self._on_raw)
         if self._encsink is not None:
             self._encsink.connect("new-sample", self._on_enc)
         self._pipeline.set_state(Gst.State.PLAYING)
+
+    def start_buffers(self, on_frame, on_encoded=None, *, shared_memory=False, bytes_required=None) -> None:
+        """Use owned GstFrame payloads; start() retains its public byte callback API.
+
+        Do not offer a shared upstream pool here: device pools may be small and fixed.
+        CapturePipeline can feed the owned buffers into unixfdsink's native pool.
+        Pixel transforms that need Python bytes can request the original byte seam,
+        including after recording settings change, avoiding an extra full-frame copy.
+        """
+        self._frame_bytes_required = bytes_required
+        self.start(on_frame, on_encoded, buffer_frames=True)
+
+    def _frame_payload(self, buf, offset=0, size=None):
+        size = buf.get_size() - offset if size is None else size
+        owned = (self._owned_buffer_frames and not
+                 (self._frame_bytes_required is not None and self._frame_bytes_required()))
+        return (GstFrame.owned_copy(buf, offset, size) if owned
+                else buf.extract_dup(offset, size))
 
     def stop(self) -> None:
         self._started = False           # suspend the liveness watchdog while torn down (e.g. mid-reopen)
@@ -152,7 +188,7 @@ class GstPipelineSource(Source):
         """Called per reopen: if compressed frames arrived (pre-tee) but the decode branch delivered
         nothing, the reconnect isn't fixing anything -- the DECODER is wedged. Say so, loudly, with
         the fix, instead of letting the liveness loop mask it as a flaky link."""
-        if self.encoded_caps is None:
+        if self.encoded_caps is None or not self._raw_output_required:
             return  # raw source: pre-tee frames ARE rawsink deliveries; nothing to compare
         frames_in = self._frame_id - self._reopen_frame_mark
         raw_out = self._raw_delivered - self._reopen_raw_mark
@@ -239,9 +275,8 @@ class GstPipelineSource(Source):
         # encoded: correlate with the pre-tee stamp (carries the NTP meta); raw: stamp this buffer
         stamp = self._stamp_for(buf) if self.encoded_caps is not None else self._new_stamp(buf)
         self._raw_delivered += 1
-        data = buf.extract_dup(0, buf.get_size())
         if self._on_frame is not None:
-            self._on_frame(stamp, data)
+            self._on_frame(stamp, self._frame_payload(buf))
         return Gst.FlowReturn.OK
 
     def _on_enc(self, sink) -> Gst.FlowReturn:

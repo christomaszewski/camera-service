@@ -10,13 +10,14 @@ to on_frame(), which is source-agnostic and:
   - feeds the open recording session, if any (CFA-tiled when configured),
   - and -- rate-limited -- pushes a copy into the transport appsrc for plugins.
 
-Replay alone can deliver a GstFrame instead of bytes: downstream buffers share its pixel memory,
-and transport decimation precedes materialization. Live-source callbacks retain the byte path.
+Live and replay sources can deliver a GstFrame instead of bytes: downstream buffers share its
+pixel memory, and transport decimation precedes materialization. Live sources first detach from
+their capture pool; Python pixel transforms retain the byte path.
 
 The plugin transport endpoint has two implementations, picked at build() by capability:
   - JP7 (GStreamer >= 1.24, `unixfdsink` present): a `unixfdsink` carrying NATIVE caps
     (video/x-raw GRAY8/16 for mono, video/x-bayer,<pattern> for Bayer) + buffer fields
-    over SCM_RIGHTS. Live frames and older runtimes use a memfd copy. On 1.28+, replay shares
+    over SCM_RIGHTS. Byte payloads and older runtimes use a memfd copy. On 1.28+, GstFrame shares
     FD-backed pixels or lets unixfdsink copy into its native pool. No header -- the stream
     is self-describing. frame_id rides in buffer.offset, the absolute capture ns
     in buffer.offset_end (an absolute-ns PTS stalls downstream flow); PTS stays relative.
@@ -161,7 +162,7 @@ class CapturePipeline:
         self._have_unixfd = False          # JP7 (GStreamer 1.24): unixfd transport available
         self._unixfd_path = None
         self._fd_alloc = None              # GstAllocators.FdAllocator -> memfd buffers for unixfd
-        self._unixfd_pool = False          # GStreamer 1.28 can pool/copy ordinary replay buffers
+        self._unixfd_pool = False          # GStreamer 1.28 can pool/copy ordinary GstFrame buffers
         self._GstAllocators = None
         self._tile_mode = "off"            # off | plain | green_diff | rct (recording.bayer_tile)
         self._tiler = None                 # closure: frame_bytes -> tiled bytes (lazy; needs numpy)
@@ -316,6 +317,15 @@ class CapturePipeline:
         self._enc_parser = self.source.encoded_parser if is_encoded else None
         if self.cfg.recording.enabled:
             self._install_recording_plan(self.cfg.recording, self._recording_plan(self.cfg.recording))
+
+        # Stream-copy owns timestamping/accounting in the encoded branch. With no raw
+        # outputs, a live decoder would only produce discarded pixels. Recording mode
+        # changes between source-copy and re-encoding already require a service restart.
+        set_raw_output = getattr(self.source, "set_raw_output_required", None)
+        if set_raw_output is not None and not self.source.finite:
+            set_raw_output(not self._stream_copy or self.cfg.preview.enabled
+                           or self.cfg.transport.raw_endpoint.enabled
+                           or self.cfg.transport.plugin_endpoint.enabled)
 
         raw = self.cfg.transport.raw_endpoint
         if raw.enabled:
@@ -599,7 +609,7 @@ class CapturePipeline:
 
     def _on_frame(self, stamp: FrameStamp, frame_bytes: FramePayload) -> None:
         """Source callback (runs on the source's feeder thread): a resolved timestamp + clean image
-        bytes or a replay GstFrame. Set PTS/offset, push to the main appsrc (tee -> raw / preview),
+        bytes or a GstFrame. Set PTS/offset, push to the main appsrc (tee -> raw / preview),
         feed the open recording session, and -- rate-limited -- the plugin transport endpoint.
 
         For a stream-copy (encoded) source this is the BEST-EFFORT decode branch: it feeds live
@@ -691,7 +701,7 @@ class CapturePipeline:
                             # upstream declined that allocator, 1.28 copies in C into its pool.
                             ubuf = frame_bytes.to_buffer(tpts, stamp.frame_id)
                         else:
-                            # Keep the live byte path and older unixfd runtimes unchanged.
+                            # Byte payloads and older unixfd runtimes still need a memfd copy.
                             fd = os.memfd_create("cam", 0)
                             try:
                                 os.ftruncate(fd, len(frame_bytes))
@@ -716,17 +726,16 @@ class CapturePipeline:
                         timestamp_ns=stamp.timestamp_ns, frame_id=stamp.frame_id,
                         width=self._width, height=self._height,
                         pixfmt=self._gst_format, ts_source=stamp.source.value).pack()
+                    if self._queue_full(self.transport_src, len(hdr) + len(frame_bytes),
+                                        "shm transport", publish=True):
+                        return
                     if isinstance(frame_bytes, GstFrame):
-                        if self._queue_full(self.transport_src, len(hdr) + len(frame_bytes),
-                                            "shm transport", publish=True):
-                            return
                         buf = frame_bytes.to_buffer(tpts, stamp.frame_id, prefix=hdr)
                         self._push_checked(self.transport_src, buf, "shm transport", publish=True)
                     else:
                         payload = hdr + frame_bytes
-                        if not self._queue_full(self.transport_src, len(payload), "shm transport", publish=True):
-                            self._push_checked(self.transport_src, _new_buffer(payload, tpts, stamp.frame_id),
-                                               "shm transport", publish=True)
+                        self._push_checked(self.transport_src, _new_buffer(payload, tpts, stamp.frame_id),
+                                           "shm transport", publish=True)
             except Exception as e:
                 # The plugin endpoint is best-effort: a per-frame publish failure (e.g. a
                 # TransportError for a pixel format the header can't carry, or a memfd
@@ -1278,11 +1287,14 @@ class CapturePipeline:
             self.shutdown()
 
     def _start_source(self) -> None:
-        # Only ReplaySource opts in. Live GigE/USB/RTSP, pcap, and external byte consumers
-        # keep their existing callback contracts and reconnect behavior.
+        # GStreamer live sources detach from capture pools before sharing pixels;
+        # replay can retain its decoder buffers. Other sources keep the byte seam.
         start = getattr(self.source, "start_buffers", None)
         if start is not None:
-            start(self._on_frame, self._on_encoded, shared_memory=self._unixfd_pool)
+            kwargs = {"shared_memory": self._unixfd_pool}
+            if not self.source.finite:
+                kwargs["bytes_required"] = lambda: self._tiler is not None or self._splitter is not None
+            start(self._on_frame, self._on_encoded, **kwargs)
         else:
             self.source.start(self._on_frame, self._on_encoded)
 

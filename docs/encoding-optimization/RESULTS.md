@@ -496,3 +496,282 @@ red, its blue, the mean of its two greens. Built with `gcc -O3` in the bridge im
 One thing to watch when measuring on this host: with an image build running, the same bridge measured
 47% and 73% of a core minutes apart. Per-frame CPU figures here were taken on an idle machine, or back to
 back under the same load.
+
+## 11. Further copy and metadata reductions (local validation)
+
+These changes were checked in ARM64 Linux containers on a development Mac, **not on the Orin**.
+They do not change pixel values, recording quality, or capture timestamps.
+
+- **Live USB/RTSP/shm buffers:** the core accepts `GstFrame` payloads from these sources. A deep
+  pixel copy in GStreamer releases the upstream capture/decoder/shm pool immediately; downstream
+  recording and transport buffers share that owned allocation. This removes the Python image
+  round trip, not every memory copy. Keeping a camera-owned buffer indefinitely would exhaust small
+  live pools when the recorder or a consumer holds many frames. Tests retain 40 outputs from a
+  one-slot source pool and check every pixel after reuse. Bayer tiling and the 16-bit split keep
+  the byte path, with the policy following runtime recording settings, so transforms do not acquire
+  an extra copy. The header transport also checks its queue limit before concatenating a byte frame.
+- **Encoded recording without consumers:** live USB/RTSP omit their decode branch when the
+  resolved recorder is `stream-copy` and local preview, raw endpoint, and plugin endpoint are all
+  disabled. The encoded branch still owns stamps, accounting, and liveness, including standby and
+  reconnect. Re-encoding or any raw output retains decoding. A fake MJPEG source is checked against
+  its recorded bytes and sidecar frame IDs/timestamps with no raw sink present.
+- **ROS 2 publication:** both bridge transports describe the input YUV layout in `FrameMeta`;
+  publication converts directly into the image message's owned vector. The intermediate RGB vector
+  and its subsequent copy are removed. The full-range conversion arithmetic is unchanged. The C++
+  integration test covers six YUV layouts, RGB passthrough, short inputs, timestamps, and messages
+  retained after later source-buffer reuse, through both header and unixfd components.
+- **ROS 2 input conversion:** appsrc keeps two waiting frames and drops the oldest before decoding
+  or conversion. Overload therefore cannot grow an unbounded conversion backlog. Drop accounting
+  works on GStreamer 1.20 without the newer `appsrc.dropped` property and includes the discarded tail
+  when input geometry changes or the converter stops. Deterministic overload tests check that the
+  surviving frames retain their original pixels and stamps.
+- **Replay/export metadata:** CSV stamps use compact integer columns, materializing a `FrameStamp`
+  only when consumed. Export retains numeric PTS instead of dictionaries and strings for every row;
+  it copies the original CSV byte-for-byte and validates hashes, stamps, PTS, and decoded counts.
+  Integer overflow values, nullable chunks, unknown-source fallback, extra CSV fields, quoted
+  newlines, and lexical integer formatting are covered. Replay still loads all selected metadata;
+  it has not gained fragment seeking or a streaming index.
+
+Identical synthetic CSV, 216,000 rows (one hour at 60 fps), old code versus this implementation:
+
+| Host measurement | Before | After |
+|---|---:|---:|
+| Replay retained Python allocations (`tracemalloc`) | 62.69 MiB | 9.03 MiB |
+| Export retained Python allocations (`tracemalloc`) | 200.87 MiB | 10.74 MiB |
+| Replay peak RSS increase, fresh untraced process | 74.33 MiB | 19.44 MiB |
+| Export peak RSS increase, fresh untraced process | 234.17 MiB | 21.91 MiB |
+
+RSS is measured with `resource.getrusage` before and after each call; Python allocation measurements
+are separate runs. Parsing times varied, so these are memory results, not a CPU-speedup claim.
+The median-interval calculation still temporarily builds a list of timestamp differences.
+
+Short live-path A/B runs with `core-driver/tools/live_buffer_benchmark.py`, recording disabled and
+an attached transport consumer (three seconds each, sequential on this host):
+
+| Runtime / workload | Bytes CPU per frame | Owned-buffer CPU per frame |
+|---|---:|---:|
+| GStreamer 1.28.2 unixfd, 2448x2048 GRAY8 at 24 fps | 6.9728 ms | 4.9399 ms |
+| GStreamer 1.28.2 unixfd, 1920x1080 I420 at 30 fps | 4.4957 ms | 3.4085 ms |
+| GStreamer 1.20.3 shm, 2448x2048 GRAY8 at 24 fps | 8.7177 ms | 7.9534 ms |
+
+Every expected frame arrived (72 or 90 per run), with zero source gaps, enqueue failures, or publish
+drops. CPU includes the synthetic source, core, and same-process consumer. These short samples show
+the copy-path effect on this host, not a production or Jetson capacity limit. Reproduce each pair
+with and without `--legacy-bytes`; `--raw-endpoint --preview` also exercises those branches:
+
+```sh
+python3 core-driver/tools/live_buffer_benchmark.py --seconds 3 --legacy-bytes
+python3 core-driver/tools/live_buffer_benchmark.py --seconds 3
+python3 core-driver/tools/live_buffer_benchmark.py --seconds 3 --width 1920 --height 1080 --format I420 --fps 30 --legacy-bytes
+python3 core-driver/tools/live_buffer_benchmark.py --seconds 3 --width 1920 --height 1080 --format I420 --fps 30
+```
+
+The ROS 2 component library builds on Lyrical with GStreamer 1.28.2 and passes its `image_copy`
+CTest. The full hardware-free Python suite on that runtime reports 792 passed and two failures;
+both failures reproduce on the unchanged baseline, where the multipart export fixture tries to
+rewrite PTS on an immutable probe buffer under the newer PyGObject. The new tests do not bypass
+those checks. Hardware capture, NVENC, and Jetson performance qualification are covered below.
+On GStreamer 1.20.3 (Ubuntu 22.04), all 120 focused tests pass: live buffer ownership and reconnect,
+ROS input overload, compact metadata, replay buffers/integrity, mixed recording settings, proxy
+export (including the multipart fixtures), publication throttling, and shm input. After the final
+queue-rejection adjustment, the 41 affected buffer/publication tests also pass again on 1.28.2.
+
+## 12. Orin validation of the copy and metadata changes
+
+Tested on November 13, 2026 on `10.160.1.21`, AGX Orin, L4T R39.2.1,
+kernel 6.8.12-1021-tegra, 12 CPUs, MAXN.
+Source was an isolated snapshot of this working tree based on `356c656`; the unchanged commit
+was staged separately for A/B comparisons. Existing services, camera controls, power mode, and
+clock settings were left in place. Test containers used private sockets and read-only source mounts.
+
+Functional results:
+
+- **794/794 Python tests pass** on each of `local/cam-core:jp7` (GStreamer 1.24.2) and
+  `local/cam-dev:gst1289-dev` (1.28.9), with no skipped tests. Both multipart export fixtures pass
+  on these target images. The suite was CPU-limited to four cores; these timings are not benchmarks.
+- **NVDEC and source-copy:** each runtime passes eight synthetic H.264/H.265 cases, 40 frames each: raw output
+  off/on, before/after source reopen. Recorded picture NAL payloads are byte-identical, every
+  decoded frame and sidecar row survives, and capture timestamps match. Live NVDEC pixels match
+  decoding the recording, and retained owned frames stay intact after teardown and reopen.
+  Matroska packet framing and parameter-set placement can differ; NAL payload comparison accounts
+  for that without relaxing picture-data equality.
+- **NVENC fragments:** on JP7, the `videoconvert` and `nv12` feeds separately pass 12/12 random
+  2448x2048 frames bit-exact through the hardware encoder and software decoder.
+- **Whole recording path:** 48 frames of 2448x2048 GRAY8 at 24 fps pass through live owned buffers,
+  the real NV12/NVENC recorder, and replay with exact pixels, IDs, and timestamps. A second run of
+  48 640x512 GRAY16 frames at 60 fps proves the folded split's byte fallback and exact 16-bit
+  reconstruction. Both have zero source gaps, enqueue failures, or publish drops.
+- **Real USB:** the attached NexiGo webcam supplies MJPEG 1280x720 at requested 30 fps: 60 frames
+  recorded with raw output disabled, then stop/reopen and 60 with raw output enabled. Both have
+  exact CSV IDs/timestamps, exact decoded pixels, and zero reported drops. The second run delivers
+  60 owned frames and 60 identical preview frames; retained pixels survive stop. `jpegparse` removes
+  1–7 padding bytes after JPEG EOI on some input packets: each affected recorded packet is an exact
+  source prefix, with compressed image data unchanged. The camera is released after the test.
+- **ROS 2:** the actual current and baseline component libraries build on the Orin and pass the
+  same `image_copy` integration test, covering both transports, six YUV layouts, short inputs,
+  pixel/metadata equality, and retained message lifetime.
+
+The same 216,000-row CSV was measured in fresh Python processes on the Orin. Peak RSS increase
+after imports falls from **72.27 to 9.44 MiB** for replay and **231.95 to 10.12 MiB** for export.
+Separate `tracemalloc` observations give retained allocations of 62.72 → 9.04 MiB and
+200.90 → 10.75 MiB respectively. No parsing-speed claim is made.
+
+Live-buffer CPU was measured with `core-driver/tools/live_buffer_benchmark.py`: a paced fake USB
+source feeds the real `CapturePipeline` and an attached unixfd consumer, with recording, preview,
+and the raw endpoint off. The same current code uses `--legacy-bytes` to select the original byte
+callback path. Each runtime/workload has a three-second warmup followed by ten-second A/B/B/A
+samples. All 4,320 measured frames arrive, with no gaps, drops, errors, or forced EOS shutdown.
+CPU includes the synthetic source and consumer callbacks. Values are the mean of two samples:
+
+| Runtime | Workload | Bytes CPU ms/frame | Owned-buffer CPU ms/frame | CPU reduction |
+|---|---|---:|---:|---:|
+| JP7 / GStreamer 1.24.2 | 2448x2048 GRAY8, 24 fps | 21.8555 | 21.8275 | 0.1% |
+| JP7 / GStreamer 1.24.2 | 1920x1080 I420, 30 fps | 16.2895 | 16.3849 | −0.6% |
+| GStreamer 1.28.9 | 2448x2048 GRAY8, 24 fps | 19.4089 | 13.7403 | 29.2% |
+| GStreamer 1.28.9 | 1920x1080 I420, 30 fps | 15.0276 | 11.3502 | 24.5% |
+
+JP7's older unixfd sink still requires the per-frame memfd copy, and this workload shows no
+meaningful CPU improvement there. The 1.28 sink exposes its native memory pool and avoids that
+Python-side transport work. These are short, serial comparisons on the running Orin with normal
+dynamic clocks and existing background services, not a production throughput or latency guarantee.
+
+The C++ ROS bridge was measured separately with unchanged-baseline/current/baseline libraries,
+a paced 1920x1080 I420 unixfd producer, and an interprocess typed ROS subscriber. Each run used
+an isolated Zenoh router, 90 warmup frames, and a 20-second measurement window; CPU is for the
+bridge process only. All runs sustain 30 fps with zero gaps and zero metadata or timestamp errors;
+full pixel equality is sampled every 30 frames, with no mismatches. Baseline samples are 28.1032
+and 28.1833 CPU ms/frame; the optimized sample is 28.0167.
+The **0.45% difference establishes no material CPU improvement** for ROS publication on this host,
+despite removing the intermediate RGB allocation/copy. An earlier FastDDS attempt could not
+deliver enough large images during warmup and is excluded from the comparison.
+
+Raw text logs, reproduction harnesses, source/fixture hashes, and JSON results are retained on the
+Orin under `/tmp/camera-opt-check.89bAqI/reports/`. Captured webcam media stays on the Orin.
+
+## 13. Follow-up: ROS shared-memory transport
+
+On the same Orin, the current Release bridge was measured with a paced 1920x1080 I420 producer
+and a separate typed ROS subscriber receiving `rgb8` at 30 fps. The installed Zenoh configuration
+defaults to SHM disabled. Both endpoints and the private router were explicitly configured for
+each mode, inside an isolated container with a 1 GiB `/dev/shm`; production services were unchanged.
+
+Each sample runs for 20 seconds after 90 warmup frames, in the order off/on/pool/pool/on/off.
+All 3,604 measured frames pass metadata and timestamp-order checks, with zero gaps; full pixel
+equality is sampled every 30 frames. The table reports means of the two samples per mode, including
+the mean of their individual p95 latencies. Latency runs from the synthetic producer's host timestamp
+to the subscriber callback, not from a physical sensor exposure.
+
+| Mode | Bridge CPU ms/frame | Bridge + subscriber + router CPU ms/frame | Subscriber p95 ms | Bridge RSS MiB |
+|---|---:|---:|---:|---:|
+| SHM off | 27.50 | 39.10 | 34.95 | 73.0 |
+| SHM on | 20.64 | 25.69 | 26.93 | 144.3 |
+| SHM on, serialization pool capped at 64 MiB | 20.84 | 26.25 | 27.65 | 144.6 |
+
+SHM reduces bridge CPU by **25.0%** and the measured ROS processes' combined CPU by **34.3%**.
+The extra serialization-pool capacity shows no benefit in this workload. RSS includes shared
+mappings: these per-process values must not be added together as physical RAM usage.
+
+This is verified SHM delivery, rather than merely an enabled setting: both processes map matching
+Zenoh shared segments, and loopback receive traffic falls from **6,235,436 to 192 bytes/frame**.
+All enabled samples use a **48 MiB transport pool** and a **512-byte message threshold**. The pool
+variant changes only `RMW_ZENOH_BUFFER_POOL_MAX_SIZE_BYTES=67108864` at both ROS endpoints.
+
+For same-host subscribers, enable `zenoh_shm: true` on the bridge and the corresponding SHM
+configuration on the subscriber; they must share the same IPC namespace. The existing
+[ROS bridge configuration](../../plugins/ros2-bridge/README.md#tuning-zenoh-for-large-images) documents these
+settings. Remote peers and larger/multiple image streams need their own measurements and pool sizing.
+This test does not change deployment defaults.
+
+Reproduction scripts, individual JSON samples, process mappings, version details, and
+`ros-shm-summary.json` remain in the isolated Orin staging directory and its `reports/` directory.
+
+## 14. Follow-up: indexed late-window replay
+
+Replay can start decoding at the fragment containing a later window. The first indexed open scans
+the compressed session and checks its total packet count and per-packet PTS against the CSV before
+trusting a frame offset. A missing first packet cannot be mistaken for a harmless muxer offset.
+Reordered/B-frame timing and other ambiguous layouts retain sequential decoding. A window in the
+first half of the session, or in its first fragment, also retains the original path to avoid a full
+compressed scan for a small skip. The index stays in memory and is reused on restart only while
+the CSV and video files' stat identities remain unchanged.
+
+On the Orin's GStreamer 1.28.9 image, the same 3,600-frame, 1280x720 GRAY8/30 fps FFV1 fixture
+was used before and after, in A/B/B/A order. It has 12 fragments and the window starts at frame
+3,450. File hashes are verified before timing, so these are **warm filesystem cache** measurements.
+All 150 delivered frames in each phase have exact pixels, IDs, and timestamps.
+
+| Measurement | Before, two samples | After, two samples |
+|---|---|---|
+| Open/configure to first delivered frame | 8.260 / 8.179 s | 0.647 / 0.522 s |
+| Restart to first delivered frame | 8.039 / 8.141 s | 0.394 / 0.368 s |
+| Frames decoded per phase | 3,600 | 300 |
+| Compressed packets scanned for first open / restart | 0 / 0 | 3,600 / 0 |
+
+Mean first-frame delay falls **92.9%** and restart delay **95.3%**. Peak RSS remains approximately
+96 MiB. The fixture uses synthetic flat patterns; this is not a cold-storage or arbitrary-codec
+speedup claim. Initial indexing still reads the entire compressed session. Skipped pixels are not
+decoded, so full pixel/decode validation still requires an unwindowed replay.
+
+`core-driver/tools/replay_window_benchmark.py` generates the fixture and measures exact first-start
+and restart delivery against two source snapshots. Orin artifacts are
+`reports/replay-window-{before,after}-{a,b}.json` and `reports/replay-window-fixture/` under the
+isolated staging directory. No persistent recording files or sidecars are rewritten by indexing.
+
+The final source additionally stops indexing immediately when a non-keyframe start or reordered
+packet PTS proves the layout unsuitable; it does not scan the remaining archive before falling
+back. This fallback-only shortcut followed the measured runs and leaves their eligible FFV1 path
+unchanged. Regression coverage includes successful P-only H.264/H.265 windows and restart, plus
+B-frame early fallback, missing-first-packet refusal, changed-file invalidation, and early windows.
+
+## 15. Follow-up: ten-minute combined-load soak
+
+On November 13–14, the Orin ran a synthetic 2448x2048 GRAY8 source at 24 fps for 600 seconds through
+owned live buffers, lossless NVENC recording, a headless GStreamer preview, unixfd monitoring, and
+the actual ROS bridge with verified Zenoh SHM settings. Separate phases slowed each consumer,
+disconnected/reconnected the plugin and ROS consumers, and invoked two source watchdog reconnects.
+A 45-second target smoke passed first, with all 1,033 captured frames preserved exactly.
+
+The long run passes full verification:
+
+- **14,354 generated = captured = CSV rows = decoded frames**, with every recorded pixel hash,
+  frame ID, and capture timestamp exact. Source gaps, missing frames, enqueue failures, core
+  publication drops, and PTS rebases are all zero.
+- Both source reconnects complete. Effective capture rate is **24.0001 fps**, excluding about two
+  seconds of deliberately injected reconnect silence; no generated frame was lost before admission.
+- Every delivered preview/plugin frame is hash-checked during capture. All **13,564 delivered ROS
+  images** match captured hashes and stamps, including **11,618/11,618 normal-phase frames**.
+  Slow/disconnected consumers intentionally receive fewer frames: preview totals 13,857 and plugin
+  monitoring 13,562. The plugin's normal-phase count is 11,617/11,618, allowing for the stress boundary.
+- The entire recording is replayed afterward: **71.96 GB of decoded pixels** checked in 111.8 seconds.
+  This verification time is separate from the 600-second capture run.
+
+Local receipt latency uses the service's host-arrival timestamp and bounded 1 ms histogram bins:
+
+| Consumer | Normal p95 upper bound | Normal p99 upper bound | Stress p99 upper bound |
+|---|---:|---:|---:|
+| Headless preview | 10 ms | 11 ms | 130 ms |
+| unixfd monitor | 12 ms | 13 ms | 90 ms |
+| ROS subscriber | 20 ms | 21 ms | 223 ms |
+
+Phase classification uses receipt time, so a delayed frame can cross a stress boundary; observed
+normal-phase maxima were 125/89/206 ms respectively. These are instrumented local measurements,
+including full-frame SHA256 checks, not physical exposure-to-display or browser latency.
+
+Capture RSS peaks at **649.3 MiB** and settles there after an early increase of about 15 MiB.
+The ROS bridge peaks at **142.3 MiB** and its reader at **163.2 MiB**, with under 0.05 MiB change
+between their early and final sample means. Per-process RSS includes shared mappings. This ten-minute
+observation establishes stable operation for the tested workload; it is not an indefinite leak test.
+
+`core-driver/tools/combined_load_soak.py` contains the capture, ROS reader, and full verification
+commands. It keeps only bounded metadata/histograms in memory and streams manifests to disk.
+The Orin staging directory retains `reports/combined-soak-600/summary.json`, per-second metrics,
+full manifests, and the recordings; `reports/run_camera_combined_soak.py` and the private ROS
+launcher drive the isolated test containers. Media stays on the Orin.
+
+Final regression validation on the Orin/GStreamer 1.28.9 snapshot passes **829 tests**:
+672 core-driver, 132 WebRTC, and 25 tooling tests, with no final failures or skips. Tooling's offline
+Compose checks use read-only CLI binaries without a Docker daemon socket. The combined final JUnit
+report is `reports/camera-final-tests.xml`; passing core/tooling reports retain the individual runs.
+Local GStreamer 1.24.2 validation also passes the replay/export group and the final 22 focused
+index/integrity cases. All temporary test containers are removed after validation; source snapshots,
+reproduction scripts, and test artifacts remain in the isolated Orin staging directory.

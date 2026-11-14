@@ -44,6 +44,10 @@ pinned format + geometry + fps, compressed, qos); nothing is configured twice.
   `videoconvert ! videoscale` (and `jpegdec` / `pngdec` for CompressedImage) to the pinned caps.
   Supported encodings: rgb8, bgr8, rgba8, bgra8, mono8, mono16 (either endianness), yuv422,
   yuv422_yuy2, uyvy, nv12, nv24, bayer_{rggb,bggr,gbrg,grbg}8. Others are dropped and logged once.
+- **Conversion overload.** At most two frames wait ahead of decoding/conversion, in addition to the
+  frame being processed. New input replaces the oldest waiting frame, keeping output current without
+  blocking the ROS executor. These drops, and unfinished frames discarded when the input format
+  changes, are included in the logged dropped count. This also applies to reliable ROS subscriptions.
 - **Stamps.** `header.stamp` is the frame's capture time (`camera` provenance in the header / the
   unixfd `offset_end`); a zero stamp means arrival (`system`). With `raw` framing the core stamps on
   arrival regardless. Frame ids are minted here, monotonic from 1.
@@ -67,4 +71,6 @@ The compose service (`compose.yml`, profile `ros2-source`) is included by the to
 
 `core-driver/tests/test_ros2_source.py` (host, no ROS): the encoding table, the pinned-format
 decisions, row unpadding, and the header — packed here and by `cam_driver.transport`, compared byte
-for byte. The end-to-end path is a bench check: a topic on the graph → the instance's WebRTC preview.
+for byte. `core-driver/tests/test_ros2_source_feeder.py` (GStreamer, no ROS) verifies bounded conversion
+overload, newest-frame pixels/stamps, and drop accounting across format changes. The end-to-end path
+is a bench check: a topic on the graph → the instance's WebRTC preview.

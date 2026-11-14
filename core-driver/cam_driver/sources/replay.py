@@ -41,6 +41,7 @@ branch's stamp correlation may briefly cross cycles; the recording branch is in-
 """
 from __future__ import annotations
 
+import csv
 import logging
 import os
 import threading
@@ -107,6 +108,69 @@ def legacy_luma_note(header: dict) -> Optional[str]:
 _SHAPE_KEYS = ("pixel_format", "width", "height", "bayer_pattern")
 
 
+class _WindowIndexUnavailable(ValueError):
+    """The compressed stream cannot establish an unambiguous CSV frame boundary."""
+
+
+class _WindowIndexCorrupt(ValueError):
+    """A complete compressed scan disproved the recording's CSV correspondence."""
+
+
+def _file_signature(path):
+    stat = os.stat(path)
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+def _index_fragment(path, media_pts, first_row, offset, *, max_packets=None):
+    """Count demuxed video packets without decoding, verifying every ordinal against CSV PTS.
+
+    A fixed mux offset and Matroska's millisecond rounding are allowed, exactly as in
+    export validation. Reordered/B-frame packets, missing PTS, a non-keyframe start,
+    or any ambiguity fall back to the ordinary full decode; never guess a row offset.
+    This checks compressed packet structure/timing, not skipped pixels' decodability.
+    """
+    quoted = path.replace('\\', '\\\\').replace('"', '\\"')
+    pipeline = Gst.parse_launch(
+        f'filesrc location="{quoted}" ! matroskademux ! '
+        'appsink name=index sync=false max-buffers=4 drop=false')
+    sink, bus = pipeline.get_by_name("index"), pipeline.get_bus()
+    count, previous, problem = 0, None, None
+    try:
+        pipeline.set_state(Gst.State.PLAYING)
+        while True:
+            sample = sink.emit("try-pull-sample", 5 * Gst.SECOND)
+            if sample is None:
+                msg = bus.timed_pop_filtered(Gst.SECOND, Gst.MessageType.ERROR | Gst.MessageType.EOS)
+                if msg is None or msg.type != Gst.MessageType.EOS:
+                    raise _WindowIndexUnavailable(f"cannot scan fragment {path}")
+                if not count:
+                    raise _WindowIndexUnavailable(f"empty fragment {path}")
+                return count, offset, problem
+            buf = sample.get_buffer()
+            actual, row = int(buf.pts), first_row + count
+            if actual == Gst.CLOCK_TIME_NONE or row >= len(media_pts):
+                problem = problem or "missing PTS or more packets than CSV rows"
+            if not count and buf.has_flags(Gst.BufferFlags.DELTA_UNIT):
+                raise _WindowIndexUnavailable("fragment does not start at a random-access frame")
+            if previous is not None and actual < previous:
+                # Demux ordinals cannot index presentation-order CSV rows. No amount
+                # of scanning the remaining archive can make this layout eligible.
+                raise _WindowIndexUnavailable("presentation-reordered packets")
+            if buf.has_flags(Gst.BufferFlags.CORRUPTED):
+                problem = problem or "corrupt packets"
+            if actual != Gst.CLOCK_TIME_NONE and row < len(media_pts):
+                if offset is None:
+                    offset = actual - media_pts[row]
+                if abs(actual - offset - media_pts[row]) > 1_000_000:
+                    problem = problem or f"packet {row} does not align with its CSV PTS"
+            previous = actual
+            count += 1
+            if max_packets is not None and count >= max_packets:
+                return count, offset, problem
+    finally:
+        pipeline.set_state(Gst.State.NULL)
+
+
 def _probe_mkv(path: str, timeout_s: int = 5):
     """Read the first part's video-track caps name from the matroska headers (PAUSED is
     enough -- no decode, no full-file scan). Returns e.g. 'video/x-ffv', or None."""
@@ -155,12 +219,14 @@ class ReplaySource(GstPipelineSource):
         self.cfg = cfg
         self.pb_cfg = pb_cfg
         self._sessions: List[playback.RunInfo] = []
-        self._session_stamps: List[List[FrameStamp]] = []   # per session, CSV row N = frame N
+        self._session_stamps: List[playback.FrameStamps] = []   # per session, CSV row N = frame N
         self._session_caps: List[str] = []
+        self._csv_signatures = []
+        self._window_indexes = {}   # session -> (file signatures, (fragment, first CSV row))
         self._session_idx = 0
         self._first_idx = 0         # the first session inside the window (where a cycle starts)
         self._run: Optional[playback.RunInfo] = None   # the session being read right now
-        self._csv_stamps: List[FrameStamp] = []
+        self._csv_stamps = playback.FrameStamps()
         self._idx = 0
         self._cycle = 0
         self._offset = 0            # retime + loop shift applied to every delivered stamp
@@ -205,12 +271,18 @@ class ReplaySource(GstPipelineSource):
         self._sessions = playback.discover_sessions(self.cfg.path, getattr(self.cfg, "run", ""),
                                                    getattr(self.cfg, "sessions", None))
         self._session_stamps = []
+        self._csv_signatures = []
+        self._window_indexes.clear()
         for run in self._sessions:
+            signature = _file_signature(run.csv_path)
             stamps = playback.load_stamps(run.csv_path)
+            if signature != _file_signature(run.csv_path):
+                raise ValueError(f"replay: {run.csv_path} changed while loading timestamps")
             if not stamps:
                 raise ValueError(f"replay: {run.csv_path} has no frame rows")
             _check_glob_hazards(run)
             self._session_stamps.append(stamps)
+            self._csv_signatures.append(signature)
         hdr = self._sessions[0].header
         for run in self._sessions[1:]:
             drift = [k for k in _SHAPE_KEYS if run.header.get(k) != hdr.get(k)]
@@ -220,9 +292,9 @@ class ReplaySource(GstPipelineSource):
                     f"{run.base}) -- one run must play as one camera; pin one with replay.run")
 
         # ---- the timeline: one zero for the whole run (+ the window on it) ----
-        all_ts = [s.timestamp_ns for stamps in self._session_stamps for s in stamps]
-        self._median_ns = playback.median_interval_ns([s.timestamp_ns for s in self._session_stamps[0]])
-        ts_first, ts_last = all_ts[0], all_ts[-1]
+        self._median_ns = playback.median_interval_ns(self._session_stamps[0].timestamps)
+        ts_first = self._session_stamps[0].timestamps[0]
+        ts_last = self._session_stamps[-1].timestamps[-1]
         self._span_ns = (ts_last - ts_first) + self._median_ns
         epoch = getattr(self.pb_cfg, "epoch_unix_ns", None)
         self._epoch_cfg = epoch
@@ -318,7 +390,7 @@ class ReplaySource(GstPipelineSource):
         self._activate_session(self._first_idx)
         log.info("replay source: %s (%d session(s), %d frames, %s -> %s, ~%.1f fps, %.1fs on the "
                  "timeline%s%s%s%s)",
-                 os.path.dirname(self._sessions[0].base), len(self._sessions), len(all_ts),
+                 os.path.dirname(self._sessions[0].base), len(self._sessions), sum(map(len, self._session_stamps)),
                  "/".join(dict.fromkeys(caps)), "stream-copy" if stream_copy else hdr.get("pixel_format"),
                  self.delivered_frame_rate or 0.0, self._playback.duration_s,
                  f", epoch {self._epoch_ns}" if epoch is not None else "",
@@ -354,11 +426,82 @@ class ReplaySource(GstPipelineSource):
             log.info("replay: session %s CFA mode %s/%s -- un-tiling to the original mosaic",
                      self._run.base, tile_mode, pattern)
         self._csv_stamps = self._session_stamps[idx]
-        self._idx = 0
+        self._part_idx, self._idx = self._window_start(idx)
         self._playback.source_path = self._run.base
         self._playback.proxy = ({**hdr["proxy"], **(getattr(self.cfg, "proxy", None) or {})}
                                 if hdr.get("proxy") else None)
         self._playback.session = idx
+
+    def _window_start(self, session_idx):
+        """Start at the first fragment intersecting the window, with a verified CSV cursor.
+
+        Late windows only: scanning an archive to avoid a short decoded prefix can
+        cost more than it saves, so the first half keeps ordinary sequential replay.
+        The first eligible lookup reads the complete compressed session once, checking its
+        total count before trusting a fixed mux offset (a missing first packet must
+        not masquerade as that offset). Restarts/loops reuse the
+        in-memory boundary only while every file's identity/size/timestamps are unchanged.
+        Skipped packets are checked against CSV PTS; their pixels are intentionally not
+        decoded. Full-file decode validation still requires a replay without a window.
+        """
+        run, stamps = self._sessions[session_idx], self._session_stamps[session_idx]
+        if self._from_ns is None or len(run.mkv_paths) < 2:
+            return 0, 0
+        target = next((i for i, ts in enumerate(stamps.timestamps) if ts >= self._from_ns), 0)
+        if not target or target * 2 < len(stamps):
+            return 0, 0
+        signature = (_file_signature(run.csv_path), *(_file_signature(p) for p in run.mkv_paths))
+        if signature[0] != self._csv_signatures[session_idx]:
+            raise ValueError(f"replay: {run.csv_path} changed after loading timestamps; reopen the source")
+        cached = self._window_indexes.get(session_idx)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        start = (0, 0)
+        try:
+            media_pts = playback.CompactIntegers()
+            with open(run.csv_path, newline="") as stream:
+                for row in csv.DictReader(stream):
+                    point = int(row["pts_ns"])
+                    if point < 0 or (media_pts and point <= media_pts[-1]):
+                        raise _WindowIndexUnavailable("CSV PTS is not nonnegative and strictly increasing")
+                    media_pts.append(point)
+            if len(media_pts) != len(stamps):
+                raise _WindowIndexUnavailable("CSV frame count changed")
+            first_row, offset, problem = 0, None, None
+            for part, path in enumerate(run.mkv_paths):
+                count, offset, issue = _index_fragment(path, media_pts, first_row, offset,
+                                                       max_packets=target + 1 if part == 0 else None)
+                if part == 0 and count > target:
+                    # The window lies in fragment zero: no decode can be skipped.
+                    # Do not read the rest of an archive merely for a small from_s.
+                    start = (0, 0)
+                    break
+                problem = problem or issue
+                if first_row <= target < first_row + count:
+                    start = part, first_row
+                first_row += count
+            else:
+                if first_row != len(stamps):
+                    raise _WindowIndexCorrupt(f"replay: {run.base} has {first_row} compressed packets but "
+                                              f"{len(stamps)} CSV rows; refusing an untrustworthy window")
+                if problem:
+                    raise _WindowIndexUnavailable(problem)
+        except _WindowIndexCorrupt:
+            raise
+        except (ValueError, KeyError, TypeError, GLib.Error) as exc:
+            # Older muxers/recordings can have timing conventions that are unsuitable
+            # for indexing. Preserve their existing full-decode behavior and checks.
+            log.warning("replay: cannot index window for %s (%s); decoding from the first fragment",
+                        run.base, exc)
+            start = (0, 0)
+        after = (_file_signature(run.csv_path), *(_file_signature(p) for p in run.mkv_paths))
+        if after != signature:
+            raise ValueError(f"replay: {run.base} changed while indexing the playback window")
+        self._window_indexes[session_idx] = signature, start
+        if start[1]:
+            log.info("replay: window starts at fragment %d; skipping decode of %d CSV-verified packets "
+                     "(skipped pixels are not decoded)", start[0], start[1])
+        return start
 
     def configure(self) -> None:
         self._gen += 1
@@ -618,13 +761,14 @@ class ReplaySource(GstPipelineSource):
     # ---- EOF / sessions / loop ---------------------------------------------
     def _check_row_count(self) -> bool:
         """Frame N of the recording is re-stamped from CSV row N (ordinal, not keyed), which holds
-        only while every frame the sidecar attests is actually delivered. Fewer frames than rows
-        means a frame went missing somewhere in the decode path -- and every row after it was
+        only while every row has a corresponding frame. A window's skipped prefix is counted
+        by the verified compressed index; the remaining frames are counted by the reader.
+        Fewer frames than rows means a frame went missing -- and every row after it was
         attached to the wrong frame. Say so, loudly, rather than let a silently mis-stamped
         reprocess look complete. (More frames than rows is handled in _new_stamp.)"""
         rows = len(self._csv_stamps)
         if self._idx != rows:
-            log.error("replay: %s has %d rows but %d frames were decoded -- rows after the "
+            log.error("replay: %s has %d rows but %d frames were accounted for -- rows after the "
                         "first missing frame were attached to the wrong frames; the re-recorded "
                         "stamps are NOT trustworthy for this run", self._run.csv_path, rows, self._idx)
             return False

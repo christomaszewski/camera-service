@@ -76,9 +76,17 @@ class UsbSource(GstPipelineSource):
         v4l2_dots = "false" if self._sof else "true"   # false => buf.pts carries the v4l2 driver ts (SOF)
         if self._enc:
             caps, parser, sw_decoder = self._enc
-            decoder, conv = select_decoder(sw_decoder, self._hw_decode_available())
-            log.info("usb decode branch: %s ! %s (%s)", decoder, conv,
-                     "HW NVDEC" if conv == "nvvidconv" else "software")
+            decode_branch = ""
+            if self._raw_output_required:
+                decoder, conv = select_decoder(sw_decoder, self._hw_decode_available())
+                log.info("usb decode branch: %s ! %s (%s)", decoder, conv,
+                         "HW NVDEC" if conv == "nvvidconv" else "software")
+                # A slow decoder must not backpressure the faithful recording branch.
+                decode_branch = (
+                    f"st. ! queue leaky=downstream max-size-buffers=8 ! {parser} ! {decoder} ! {conv} ! "
+                    f"video/x-raw,format=I420,width={w},height={h} ! {raw_sink} ")
+            else:
+                log.info("usb: raw outputs disabled; recording without decoding")
             if self.cfg.fake:
                 enc = _FAKE_ENCODER.get(self.cfg.pixel_format.upper(), "jpegenc")
                 head = (f"videotestsrc is-live=true do-timestamp=true ! "
@@ -91,11 +99,7 @@ class UsbSource(GstPipelineSource):
                 tee_caps = f"{caps},width={w},height={h},framerate={fps}/1"
             return (
                 f"{head} ! {tee_caps} ! tee name=st "
-                # decode branch is BEST-EFFORT (consumers/preview): leaky so a slow/stalled decoder
-                # drops encoded AUs HERE instead of back-pressuring the non-leaky tee and starving
-                # the must-not-drop recording (encsink) branch below.
-                f"st. ! queue leaky=downstream max-size-buffers=8 ! {parser} ! {decoder} ! {conv} ! "
-                f"video/x-raw,format=I420,width={w},height={h} ! {raw_sink} "
+                f"{decode_branch}"
                 # encoded branch must-not-drop: it's the faithful recording
                 f"st. ! queue ! appsink name=encsink emit-signals=true max-buffers=8 drop=false sync=false"
             )

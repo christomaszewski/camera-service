@@ -63,6 +63,11 @@ params:
 - **Buffer pool:** `RMW_ZENOH_BUFFER_POOL_MAX_SIZE_BYTES` caps rmw_zenoh's pool of serialization
   buffers; once a publish exceeds what's left, buffers come from the system allocator each time. Size
   it to a few in-flight frames (e.g. a 5 MP `rgb8` frame is ~15 MB serialized).
+
+A same-host Orin comparison at 1080p30 measured 25% lower bridge CPU with verified SHM delivery,
+using a 48 MiB transport pool; raising the serialization pool cap to 64 MiB added no benefit in
+that workload. Shared mappings increased per-process RSS. See the [measured settings and results](../../docs/encoding-optimization/RESULTS.md#13-follow-up-ros-shared-memory-transport)
+before choosing pool sizes for a different image geometry or subscriber count.
 - **Router:** with the default peer mesh the router only does discovery, so it normally needs no
   tuning. When traffic *is* routed (client mode / remote hub), `tools/zenohd.sh` forwards a
   `ZENOH_CONFIG_OVERRIDE` from its environment to the router the same way.
