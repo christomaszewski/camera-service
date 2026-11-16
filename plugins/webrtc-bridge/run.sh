@@ -39,7 +39,8 @@
 # SIGNALLING_PORT, VIDEO_CAPS (e.g. "video/x-h264" to pin the codec), RUN_SIGNALLING (1=start the
 # bundled signalling server, default 1), CAM_WEBRTC_{MIN,MAX,START}_BITRATE (bit/sec; bound
 # webrtcsink's adaptive-bitrate range -- the element default max is 8 Mbps, raise it for 4K; the floor
-# defaults to 500 kbit/s here, see below), CAM_WEBRTC_CONGESTION ({gcc|homegrown|disabled}, default gcc).
+# defaults to 500 kbit/s here, see below), CAM_WEBRTC_CONGESTION ({gcc|homegrown|disabled}, default gcc),
+# CAM_WEBRTC_MITIGATION (off = webrtcsink never resizes the picture at low bitrates; see below).
 # Viewer sessions (python launcher): CAM_WEBRTC_STALE_S (end a session whose viewer has sent no feedback
 # for this long; default 20, 0 = off), CAM_WEBRTC_MAX_SESSIONS (cap; a newcomer ends the oldest; default
 # off), CAM_WEBRTC_IDLE_FPS (frames per second prepared while NOBODY is watching; default 1, off = every
@@ -281,6 +282,18 @@ SINK="webrtcsink name=cam_webrtcsink signaller::uri=ws://127.0.0.1:${PORT}"
 [ -n "$MAXBR" ]   && SINK="$SINK max-bitrate=${MAXBR}"
 [ -n "$STARTBR" ] && SINK="$SINK start-bitrate=${STARTBR}"
 [ -n "$CC" ]      && SINK="$SINK congestion-control=${CC}"
+# webrtcsink shrinks a viewer's picture by itself when that viewer's bitrate target is low -- to 720
+# rows under 2 Mbit/s, 360 under 1 Mbit/s, and half the frame rate under 500 kbit/s -- changing the
+# frame size in front of the running encoder each time the target crosses one of those marks.
+# CAM_WEBRTC_MITIGATION=off keeps the size this bridge was configured for (CAM_WEBRTC_MAX_SIZE) and lets
+# only the bitrate move; `downscaled` / `downsampled` keep one of the two. Unset = the element's own (both).
+case "$(printf %s "${CAM_WEBRTC_MITIGATION:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
+  "") ;;
+  off|none|false|no|0) SINK="$SINK enable-mitigation-modes=none" ;;
+  downscaled|downsampled) SINK="$SINK enable-mitigation-modes=$(printf %s "$CAM_WEBRTC_MITIGATION" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" ;;
+  on|all|auto|default|true|yes|1) ;;
+  *) echo "webrtc-bridge: CAM_WEBRTC_MITIGATION=${CAM_WEBRTC_MITIGATION} is not off, downscaled or downsampled; ignoring" >&2 ;;
+esac
 
 # Force I420 after videoconvert: webrtcsink's encoders want a YUV format, not GRAY8/RGBx. The leaky
 # queue drops frames if the encoder/network falls behind (live preview: the newest frame wins).

@@ -36,6 +36,7 @@ def test_a_dry_run_starts_nothing_and_describes_each_transport():
     for env, source in zip(_TRANSPORTS, sources):
         summary, pipeline, err = _dry(**env)            # no socket exists, and it did not wait for one
         assert pipeline.startswith(source) and pipeline.rstrip().endswith("min-bitrate=500000")
+        assert "enable-mitigation-modes" not in pipeline       # the element's own, unless asked
         assert "webrtcsink name=cam_webrtcsink signaller::uri=ws://127.0.0.1:8443" in pipeline
         assert "no socket at" not in err
 
@@ -111,3 +112,18 @@ def test_a_shared_encoder_that_cannot_be_had_falls_back_to_per_viewer_and_says_s
         assert "shared_enc" not in pipeline and "(shared encoder)" not in summary, env
         assert why in err and "encoding per viewer" in err, (env, err)
         assert "video/x-raw,format=I420 ! webrtcsink name=cam_webrtcsink" in pipeline
+
+
+def test_low_bitrate_resizing_is_webrtcsinks_own_unless_switched_off():
+    tail = lambda **env: _dry(CAM_PLATFORM="jp7", **env)[1].split("webrtcsink name=cam_webrtcsink ")[1]    # noqa: E731
+    for value in ("off", "OFF", " none ", "false", "0"):
+        assert " enable-mitigation-modes=none" in tail(CAM_WEBRTC_MITIGATION=value), value
+    assert " enable-mitigation-modes=downscaled" in tail(CAM_WEBRTC_MITIGATION="Downscaled")
+    assert " enable-mitigation-modes=downsampled" in tail(CAM_WEBRTC_MITIGATION="downsampled")
+    for value in ("", "on", "all", "auto", "default"):
+        assert "enable-mitigation-modes" not in tail(CAM_WEBRTC_MITIGATION=value), value
+    _, pipeline, err = _dry(CAM_PLATFORM="jp7", CAM_WEBRTC_MITIGATION="sometimes")
+    assert "enable-mitigation-modes" not in pipeline and "CAM_WEBRTC_MITIGATION=sometimes is not" in err
+    # it is a property of the sink, whoever encodes: also with the shared encoder and the gst-launch hatch
+    assert " enable-mitigation-modes=none" in _dry(CAM_TRANSPORT="shm-raw", CAM_LAUNCHER="gst-launch",
+                                                    CAM_WEBRTC_MITIGATION="off")[1]

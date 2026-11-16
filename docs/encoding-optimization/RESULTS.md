@@ -775,3 +775,38 @@ report is `reports/camera-final-tests.xml`; passing core/tooling reports retain 
 Local GStreamer 1.24.2 validation also passes the replay/export group and the final 22 focused
 index/integrity cases. All temporary test containers are removed after validation; source snapshots,
 reproduction scripts, and test artifacts remain in the isolated Orin staging directory.
+
+## 16. Field report: JetPack 6
+
+First runs on a JetPack 6 (R36) vehicle, 2026-11-16, with a 16-bit thermal camera and a 5 MP GigE camera.
+
+**The NV12 feed is not exact on R36.** The start-up proof reported `the NV12 feed is NOT bit-exact on
+this host at 1280x512 (frame 0 of the probe differs, sampled error up to 20 codes)`. Frame 0 is the ramp
+through every code and 20 is 255 − 235: the VIC clamps the NV12 plane to video range, the behaviour R39
+shows only for I420 and GRAY8 (section 3, variant C2). The proof did its job: the 8-bit recorder kept
+the videoconvert feed and the 16-bit split was not used, so the thermal recording stayed on FFV1 at
+about three cores.
+
+**The split now has a second feed.** Where NV12 is not proven, `gray16_split: fold` asks the same proof
+of the videoconvert feed at the split geometry — `videoconvert` builds the encoder's NV24 on the CPU
+and the VIC only uploads it, with no format change to clamp — and uses it on a pass. Measured on the
+R39 bench Orin with the NV12 feed switched off, live 640×512 GRAY16 at 60 fps:
+
+| | CPU, whole core | Size vs raw | Bit-exact |
+|---|---:|---:|---|
+| FFV1 | 295% of a core | 31.3% | 1973/1973 |
+| Split behind the NV12 feed | 46% | 34.3% | 1955/1955 |
+| Split behind the videoconvert feed | 75% | 34.3% | 1935/1935 |
+
+Not yet seen on R36 itself: whether the videoconvert proof passes there at 1280×512, and what it costs.
+The recorder's start-up log answers the first (`gray16_split uses the videoconvert feed`, or the warning
+naming both proofs).
+
+**webrtcsink resizes the picture at low bitrates.** Its mitigation modes (on by default) scale a
+viewer's frames to 720 rows under 2 Mbit/s and 360 under 1 Mbit/s, and halve the frame rate under
+500 kbit/s, changing the frame size in front of the running encoder whenever congestion control moves
+the target across one of those marks. A GigE stream configured for 0.4–2 Mbit/s reset continuously on
+the vehicle while a thermal stream held to 80–300 kbit/s (always inside one band) did not, and the GigE
+stream stopped resetting once bounded to 640 (534 rows, which the 720 mark no longer changes). That fits
+the resize; it does not establish it as the cause. `CAM_WEBRTC_MITIGATION=off` turns the resizing off so that only
+the bitrate moves and `CAM_WEBRTC_MAX_SIZE` alone decides the size.
