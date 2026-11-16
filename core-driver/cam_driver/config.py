@@ -260,8 +260,9 @@ class RecordingConfig:
     # transport and preview keep the 16-bit frame, and the sidecar's gray16_split_mode has replay and
     # export join it again -- which needs a build that knows the field, so it is opt-in.
     #   off | fold
-    # Used with the hardware encoder behind a proven NV12 feed (see nvenc_feed), or with an explicit
-    # encoder: x265-lossless; otherwise the 16-bit frame is recorded as before.
+    # Used with the hardware encoder behind a feed proven bit-exact at the split geometry (NV12, else
+    # videoconvert: see nvenc_feed), or with an explicit encoder: x265-lossless; otherwise the 16-bit
+    # frame is recorded as before.
     gray16_split: str = "off"
     # Threads for the conversion in front of the encoder (x264, x265, ffv1, colour): spreads it over
     # cores so the recorder keeps real time. 0 = all cores. The copy of a mono/Bayer plane into the

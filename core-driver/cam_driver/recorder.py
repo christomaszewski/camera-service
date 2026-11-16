@@ -329,11 +329,12 @@ def build_recorder_description(cfg, bits_per_pixel: int, location_base: str, fps
     ), enc
 
 
-# ---- proving the NV12 feed ---------------------------------------------------------------------
+# ---- proving a feed -----------------------------------------------------------------------------
 _PROBE_ELEMENTS = ("nvvidconv", "nvv4l2h265enc", "h265parse", "avdec_h265", "capssetter", "videoconvert")
-_probe_verdicts: dict = {}       # (width, height) -> True / False; an inconclusive run is not kept
-_probe_retry_at: dict = {}       # (width, height) -> monotonic time before which an inconclusive
+_probe_verdicts: dict = {}       # (feed, width, height) -> True / False; an inconclusive run is not kept
+_probe_retry_at: dict = {}       # (feed, width, height) -> monotonic time before which an inconclusive
 PROBE_RETRY_S = 300.0            #   probe is not run again
+_FEED_NAMES = {"nv12": "NV12", "videoconvert": "videoconvert"}
 
 
 def _probe_frames(width: int, height: int) -> list:
@@ -345,37 +346,51 @@ def _probe_frames(width: int, height: int) -> list:
     return [ramp, os.urandom(width * height), ramp[::-1]]
 
 
-def probe_nv12_feed(width: int, height: int, cfg=None, timeout_s: float = 10.0) -> Optional[bool]:
-    """Is the NV12 feed bit-exact on THIS host at THIS geometry? True, False, or None when the
-    question could not be put (an element missing, the encoder would not start, a timeout).
+def probe_feed(width: int, height: int, cfg=None, feed: str = "nv12", timeout_s: float = 10.0) -> Optional[bool]:
+    """Is `feed` into the hardware lossless encoder bit-exact on THIS host at THIS geometry? True,
+    False, or None when the question could not be put (an element missing, the encoder would not
+    start, a timeout).
 
     Frames go through the recorder's own hardware fragment and come back through the service's own
     read path (sources.replay.raw_decode_chain); every byte of the plane must match. It has to run on
     the host and at the geometry in use, because what it guards against has depended on both before:
     the VIC decides by input format whether to treat a plane as full or limited range (NV12 passes
-    verbatim on R39, I420 and GRAY8 do not), and the height-dependent default of the software
-    conversion went unnoticed for months behind a 512-row test. A verdict is remembered for the life
-    of the process; a JetPack change is a new process.
+    verbatim on R39 and is clamped at 235 on R36; I420 and GRAY8 are clamped on both), and the
+    height-dependent default of the software conversion went unnoticed for months behind a 512-row
+    test. A verdict is remembered for the life of the process; a JetPack change is a new process.
+
+    feed="nv12" is the frame with its chroma appended, straight into `nvvidconv`, which upsamples it
+    to the encoder's NV24. feed="videoconvert" is the GRAY8 plane through `videoconvert` into NV24 on
+    the CPU, so `nvvidconv` only uploads: the feed of every release before NV12, asked about here for
+    the geometries nothing qualified it at (the 16-bit split's double width).
 
     A run that got no verdict is not repeated for PROBE_RETRY_S. It blocks its caller -- the main
     loop, on every recording-settings change -- for up to `timeout_s`, and an encoder that hung once
     is likely to hang again: asked again sooner, the answer is None at once."""
-    key = (int(width), int(height))
+    name = _FEED_NAMES[feed]
+    key = (feed, int(width), int(height))
     if key in _probe_verdicts:
         return _probe_verdicts[key]
     if time.monotonic() < _probe_retry_at.get(key, 0.0):
         return None
     missing = [e for e in _PROBE_ELEMENTS if Gst.ElementFactory.find(e) is None]
     if missing or not nv12_geometry_ok(width, height):
-        log.info("recorder: NV12 feed not probed at %dx%d (%s)", width, height,
+        log.info("recorder: %s feed not probed at %dx%d (%s)", name, width, height,
                  "missing " + ", ".join(missing) if missing else "geometry needs width % 4 == 0 and an even height")
         return None
     from .sources.replay import raw_decode_chain      # the read path; imported late (it imports the sources)
     frames = _probe_frames(width, height)
-    chroma = ChromaBlock(width, height)
     decode = raw_decode_chain("video/x-h265", {"recording_colorimetry": LUMA_COLORIMETRY})
-    desc = (f'appsrc name=s format=time caps="{nv12_feed_caps(width, height, "30/1")}" ! queue ! '
-            f"{_hw_hevc_lossless(cfg, 0, 0)} ! {decode} ! videoconvert ! video/x-raw,format=GRAY8 ! "
+    if feed == "nv12":
+        chroma = ChromaBlock(width, height)
+        wrap = lambda frame: chroma.tail(Gst.Buffer.new_wrapped(frame))             # noqa: E731
+        head = f'appsrc name=s format=time caps="{nv12_feed_caps(width, height, "30/1")}" ! queue ! '
+    else:
+        wrap = Gst.Buffer.new_wrapped
+        head = (f'appsrc name=s format=time caps="video/x-raw,format=GRAY8,width={int(width)},'
+                f'height={int(height)},framerate=30/1" ! queue ! videoconvert n-threads=1 ! '
+                f"video/x-raw,format=NV24,colorimetry={LUMA_COLORIMETRY} ! ")
+    desc = (f"{head}{_hw_hevc_lossless(cfg, 0, 0)} ! {decode} ! videoconvert ! video/x-raw,format=GRAY8 ! "
             "appsink name=o sync=false max-buffers=8")
     pipeline, got, failure = None, [], None
     try:
@@ -384,7 +399,7 @@ def probe_nv12_feed(width: int, height: int, cfg=None, timeout_s: float = 10.0) 
         if pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
             raise RuntimeError("the probe pipeline refused to start")
         for i, frame in enumerate(frames):
-            buf = chroma.tail(Gst.Buffer.new_wrapped(frame))
+            buf = wrap(frame)
             buf.pts, buf.duration = i * Gst.SECOND // 30, Gst.SECOND // 30
             if src.emit("push-buffer", buf) != Gst.FlowReturn.OK:
                 raise RuntimeError("the probe pipeline refused a frame")
@@ -406,19 +421,29 @@ def probe_nv12_feed(width: int, height: int, cfg=None, timeout_s: float = 10.0) 
     if bad:
         a, b = got[bad[0]], frames[bad[0]]
         worst = max(abs(x - y) for x, y in zip(a[::61], b[::61]))
-        log.warning("recorder: the NV12 feed is NOT bit-exact on this host at %dx%d (frame %d of the probe "
-                    "differs, sampled error up to %d codes); keeping the videoconvert feed", width, height,
-                    bad[0], worst)
+        log.warning("recorder: the %s feed is NOT bit-exact on this host at %dx%d (frame %d of the probe "
+                    "differs, sampled error up to %d codes)%s", name, width, height, bad[0], worst,
+                    "; keeping the videoconvert feed" if feed == "nv12" else "")
         _probe_verdicts[key] = False
         return False
     if failure is not None or len(got) < len(frames):
         _probe_retry_at[key] = time.monotonic() + PROBE_RETRY_S
-        log.warning("recorder: NV12 feed probe inconclusive at %dx%d (%s); keeping the videoconvert feed "
-                    "(not asked again for %d s)", width, height,
-                    failure or f"{len(got)} of {len(frames)} frames came back", PROBE_RETRY_S)
+        log.warning("recorder: %s feed probe inconclusive at %dx%d (%s)%s (not asked again for %d s)",
+                    name, width, height, failure or f"{len(got)} of {len(frames)} frames came back",
+                    "; keeping the videoconvert feed" if feed == "nv12" else "", PROBE_RETRY_S)
         return None
-    log.info("recorder: NV12 feed verified bit-exact at %dx%d (%d frames, every 8-bit code)",
-             width, height, len(frames))
+    log.info("recorder: %s feed verified bit-exact at %dx%d (%d frames, every 8-bit code)",
+             name, width, height, len(frames))
     _probe_verdicts[key] = True
     _probe_retry_at.pop(key, None)
     return True
+
+
+def probe_nv12_feed(width: int, height: int, cfg=None, timeout_s: float = 10.0) -> Optional[bool]:
+    """probe_feed for the NV12 feed (recording.nvenc_feed: auto)."""
+    return probe_feed(width, height, cfg, "nv12", timeout_s)
+
+
+def probe_videoconvert_feed(width: int, height: int, cfg=None, timeout_s: float = 10.0) -> Optional[bool]:
+    """probe_feed for the videoconvert feed, at a geometry nobody qualified it at."""
+    return probe_feed(width, height, cfg, "videoconvert", timeout_s)

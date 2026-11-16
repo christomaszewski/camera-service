@@ -210,6 +210,7 @@ class CapturePipeline:
         self._splitter = None
         self._rec_frame_bytes = None
         self._nv12_probe = rec.probe_nv12_feed      # swapped for a stub by the unit tests (it runs the encoder)
+        self._vconv_probe = rec.probe_videoconvert_feed    # likewise: the split's second choice of feed
         self._chroma_blocks = {}                    # (width, height) -> recorder.ChromaBlock, built once
         self._settings_generation = uuid.uuid4().hex
         self._settings_revision = 0
@@ -880,12 +881,18 @@ class CapturePipeline:
         (fragment, encoder, feed) or None, in which case the 16-bit frame is recorded as it always was.
 
         The split only ever sits in front of a lossless 8-bit encoder, where one wrong code in the high
-        half would be 256 counts: the hardware encoder behind the NV12 feed PROVEN bit-exact on this
-        host at the split geometry, or x265-lossless when that is the encoder configured. `auto` never
-        picks a CPU encoder for it: without the hardware it stays FFV1.
+        half would be 256 counts: the hardware encoder behind a feed PROVEN bit-exact on this host at
+        the split geometry, or x265-lossless when that is the encoder configured. `auto` never picks a
+        CPU encoder for it: without the hardware it stays FFV1.
+
+        Two feeds can carry it. NV12 from the feeder is the cheap one and is asked first. Where the
+        VIC alters NV12 (it clamps the plane at 235 on R36), the videoconvert feed is asked next:
+        videoconvert builds the encoder's NV24 on the CPU and the VIC only uploads it -- more work a
+        frame than NV12, still a fraction of FFV1.
 
         The proof is never waived here. `nvenc_feed: nv12` takes the feed on trust for an 8-bit camera
-        whose geometry somebody qualified; the split runs at twice that width, which nobody did."""
+        whose geometry somebody qualified; the split runs at twice that width, which nobody did. The
+        same goes for the videoconvert feed, qualified at 8-bit camera geometries only."""
         if (self._bits <= 8 or self._gst_format not in ("GRAY16_LE", "GRAY16_BE")
                 or self._is_color or self._enc_parser):
             return None                      # the knob is about 16-bit mono/Bayer frames; nothing to say
@@ -901,16 +908,21 @@ class CapturePipeline:
                      "explicit x265-lossless); %r resolves to %s here, so the 16-bit frame is recorded "
                      "unsplit", cfg.encoder, enc)
             return None
-        # (an even width, checked above, is all the NV12 feed needs of 2 * width)
+        # (an even width, checked above, is all either feed needs of 2 * width)
+        width = 2 * self._width
         if rec.normalize_feed(getattr(cfg, "nvenc_feed", "auto")) == "videoconvert":
             why = "switched off (recording.nvenc_feed)"
-        elif self._nv12_probe(2 * self._width, self._height, cfg) is not True:
+        elif self._nv12_probe(width, self._height, cfg) is not True:
             why = "not proven bit-exact"
         else:
             desc, enc = self._describe_recorder(cfg, loc, "nv12", split=True)
             return desc, enc, "nv12"
-        log.warning("recorder: gray16_split is only used behind the NV12 feed, and that is %s on this host; "
-                    "recording the 16-bit frame unsplit", why)
+        if self._vconv_probe(width, self._height, cfg) is True:
+            log.info("recorder: gray16_split uses the videoconvert feed (the NV12 feed is %s)", why)
+            return desc, enc, "videoconvert"
+        log.warning("recorder: gray16_split needs a feed proven bit-exact at %dx%d on this host: the NV12 "
+                    "feed is %s and the videoconvert feed is not proven; recording the 16-bit frame unsplit",
+                    width, self._height, why)
         return None
 
     def _recording_plan(self, cfg):

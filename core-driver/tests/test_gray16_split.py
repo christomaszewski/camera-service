@@ -10,6 +10,7 @@ by the exporter's decode, compared with what the camera delivered.
 Run in cam-dev.
 """
 import json
+import logging
 import os
 from pathlib import Path
 import sys
@@ -87,15 +88,18 @@ def test_mode_names():
 
 
 # ---- the plan ------------------------------------------------------------------------------------
-def _pipe(tmp, *, recording=None, source=None, verdict=True, present=("hw-hevc-lossless",)):
+def _pipe(tmp, *, recording=None, source=None, verdict=True, vconv=None, present=("hw-hevc-lossless",)):
     """A real CapturePipeline on a host that has the encoders in `present` (by decree: the recorder
-    description is stubbed), whose NV12 proof answers `verdict`."""
+    description is stubbed), whose NV12 proof answers `verdict` and whose videoconvert-feed proof
+    answers `vconv`. `probes` lists the NV12 proofs asked for; `p.vconv_probes` the others."""
     cfg = parse_config({"recording": {"encoder": "auto", "gray16_split": "fold", "output_dir": str(tmp),
                                       **(recording or {})},
                         "transport": {"plugin_endpoint": {"enabled": False}, "raw_endpoint": {"enabled": False}}})
     p = CapturePipeline(cfg, source or _Source("Mono16"))
     probes = []
     p._nv12_probe = lambda w, h, c: probes.append((w, h)) or verdict
+    p.vconv_probes = []
+    p._vconv_probe = lambda w, h, c: p.vconv_probes.append((w, h)) or vconv
 
     def recorder(rcfg, bits, loc, fps, color, parser, luma_feed="videoconvert"):
         want = rcfg.encoder if rcfg.encoder != "auto" else ("hw-hevc-lossless" if bits <= 8 else "ffv1")
@@ -152,9 +156,49 @@ def test_asking_for_the_nv12_feed_outright_does_not_waive_the_proof_for_the_spli
     with tempfile.TemporaryDirectory() as tmp:               # a truthy answer that is not a pass
         p, _ = _pipe(tmp, recording={"nvenc_feed": "nv12"}, verdict="probably")
         assert (p._rec_enc, p._split_mode) == ("ffv1", "off")
-    with tempfile.TemporaryDirectory() as tmp:               # switched off: the proof is not even run
+    with tempfile.TemporaryDirectory() as tmp:               # switched off: that proof is not even run
         p, probes = _pipe(tmp, recording={"nvenc_feed": "videoconvert"})
         assert (p._rec_enc, p._split_mode) == ("ffv1", "off") and probes == []
+
+
+def test_where_the_nv12_feed_is_not_exact_the_split_rides_a_proven_videoconvert_feed(caplog):
+    """R36: the VIC clamps NV12 at 235, so that proof fails. The frame then goes through videoconvert
+    into the encoder's own NV24, which the VIC only uploads -- if THAT is proven at the split geometry."""
+    caplog.set_level(logging.INFO)
+    for kwargs, why in (({"verdict": False}, "not proven bit-exact"),
+                        ({"verdict": None}, "not proven bit-exact"),
+                        ({"recording": {"nvenc_feed": "videoconvert"}}, "switched off"),
+                        ({"recording": {"nvenc_feed": "nv12"}, "verdict": False}, "not proven bit-exact")):
+        caplog.clear()
+        with tempfile.TemporaryDirectory() as tmp:
+            p, probes = _pipe(tmp, vconv=True, **kwargs)
+            assert (p._rec_enc, p._split_mode, p._rec_feed) == ("hw-hevc-lossless", "fold", "videoconvert"), kwargs
+            assert p.vconv_probes == [(2 * W, H)]             # proven at the geometry it will run at
+            assert probes == ([] if "recording" in kwargs and kwargs["recording"]["nvenc_feed"] == "videoconvert"
+                              else [(2 * W, H)])
+            # the recorder is handed the split frame as plain GRAY8 of twice the width: no chroma block
+            assert f"format=GRAY8,width={2 * W},height={H}" in p._session_desc_probe
+            assert f"max-bytes={32 * 2 * W * H} " in p._session_desc_probe and p._rec_chroma is None
+            assert p._splitter is not None
+            resolved = p.recording_settings()["resolved"]
+            assert resolved["gray16_split"] == "fold" and resolved["nvenc_feed"] == "videoconvert"
+        assert f"gray16_split uses the videoconvert feed (the NV12 feed is {why}" in caplog.text
+
+
+@pytest.mark.parametrize("vconv", [False, None, "probably"])
+def test_with_neither_feed_proven_the_16_bit_frame_is_recorded_as_before_and_the_log_says_why(vconv, caplog):
+    with tempfile.TemporaryDirectory() as tmp:
+        p, probes = _pipe(tmp, verdict=False, vconv=vconv)
+        assert (p._rec_enc, p._split_mode, p._rec_feed, p._splitter) == ("ffv1", "off", None, None)
+        assert probes == [(2 * W, H)] and p.vconv_probes == [(2 * W, H)]
+    assert (f"needs a feed proven bit-exact at {2 * W}x{H}" in caplog.text
+            and "NV12 feed is not proven bit-exact and the videoconvert feed is not proven" in caplog.text)
+
+
+def test_a_proven_nv12_feed_never_asks_about_the_other_one():
+    with tempfile.TemporaryDirectory() as tmp:
+        p, _ = _pipe(tmp, vconv=True)
+        assert p._rec_feed == "nv12" and p.vconv_probes == []
 
 
 def test_a_frame_the_split_cannot_take_is_a_counted_drop_not_an_exception():
@@ -217,11 +261,12 @@ def _frames(n, dtype="<u2"):
     return out
 
 
-def _record(tmp, recording, frames, pixel_format="Mono16", recorder=None):
+def _record(tmp, recording, frames, pixel_format="Mono16", recorder=None, nv12=True, vconv=None):
     cfg = parse_config({"recording": {"gray16_split": "fold", "output_dir": str(tmp), **recording},
                         "transport": {"plugin_endpoint": {"enabled": False}, "raw_endpoint": {"enabled": False}}})
     p = CapturePipeline(cfg, _Source(pixel_format))
-    p._nv12_probe = lambda w, h, c: True
+    p._nv12_probe = lambda w, h, c: nv12
+    p._vconv_probe = lambda w, h, c: vconv
     if recorder is not None:
         p._recorder_desc = recorder
     p.build()
@@ -291,6 +336,20 @@ def test_split_through_the_nv12_feed_is_recorded_exactly():
         header, files, _ = _record(tmp, {"encoder": "auto"}, frames, recorder=_software_nv12_recorder)
         assert (header["recording_encoder"], header["recording_feed"], header["gray16_split_mode"]) == \
             ("hw-hevc-lossless", "nv12", "fold")
+        _src, received = _replayed(tmp)
+        assert [d for _, d in received] == frames
+
+
+def test_split_through_the_videoconvert_feed_is_recorded_exactly():
+    """The path a JetPack 6 host runs, where NV12 does not survive the VIC: the split frame as GRAY8,
+    through videoconvert into the encoder's NV24 (the same stand-in for the hardware fragment)."""
+    frames = _frames(8)
+    with tempfile.TemporaryDirectory() as tmp:
+        header, files, _ = _record(tmp, {"encoder": "auto"}, frames, recorder=_software_nv12_recorder,
+                                   nv12=False, vconv=True)
+        assert (header["recording_encoder"], header["recording_feed"], header["gray16_split_mode"]) == \
+            ("hw-hevc-lossless", "videoconvert", "fold")
+        assert header["recording_colorimetry"] == LUMA_COLORIMETRY and header["bits_per_pixel"] == 16
         _src, received = _replayed(tmp)
         assert [d for _, d in received] == frames
 

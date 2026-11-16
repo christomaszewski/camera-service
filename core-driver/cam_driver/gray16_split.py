@@ -24,8 +24,8 @@ split is 56% of raw where the plain one is 63%; plain is not offered.
 
 NEVER put a lossy codec behind this: one code of error in the high half is 256 counts in the sample.
 The recorder only splits in front of a lossless 8-bit encoder, and only uses the hardware one behind a
-feed it has proven bit-exact on the host at the split geometry (recorder.probe_nv12_feed) -- a proof
-that `nvenc_feed: nv12` does not waive.
+feed it has proven bit-exact on the host at the split geometry (recorder.probe_feed: NV12, or the
+videoconvert feed where the VIC alters NV12) -- a proof that `nvenc_feed: nv12` does not waive.
 
 split/join are exact inverses for every 16-bit value and both byte orders. They need numpy, imported
 when first used so that naming a mode does not.

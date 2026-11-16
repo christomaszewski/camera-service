@@ -10,6 +10,7 @@ thing only a Jetson can answer; that is what the probe is for (tools/nvenc_lossl
 Run in cam-dev.
 """
 import json
+import logging
 import os
 from pathlib import Path
 import sys
@@ -292,21 +293,61 @@ _SQUEEZED = ("videoconvert ! video/x-raw,format=Y444,colorimetry=bt709 ! "
              'x265enc option-string="lossless=1:bframes=0" speed-preset=ultrafast ! h265parse')
 
 
-def _probe(monkeypatch, chain, width=W, height=H, **kw):
+def _probe(monkeypatch, chain, width=W, height=H, feed="nv12", **kw):
     monkeypatch.setattr(rec, "_PROBE_ELEMENTS", ("x265enc", "h265parse", "avdec_h265", "capssetter"))
     monkeypatch.setattr(rec, "_hw_hevc_lossless", lambda cfg, gop, bframes: chain)
-    return rec.probe_nv12_feed(width, height, **kw)
+    return {"nv12": rec.probe_nv12_feed, "videoconvert": rec.probe_videoconvert_feed}[feed](width, height, **kw)
 
 
 def test_probe_passes_an_exact_path_and_remembers_it(monkeypatch):
     assert _probe(monkeypatch, _EXACT) is True
-    assert rec._probe_verdicts == {(W, H): True}
+    assert rec._probe_verdicts == {("nv12", W, H): True}
     assert _probe(monkeypatch, "this ! would ! not ! parse") is True     # not run again
 
 
 def test_probe_fails_a_path_that_rescales_the_plane(monkeypatch):
     assert _probe(monkeypatch, _SQUEEZED) is False
-    assert rec._probe_verdicts == {(W, H): False}
+    assert rec._probe_verdicts == {("nv12", W, H): False}
+
+
+# a VIC that alters NV12 and passes the encoder's own format through (R36): the stand-in squeezes
+# whatever is not already NV24
+_NV24_ONLY = ("capsfilter caps=video/x-raw,format=NV24 ! " + _EXACT)
+
+
+def test_the_videoconvert_feed_is_proven_the_same_way_and_judged_separately(monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    assert _probe(monkeypatch, _EXACT, feed="videoconvert") is True
+    assert rec._probe_verdicts == {("videoconvert", W, H): True}
+    assert f"videoconvert feed verified bit-exact at {W}x{H}" in caplog.text
+    assert _probe(monkeypatch, "this ! would ! not ! parse", feed="videoconvert") is True      # remembered
+    # the same geometry on the other feed is another question, with its own answer
+    assert _probe(monkeypatch, _SQUEEZED) is False
+    assert rec._probe_verdicts == {("videoconvert", W, H): True, ("nv12", W, H): False}
+
+
+def test_a_host_that_only_passes_the_encoders_own_format_fails_nv12_and_passes_videoconvert(monkeypatch, caplog):
+    assert _probe(monkeypatch, _NV24_ONLY, timeout_s=0.5) is None            # NV12 is refused outright here
+    rec._probe_retry_at.clear()
+    assert _probe(monkeypatch, _NV24_ONLY, feed="videoconvert") is True      # NV24 from videoconvert: a copy
+
+
+def test_the_videoconvert_feed_fails_a_path_that_rescales_the_plane_and_says_which_feed(monkeypatch, caplog):
+    assert _probe(monkeypatch, _SQUEEZED, feed="videoconvert") is False
+    assert rec._probe_verdicts == {("videoconvert", W, H): False}
+    assert f"the videoconvert feed is NOT bit-exact on this host at {W}x{H}" in caplog.text
+    assert "keeping the videoconvert feed" not in caplog.text                # that is the NV12 probe's line
+    caplog.clear()
+    assert _probe(monkeypatch, _SQUEEZED) is False
+    assert "the NV12 feed is NOT bit-exact" in caplog.text and "keeping the videoconvert feed" in caplog.text
+
+
+def test_an_inconclusive_videoconvert_probe_waits_on_its_own_clock(monkeypatch):
+    stuck = "fakesink name=swallow async=false   appsrc name=never ! h265parse"
+    assert _probe(monkeypatch, stuck, feed="videoconvert", timeout_s=0.5) is None
+    assert ("videoconvert", W, H) in rec._probe_retry_at and ("nv12", W, H) not in rec._probe_retry_at
+    assert _probe(monkeypatch, _EXACT) is True                               # the NV12 probe still runs
+    assert _probe(monkeypatch, _EXACT, feed="videoconvert") is None          # this one waits
 
 
 def _again(monkeypatch, chain, **kw):
@@ -346,15 +387,15 @@ def test_an_inconclusive_probe_is_not_run_again_at_once(monkeypatch):
     every recording-settings change."""
     stuck = "fakesink name=swallow async=false   appsrc name=never ! h265parse"
     assert _probe(monkeypatch, stuck, timeout_s=0.5) is None
-    assert rec._probe_retry_at[(W, H)] > time.monotonic() + rec.PROBE_RETRY_S - 5
+    assert rec._probe_retry_at[("nv12", W, H)] > time.monotonic() + rec.PROBE_RETRY_S - 5
     started = time.monotonic()
     assert _probe(monkeypatch, _EXACT) is None                 # would pass if it ran: it does not run
     assert _probe(monkeypatch, stuck, timeout_s=30) is None    # nor wait
     assert time.monotonic() - started < 0.2
     assert _probe(monkeypatch, _EXACT, width=2 * W) is True    # another geometry is another question
-    rec._probe_retry_at[(W, H)] = time.monotonic() - 1         # the wait is over
+    rec._probe_retry_at[("nv12", W, H)] = time.monotonic() - 1         # the wait is over
     assert _probe(monkeypatch, _EXACT) is True
-    assert (W, H) not in rec._probe_retry_at and rec._probe_verdicts[(W, H)] is True
+    assert ("nv12", W, H) not in rec._probe_retry_at and rec._probe_verdicts[("nv12", W, H)] is True
     # a failed proof is a verdict, not something to wait out
     rec._probe_verdicts.clear()
     assert _probe(monkeypatch, _SQUEEZED) is False and rec._probe_retry_at == {}

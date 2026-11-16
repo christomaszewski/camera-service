@@ -268,17 +268,24 @@ Measured in the core on a live 640×512 16-bit 60 fps stream, R39 Orin
 |---|---:|---:|---|
 | FFV1 | 295% of a core | 31.3% | 1973/1973 |
 | `gray16_split: fold`, hardware encoder | 47% of a core | 34.3% | 1952/1952 |
+| the same behind the videoconvert feed (what a JetPack 6 host uses, measured on R39) | 75% of a core | 34.3% | 1935/1935 |
 | the same on noisier frames (σ = 40 counts) | 52% of a core | 56.0% (FFV1: 49.3%) | 1952/1952 |
 
 - **It costs disk**: a few points more than FFV1 on smooth frames, about seven on noisy ones. Those
   figures are from synthetic frames; check them on real footage before fleet-wide use.
 - **It is opt-in** because a recording made with it needs a build that knows `gray16_split_mode` to be
   read back. An older replay or export sees an 8-bit frame of twice the width.
-- **When it applies.** With the hardware encoder (`encoder: auto` or `hw-hevc-lossless`) it rides the
-  NV12 feed, and only once that feed is proven bit-exact on the host at the split geometry — also
-  under `nvenc_feed: nv12`, which does not waive the proof here: one wrong code in the high half would
-  be 256 counts. With an explicit `encoder: x265-lossless` it runs on the CPU, which is how a dev host
-  exercises it.
+- **When it applies.** With the hardware encoder (`encoder: auto` or `hw-hevc-lossless`) it rides a
+  feed proven bit-exact on the host at the split geometry: the NV12 feed where that passes, else the
+  videoconvert feed, proven the same way. Nothing waives the proof here, `nvenc_feed: nv12` included:
+  one wrong code in the high half would be 256 counts. With neither feed proven the 16-bit frame is
+  recorded as before (FFV1) and the log says which proof failed. With an explicit
+  `encoder: x265-lossless` it runs on the CPU, which is how a dev host exercises it.
+- **JetPack 6.** The VIC there clamps an NV12 plane at 235 (the proof reports "frame 0 of the probe
+  differs, sampled error up to 20 codes"), so the NV12 feed is never taken on R36 and the split uses
+  the videoconvert feed: `videoconvert` builds the encoder's NV24 on the CPU and the VIC only uploads
+  it. That costs more per frame than NV12 and far less than FFV1. Its proof on R36 hardware has been
+  seen to fail for NV12 and has not yet been seen to pass for videoconvert: read the start-up log.
   Otherwise — no hardware encoder, the proof failing, `nvenc_feed: videoconvert`, `ffv1`, `x264`, an odd
   width or height — the 16-bit frame is recorded exactly as before, and the log says why.
 - Qualify the 8-bit path at the split geometry like any other:
