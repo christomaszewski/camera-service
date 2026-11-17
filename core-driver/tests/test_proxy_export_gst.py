@@ -405,6 +405,124 @@ def test_gray16_proxies_match_webrtc_auto_and_reset_between_sessions():
                 src.stop()
 
 
+def _split_and_ffv1_run(root, frames):
+    """One camera's recordings holding the same 16-bit frames twice, written by the service's own
+    recorder: a session stored as the split 8-bit frame (lossless HEVC) and one stored as FFV1."""
+    from test_gray16_split import _record
+    camera = root / "recordings" / "thermal"
+    camera.mkdir(parents=True)
+    split, _, _ = _record(camera, {"encoder": "x265-lossless"}, frames)
+    time.sleep(1.1)                                          # run prefixes are stamped to the second
+    plain, _, _ = _record(camera, {"encoder": "ffv1"}, frames)
+    assert (split["gray16_split_mode"], split["recording_encoder"]) == ("fold", "x265-lossless")
+    assert (plain["gray16_split_mode"], plain["recording_encoder"]) == ("off", "ffv1")
+    return camera
+
+
+def _sidecars(camera):
+    return sorted(p for p in camera.glob("*.json") if "recording-settings" not in p.name)
+
+
+def test_16_bit_sessions_stored_split_and_as_ffv1_export_to_the_same_proxy():
+    """A run can hold both: a host where the split's proof fails records FFV1, and the choice can
+    change between sessions. The exporter reads each session the way its sidecar says it is stored,
+    and from there on a 16-bit frame is a 16-bit frame."""
+    import numpy as np
+    from cam_driver.thermal_preview import PercentileStretch
+    from test_gray16_split import _frames, W, H
+
+    frames = _frames(6)
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "source"
+        camera = _split_and_ffv1_run(root, frames)
+        original = {p: file_hash(p) for p in camera.iterdir()}
+        output = Path(temporary) / "output"
+        output.mkdir()
+        req = request(root, ["thermal"])
+        req["destination"] = str(output)
+        result = convert(req, PROFILES)
+        assert all(file_hash(p) == digest for p, digest in original.items())
+
+        split, plain = result["recordings"][0]["sessions"]          # in recorded order
+        assert split["source_gray16_split_mode"] == "fold" and "source_gray16_split_mode" not in plain
+        proxies = []
+        for session in (split, plain):
+            assert (session["pixel_format"], session["bits_per_pixel"]) == ("GRAY8", 8)
+            assert (session["source_pixel_format"], session["source_bits_per_pixel"]) == ("Mono16", 16)
+            assert (session["width"], session["height"]) == (W, H)
+            assert session["validation"] == {"ok": True, "decoded_frames": len(frames), "stamps_preserved": True}
+            path = output / "recordings" / "thermal" / session["id"]
+            header = json.loads(path.with_suffix(".json").read_text())
+            # the proxy itself is an ordinary 8-bit recording, whatever its source was stored as
+            assert (header["pixel_format"], header["bits_per_pixel"], header["gray16_split_mode"]) == ("GRAY8", 8, "off")
+            assert (header["width"], header["height"]) == (W, H)
+            assert path.with_suffix(".csv").read_bytes() == (camera / (session["id"] + ".csv")).read_bytes()
+            proxies.append((header["proxy"], discover_sessions(str(path.parent), session["id"])[0]))
+        # ... and says where its frames came from
+        assert proxies[0][0]["source_gray16_split_mode"] == "fold"
+        assert proxies[0][0]["transformations"] == [
+            "decode", "join-gray16-split", "gray16-percentile-stretch", "convert-to-i420", "lossy-h264"]
+        assert "source_gray16_split_mode" not in proxies[1][0]
+        assert proxies[1][0]["transformations"] == ["decode", "gray16-percentile-stretch", "convert-to-i420", "lossy-h264"]
+
+        def pictures(run):
+            return [np.frombuffer(s.get_buffer().extract_dup(0, W * H), dtype=np.uint8).reshape(H, W).astype(np.int16)
+                    for s in _decode(run)]
+
+        from_split, from_ffv1 = pictures(proxies[0][1]), pictures(proxies[1][1])
+        assert len(from_split) == len(from_ffv1) == len(frames)
+        # the same frames went into the same encoder: the two proxies are the same pictures
+        assert max(float(np.abs(a - b).mean()) for a, b in zip(from_split, from_ffv1)) < 0.5
+        # and they are the stretch of the 16-bit frames, not of the stored halves (the last frame holds
+        # every 16-bit value in turn -- noise to a lossy codec -- so it is held to the looser bound)
+        stretch = PercentileStretch()
+        expected = [stretch(np.frombuffer(f, dtype="<u2").reshape(H, W)).astype(np.int16) for f in frames]
+        errors = [float(np.abs(a - e).mean()) for a, e in zip(from_split, expected)]
+        assert max(errors[:-1]) < 8 and errors[-1] < 40, errors
+
+        cfg = parse_config({"camera": {"type": "replay"}, "replay": {
+            "path": str(output / "recordings" / "thermal"), "speed": 0}, "control": {"enabled": False}})
+        src = ReplaySource(cfg.replay, cfg.playback)
+        try:
+            src.open()
+            src.configure()
+            assert src.pixel_format() == "GRAY8"
+            consumer = _Consumer()
+            src.start(consumer.on_frame)
+            _pump(lambda: src.finished)
+            assert not src.finished_error and len(consumer.frames) == 2 * len(frames)
+            assert all(len(data) == W * H for _, data, _ in consumer.frames)
+        finally:
+            src.stop()
+
+
+def test_a_16_bit_session_whose_track_contradicts_its_sidecar_is_refused_by_name():
+    """Declared unsplit but stored split, or the reverse: no conversion is attempted on a guess."""
+    from test_gray16_split import _frames
+
+    for index, declared, text in ((0, "off", "sidecar has lost its gray16_split_mode"),
+                                  (1, "fold", "declares a split it does not have")):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "source"
+            camera = _split_and_ffv1_run(root, _frames(2))
+            sidecar = _sidecars(camera)[index]
+            header = json.loads(sidecar.read_text())
+            assert header["gray16_split_mode"] != declared
+            sidecar.write_text(json.dumps({**header, "gray16_split_mode": declared}))
+            output = Path(temporary) / "output"
+            output.mkdir()
+            req = request(root, ["thermal"])
+            req["destination"] = str(output)
+            req["recordings"][0]["sessions"] = [sidecar.stem]
+            try:
+                convert(req, PROFILES)
+            except ValueError as exc:
+                assert "the track is" in str(exc) and text in str(exc), str(exc)
+            else:
+                raise AssertionError("a contradicted sidecar was converted")
+            assert not list(output.rglob("*.mkv"))
+
+
 def test_gray16_normalization_honors_video_meta_and_output_padding():
     import gi
     import numpy as np

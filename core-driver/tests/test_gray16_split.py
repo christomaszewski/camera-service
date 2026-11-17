@@ -87,6 +87,31 @@ def test_mode_names():
     assert not gray16_split.geometry_ok(640, 511) and not gray16_split.geometry_ok(0, 512)
 
 
+def test_a_track_is_checked_against_the_storage_its_sidecar_declares():
+    ok = gray16_split.check_track
+    # the two storages of a 16-bit frame, each read as itself
+    ok("part", "GRAY16_LE", W, H, True, ("video/x-h265", 2 * W, H))
+    ok("part", "GRAY16_BE", W, H, False, ("video/x-ffv", W, H))
+    # read as the other: an error that says what the track is and what the sidecar expected
+    with pytest.raises(ValueError) as lost:
+        ok("a.mkv", "GRAY16_LE", W, H, False, ("video/x-h265", 2 * W, H))
+    assert (f"a.mkv: the track is {2 * W}x{H} (video/x-h265), but the sidecar describes a {W}x{H} GRAY16_LE "
+            f"recording stored unsplit, a {W}x{H} track") in str(lost.value)
+    assert "sidecar has lost its gray16_split_mode" in str(lost.value)
+    with pytest.raises(ValueError) as claimed:
+        ok("b.mkv", "GRAY16_LE", W, H, True, ("video/x-ffv", W, H))
+    assert f"stored split, a {2 * W}x{H} track" in str(claimed.value)
+    assert "declares a split it does not have" in str(claimed.value)
+    with pytest.raises(ValueError) as other:                 # neither layout: no guess at why
+        ok("c.mkv", "GRAY16_LE", W, H, True, ("video/x-h265", W + 2, H))
+    assert "the track is" in str(other.value) and "that is the layout" not in str(other.value)
+    # nothing to say: the container did not give a size, or the recording is not 16-bit mono
+    for track in (None, ("video/x-ffv", None, None), ("video/x-ffv", W, None)):
+        ok("part", "GRAY16_LE", W, H, True, track)
+    ok("part", "GRAY8", W, H, False, ("video/x-h264", 2 * W, H))
+    ok("part", "I420", W, H, False, ("video/x-h265", W // 2, H))
+
+
 # ---- the plan ------------------------------------------------------------------------------------
 def _pipe(tmp, *, recording=None, source=None, verdict=True, vconv=None, present=("hw-hevc-lossless",)):
     """A real CapturePipeline on a host that has the encoders in `present` (by decree: the recorder
@@ -387,3 +412,21 @@ def test_replay_refuses_a_split_it_cannot_undo():
         sidecar.write_text(json.dumps({**header, "pixel_format": "Mono8", "bits_per_pixel": 8}))
         with pytest.raises(ValueError, match="cannot have been stored that way"):
             _source(Path(tmp))
+
+
+def test_replay_refuses_a_16_bit_session_whose_track_is_not_what_its_sidecar_says():
+    """Stored split and declared unsplit, or the reverse: the decoder would fail to negotiate, or
+    hand on a frame of the wrong shape. The error names the track and the sidecar instead."""
+    frames = _frames(3)
+    for recording, declared, text in (({"encoder": "x265-lossless"}, "off", "sidecar has lost its gray16_split_mode"),
+                                      ({"encoder": "ffv1"}, "fold", "declares a split it does not have")):
+        with tempfile.TemporaryDirectory() as tmp:
+            _record(tmp, recording, frames)
+            sidecar = next(p for p in Path(tmp).glob("*.json") if "recording-settings" not in p.name)
+            header = json.loads(sidecar.read_text())
+            assert header["gray16_split_mode"] != declared
+            _src, received = _replayed(tmp)                  # as recorded: readable
+            assert [d for _, d in received] == frames
+            sidecar.write_text(json.dumps({**header, "gray16_split_mode": declared}))
+            with pytest.raises(ValueError, match=text):
+                _source(Path(tmp))

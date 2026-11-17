@@ -58,6 +58,29 @@ def stored_mode(value) -> str:
     raise ValueError(f"unsupported gray16_split_mode {value!r} (this build reads: {', '.join(MODES)})")
 
 
+def check_track(where: str, fmt: str, width: int, height: int, split: bool, track) -> None:
+    """Refuse a 16-bit recording whose track is not the one its sidecar describes.
+
+    A 16-bit session is stored one of two ways and the sidecar says which: the frame itself (FFV1, a
+    track of the frame's size) or its two bytes side by side in 8 bits (a track of twice the width).
+    Read as the other, the decoder either fails to negotiate -- an error that names neither -- or
+    hands back bytes of the wrong shape. `track` is (caps name, width, height) from the container;
+    nothing is said when it could not be read, or about a recording that is not 16-bit mono."""
+    if fmt not in ("GRAY16_LE", "GRAY16_BE") or not track or not track[1] or not track[2]:
+        return
+    want, got = (2 * width if split else width, height), (int(track[1]), int(track[2]))
+    if got == want:
+        return
+    hint = ""
+    if not split and got == (2 * width, height):
+        hint = ": that is the layout of a 16-bit split recording whose sidecar has lost its gray16_split_mode"
+    elif split and got == (width, height):
+        hint = ": that is the layout of an unsplit recording whose sidecar declares a split it does not have"
+    raise ValueError(f"{where}: the track is {got[0]}x{got[1]} ({track[0]}), but the sidecar describes a "
+                     f"{width}x{height} {fmt} recording stored {'split' if split else 'unsplit'}, "
+                     f"a {want[0]}x{want[1]} track{hint}")
+
+
 def geometry_ok(width: int, height: int) -> bool:
     """Both the split frame (2*width GRAY8) and the 16-bit frame need no row padding at an even width,
     so what the recorder is handed and what a decoder hands back are the tight layouts used here; the

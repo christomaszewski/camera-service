@@ -132,6 +132,16 @@ def test_preflight_takes_a_16_bit_split_only_where_it_can_be_undone():
         session(root, pixel_format="GRAY16_LE", bits_per_pixel=16, gray16_split_mode="fold")
         item = preflight(request(root), PROFILES)["recordings"][0]["sessions"][0]
         assert item["source_pixel_format"] == "GRAY16_LE" and item["pixel_format"] == "GRAY8"
+        assert item["source_gray16_split_mode"] == "fold"      # how the source is stored, per session
+    with tempfile.TemporaryDirectory() as temporary:          # a run may hold both storages
+        root = Path(temporary)
+        session(root, prefix="early", pixel_format="GRAY16_LE", bits_per_pixel=16)
+        session(root, prefix="late", pixel_format="GRAY16_LE", bits_per_pixel=16, gray16_split_mode="fold")
+        sessions = {s["id"]: s for s in preflight(request(root), PROFILES)["recordings"][0]["sessions"]}
+        early, late = sessions["early"], sessions["late"]
+        assert "source_gray16_split_mode" not in early and late["source_gray16_split_mode"] == "fold"
+        assert {k: v for k, v in late.items() if k not in ("id", "files", "source_gray16_split_mode")} == \
+            {k: v for k, v in early.items() if k not in ("id", "files")}
     for header, text in (({"pixel_format": "Mono8", "gray16_split_mode": "fold"}, "a 16-bit split requires a 16-bit recording"),
                          ({"pixel_format": "GRAY16_LE", "bits_per_pixel": 16, "gray16_split_mode": "planes"}, "gray16_split_mode")):
         with tempfile.TemporaryDirectory() as temporary:
@@ -317,6 +327,88 @@ def test_helper_preflight_exposes_pull_requirement_without_modifying_run():
         assert {str(path.relative_to(source)): path.read_bytes()
                 for path in source.rglob("*") if path.is_file()} == original_files
         assert not (source / "exports").exists()
+
+
+def _helper_run(headers, probe):
+    """tools/export-recordings converting a run whose sessions have `headers`, with Docker stubbed:
+    the image exists; `probe` is what asking it about split recordings returns (None: never asked).
+    Returns (exit code, the docker commands run, stderr)."""
+    import contextlib
+    import io
+    helper = runpy.run_path(str(ROOT / "tools/export-recordings"))
+    image, image_id = "registry:5000/cam-dev:dev", "sha256:" + "d" * 64
+    inspect = subprocess.CompletedProcess([], 0, json.dumps([{"Id": image_id, "Architecture": "arm64", "Os": "linux"}]), "")
+    commands = []
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        if command[:3] == ["docker", "image", "inspect"]:
+            return inspect
+        if command[:2] == ["docker", "run"] and helper["SPLIT_PROBE"] in command:
+            assert probe is not None, "the image was asked about split recordings it was not given"
+            return probe
+        return subprocess.CompletedProcess(command, 7, "", "")     # the conversion itself: not under test
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        source, destination = root / "run", root / "staging"
+        destination.mkdir()
+        for index, header in enumerate(headers):
+            session(source, prefix=f"s{index}", **header)
+        req = {**request(source), "destination": str(destination)}
+        (root / "request.json").write_text(json.dumps(req))
+        stderr = io.StringIO()
+        with patch.dict("os.environ", {"CAM_DEV_IMAGE": image}, clear=True), \
+                patch("platform.machine", return_value="arm64"), patch("subprocess.run", side_effect=run), \
+                contextlib.redirect_stderr(stderr):
+            code = helper["main"](["--request", str(root / "request.json"), "--result", str(root / "result.json")])
+        assert not any(destination.iterdir()) and not (root / "result.json").exists()
+        return code, commands, stderr.getvalue()
+
+
+_GRAY16 = {"pixel_format": "GRAY16_LE", "bits_per_pixel": 16}
+_SPLIT = {**_GRAY16, "gray16_split_mode": "fold"}
+
+
+def _converted(commands):
+    return [c for c in commands if c[:2] == ["docker", "run"] and "cam_driver.export_recordings" in c]
+
+
+def test_an_image_from_before_split_recordings_is_refused_before_anything_is_converted():
+    stale = subprocess.CompletedProcess([], 1, "", "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n"
+                                        "ImportError: cannot import name 'gray16_split' from 'cam_driver'\n")
+    code, commands, err = _helper_run([_GRAY16, _SPLIT], stale)
+    assert code == 1 and not _converted(commands)
+    assert "registry:5000/cam-dev:dev predates 16-bit split recordings and cannot convert camera/s1" in err
+    assert "build or pull a cam-dev image" in err
+    probe = commands[1]                                       # asked of the inspected image, sealed like the conversion
+    assert probe[:2] == ["docker", "run"] and "sha256:" + "d" * 64 in probe
+    assert "--pull=never" in probe and probe[probe.index("--network") + 1] == "none" and "--read-only" in probe
+
+
+def test_an_image_that_reads_split_recordings_goes_on_to_convert_them():
+    ready = subprocess.CompletedProcess([], 0, "", "")
+    code, commands, err = _helper_run([_SPLIT], ready)
+    assert len(_converted(commands)) == 1                     # (the stub fails the conversion: exit 7)
+    assert code == 1 and "offline converter failed (exit 7)" in err and "predates" not in err
+
+
+def test_an_image_is_only_asked_when_the_request_holds_a_split_session():
+    code, commands, _ = _helper_run([_GRAY16, {"pixel_format": "Mono8"}], None)
+    assert len(_converted(commands)) == 1 and len(commands) == 3      # inspect, convert, the final rm
+
+
+def test_a_probe_that_could_not_run_is_not_reported_as_an_old_image():
+    broken = subprocess.CompletedProcess([], 125, "", "docker: Error response from daemon: OCI runtime create failed\n")
+    code, commands, err = _helper_run([_SPLIT], broken)
+    assert code == 1 and not _converted(commands)
+    assert "cannot run registry:5000/cam-dev:dev to check it reads 16-bit split recordings" in err
+    assert "OCI runtime create failed" in err and "predates" not in err
+
+
+def test_the_implementation_identity_covers_the_split_join():
+    source = (ROOT / "tools/export-recordings").read_text()
+    assert '"core-driver/cam_driver/gray16_split.py"' in source
 
 
 if __name__ == "__main__":

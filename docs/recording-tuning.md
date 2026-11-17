@@ -274,7 +274,9 @@ Measured in the core on a live 640×512 16-bit 60 fps stream, R39 Orin
 - **It costs disk**: a few points more than FFV1 on smooth frames, about seven on noisy ones. Those
   figures are from synthetic frames; check them on real footage before fleet-wide use.
 - **It is opt-in** because a recording made with it needs a build that knows `gray16_split_mode` to be
-  read back. An older replay or export sees an 8-bit frame of twice the width.
+  read back. An older replay sees an 8-bit frame of twice the width; the export helper asks its
+  converter image first and refuses an older one by name. With a current build, replay and the H.264
+  proxy export read a split session and an FFV1 one alike, in the same run.
 - **When it applies.** With the hardware encoder (`encoder: auto` or `hw-hevc-lossless`) it rides a
   feed proven bit-exact on the host at the split geometry: the NV12 feed where that passes, else the
   videoconvert feed, proven the same way. Nothing waives the proof here, `nvenc_feed: nv12` included:
@@ -286,8 +288,8 @@ Measured in the core on a live 640×512 16-bit 60 fps stream, R39 Orin
   the videoconvert feed: `videoconvert` builds the encoder's NV24 on the CPU and the VIC only uploads
   it. That costs more per frame than NV12 and far less than FFV1. Its proof on R36 hardware has been
   seen to fail for NV12 and has not yet been seen to pass for videoconvert: read the start-up log.
-  Otherwise — no hardware encoder, the proof failing, `nvenc_feed: videoconvert`, `ffv1`, `x264`, an odd
-  width or height — the 16-bit frame is recorded exactly as before, and the log says why.
+- **Otherwise** — no hardware encoder, neither proof passing, `ffv1`, `x264`, an odd width or height —
+  the 16-bit frame is recorded exactly as before, and the log says why.
 - Qualify the 8-bit path at the split geometry like any other:
   `tools/nvenc_lossless_test.py --geometry 1280x512` for a 640×512 camera.
 

@@ -51,9 +51,16 @@ stored timeline consequently differs from the CSV by more than the allowed fixed
 offset and one-millisecond tolerance are rejected. Export does not widen that
 tolerance to conceal encoder retiming or accumulated drift.
 
-Eight-bit mono, Bayer and supported RGB/YUV formats are accepted. A 16-bit recording stored through
-the 8-bit encoder (`gray16_split_mode`) is joined back to its 16-bit frames first, so it exports
-exactly as an FFV1 one does. Bayer recordings,
+Eight-bit mono, Bayer and supported RGB/YUV formats are accepted. A 16-bit recording is stored one of
+two ways — the frame itself (FFV1), or its two bytes side by side through the 8-bit lossless encoder
+(`gray16_split_mode`) — and each session's sidecar says which. The exporter reads every session the way
+it is stored and joins a split one back to its 16-bit frames first, so both export to the same proxy
+and one run may hold sessions of each (a host where the split's start-up proof fails records FFV1).
+The proxy of a split session records `source_gray16_split_mode` and a `join-gray16-split` step in its
+provenance; the proxy itself is an ordinary 8-bit recording either way. Two things are refused by
+name instead of failing in the decoder: a 16-bit session whose track is not the one its sidecar
+describes (stored split and declared unsplit, or the reverse), and — in the helper, before anything
+is converted — a converter image from before split recordings existed. Bayer recordings,
 including FFV1 MKVs, are decoded, restored from any lossless CFA storage tiling, and
 debayered with GStreamer's `bayer2rgb` before H.264 encoding. All four Bayer patterns
 are supported. The proxy is ordinary color video: its header declares `I420` with
@@ -159,7 +166,8 @@ that happened to use x264 are not classified as derived proxies.
 
 Run `python3 core-driver/tests/test_proxy_export.py` for host-only contract tests.
 Inside a native dev image, run `core-driver/tests/test_proxy_export_gst.py` for real
-FFV1-to-H264, normalized 16-bit mono, Bayer, incomplete-input and replay stamp tests.
+FFV1-to-H264, normalized 16-bit mono (stored as FFV1 and as the split frame, in one run), Bayer,
+incomplete-input and replay stamp tests.
 Both are collected by the existing CI matrix.
 `core-driver/tools/replay_buffer_benchmark.py` compares
 original/proxy CPU with recording disabled and an attached transport consumer; use

@@ -77,10 +77,39 @@ def runtime():
     return producer, missing, missing_images
 
 
+SPLIT_PROBE = "from cam_driver import gray16_split; gray16_split.stored_mode('fold')"
+
+
+def require_split_support(result, producer):
+    """A session stored as a 16-bit split needs a converter that can join it. An image from before
+    that storage existed fails on the first such session with a negotiation error that names nothing,
+    after converting the sessions in front of it -- so the image is asked first, and only when the
+    request holds such a session."""
+    split = [f"{recording['name']}/{session['id']}" for recording in result["recordings"]
+             for session in recording["sessions"] if session.get("source_gray16_split_mode")]
+    if not split:
+        return
+    proc = subprocess.run(["docker", "run", "--rm", "--pull=never", "--platform", "linux/" + producer["architecture"],
+                           "--network", "none", "--read-only", "--cap-drop=ALL",
+                           "--security-opt", "no-new-privileges", "--tmpfs", "/tmp",
+                           "--user", f"{os.getuid()}:{os.getgid()}", "--env", "PYTHONDONTWRITEBYTECODE=1",
+                           "--entrypoint", "python3", producer["image_id"], "-c", SPLIT_PROBE],
+                          capture_output=True, text=True, timeout=120)
+    if proc.returncode == 0:
+        return
+    diagnostic = " ".join(proc.stderr.split())[-300:]
+    if "ImportError" in proc.stderr or "ModuleNotFoundError" in proc.stderr or "AttributeError" in proc.stderr:
+        raise ValueError(f"{producer['image']} predates 16-bit split recordings and cannot convert "
+                         f"{', '.join(split[:3])}{' and others' if len(split) > 3 else ''}; build or pull a "
+                         "cam-dev image from the release that recorded them")
+    raise ValueError(f"cannot run {producer['image']} to check it reads 16-bit split recordings: "
+                     f"{diagnostic or 'docker run failed'}")
+
+
 def implementation_hash():
     digest = hashlib.sha256()
     for name in ("tools/export-recordings", "core-driver/cam_driver/export_recordings.py",
-                 "core-driver/cam_driver/thermal_preview.py",
+                 "core-driver/cam_driver/thermal_preview.py", "core-driver/cam_driver/gray16_split.py",
                  "core-driver/cam_driver/playback.py", "core-driver/cam_driver/timestamps.py",
                  "core-driver/cam_driver/formats.py"):
         digest.update(name.encode())
@@ -109,6 +138,7 @@ def main(argv=None):
             destination = Path(request["destination"]).resolve(strict=True)
             if any(c in str(path) for path in (source, destination) for c in (",", "\n", "\r")):
                 raise ValueError("Docker export mount paths may not contain commas or newlines")
+            require_split_support(result, producer)
             with tempfile.TemporaryDirectory(prefix="camera-export-") as temporary:
                 control = Path(temporary)
                 rewritten = {**request, "source_root": "/input", "destination": "/output"}

@@ -172,8 +172,15 @@ def _index_fragment(path, media_pts, first_row, offset, *, max_packets=None):
 
 
 def _probe_mkv(path: str, timeout_s: int = 5):
-    """Read the first part's video-track caps name from the matroska headers (PAUSED is
-    enough -- no decode, no full-file scan). Returns e.g. 'video/x-ffv', or None."""
+    """The first part's video-track caps name, e.g. 'video/x-ffv', or None."""
+    track = _probe_mkv_track(path, timeout_s)
+    return track[0] if track else None
+
+
+def _probe_mkv_track(path: str, timeout_s: int = 5):
+    """Read the first part's video track from the matroska headers (PAUSED is enough -- no decode,
+    no full-file scan): (caps name, width, height), or None. Width and height are None when the
+    headers do not carry them."""
     try:
         pipeline = Gst.parse_launch(f'filesrc location="{path}" ! matroskademux name=d')
     except Exception as e:
@@ -186,7 +193,8 @@ def _probe_mkv(path: str, timeout_s: int = 5):
         caps = pad.get_current_caps()
         s = caps.get_structure(0) if caps and caps.get_size() else None
         if s and (s.get_name().startswith("video/") or s.get_name().startswith("image/")):
-            result["caps"] = s.get_name()
+            dims = [s.get_int(field) for field in ("width", "height")]
+            result["caps"] = (s.get_name(), *(value if ok else None for ok, value in dims))
             loop.quit()
 
     pipeline.get_by_name("d").connect("pad-added", on_pad)
@@ -350,12 +358,13 @@ class ReplaySource(GstPipelineSource):
         self._pacer.anchor_src_ns = start_ns + self._offset
 
         # ---- the reader shape, from the first part of each session ----
-        caps = []
+        caps, tracks = [], []
         for run in self._sessions:
-            c = _probe_mkv(run.mkv_paths[0])
-            if c is None:
+            track = _probe_mkv_track(run.mkv_paths[0])
+            if track is None:
                 raise ValueError(f"replay: {run.mkv_paths[0]} has no readable video track")
-            caps.append(c)
+            caps.append(track[0])
+            tracks.append(track)
         self._session_caps = caps
         # Stream-copy runs recorded the DELIVERED bitstream; their sidecar header carries the
         # decoded consumer format (I420). New sidecars identify the recorder explicitly: an
@@ -375,15 +384,20 @@ class ReplaySource(GstPipelineSource):
             self._enc = encoded_info(_ENC_KEY[caps[0]])
         else:
             self._enc = None
-            for run, codec in zip(self._sessions, caps):
+            for run, codec, track in zip(self._sessions, caps, tracks):
                 if codec not in _RAW_DECODE:
                     raise ValueError(f"replay: unsupported recorded codec {codec!r} in {run.mkv_paths[0]}")
                 raw_decode_chain(codec, run.header)        # reject an unknown colorimetry up front
-                if gray16_split.stored_mode(run.header.get("gray16_split_mode")) != "off" and not (
+                split = gray16_split.stored_mode(run.header.get("gray16_split_mode")) != "off"
+                if split and not (
                         gray16_split.geometry_ok(int(run.header["width"]), int(run.header["height"]))
                         and self._container_format(run.header) in ("GRAY16_LE", "GRAY16_BE")):
                     raise ValueError(f"replay: {run.base} declares a 16-bit split on a frame that cannot "
                                      "have been stored that way")
+                # ...and a 16-bit session whose track is not the one its sidecar describes: stored
+                # split and read unsplit, or the reverse, there is no frame to hand on.
+                gray16_split.check_track(f"replay: {run.mkv_paths[0]}", self._container_format(run.header),
+                                         int(run.header["width"]), int(run.header["height"]), split, track)
                 note = legacy_luma_note(run.header)
                 if note:
                     log.warning("replay: %s: %s", run.base, note)

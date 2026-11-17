@@ -802,6 +802,21 @@ Not yet seen on R36 itself: whether the videoconvert proof passes there at 1280�
 The recorder's start-up log answers the first (`gray16_split uses the videoconvert feed`, or the warning
 naming both proofs).
 
+**Reading split recordings back.** Checked on the bench Orin with three live 640×512 GRAY16 sessions
+in one recordings directory, written by the hardware encoder: FFV1, split behind NV12, split behind
+videoconvert.
+
+- *Proxy export* of the directory converts all three (1901 frames, 20 s) and each proxy frame is within
+  0.54 of 255 (mean) of the stretch of its 16-bit source frame, the same figure for all three storages.
+- *Replay* of the directory through the service, re-recorded as FFV1: 1901 of 1901 frames identical,
+  in order, across the two changes of storage.
+- *Replay into the bridges*: the ROS 2 bridge publishes `mono16` 640×512 throughout and a WebRTC viewer
+  decodes the normalized stream; replaying the proxies gives `mono8` and the same.
+- A sidecar that contradicts its track (a split session declared unsplit, an FFV1 one declared split)
+  is refused by replay and export with an error naming the track and the sidecar. The export helper
+  refuses a converter image from before split recordings before converting anything, where it used to
+  fail on the first split session with a negotiation error after converting the ones in front of it.
+
 **webrtcsink resizes the picture at low bitrates.** Its mitigation modes (on by default) scale a
 viewer's frames to 720 rows under 2 Mbit/s and 360 under 1 Mbit/s, and halve the frame rate under
 500 kbit/s, changing the frame size in front of the running encoder whenever congestion control moves

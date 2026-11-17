@@ -156,7 +156,9 @@ descriptor's `proxy` field; re-recorded sidecars retain it as `replay_proxies`.
 Raw-frame recordings can change encoder (for example FFV1 → H.264 → FFV1), quality, preset,
 keyframe interval, segment duration, Bayer tiling and the 16-bit split between sessions. Replay probes
 each session's MKV codec and uses that session's sidecar to restore the consumer format and undo its
-tiling or join its split 16-bit frames (`gray16_split_mode`).
+tiling or join its split 16-bit frames (`gray16_split_mode`). A run may mix FFV1 and split sessions of
+one 16-bit camera; a session whose track is not the one its sidecar describes is refused when the
+source is configured, with an error naming both.
 Frame IDs and timestamps still come from the matching CSV. Lossy H.264 replays the stored,
 approximate image; it cannot recover pixels discarded during compression. Source pixel format,
 dimensions and Bayer pattern must stay consistent across sessions.

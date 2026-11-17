@@ -166,7 +166,10 @@ def preflight(request, profile_root):
                 if tile not in ("off", False, None) and (fmt != "GRAY8" or not (bayer or hdr.get("bayer_pattern"))):
                     raise ValueError("CFA tiling requires an 8-bit Bayer recording")
                 from . import gray16_split
-                if gray16_split.stored_mode(hdr.get("gray16_split_mode")) != "off" and not gray16:
+                # A 16-bit session is stored as the frame itself (FFV1) or as its two bytes side by
+                # side in an 8-bit track (gray16_split). Each session says which; a run may hold both.
+                split_mode = gray16_split.stored_mode(hdr.get("gray16_split_mode"))
+                if split_mode != "off" and not gray16:
                     raise ValueError("a 16-bit split requires a 16-bit recording")
                 _, pts, stamps = _rows(run)
                 files = [run.base + ".json", run.csv_path, *run.mkv_paths]
@@ -185,6 +188,9 @@ def preflight(request, profile_root):
                 if gray16:
                     session.update(source_pixel_format=pf, source_bits_per_pixel=source_bits,
                                    bits_per_pixel=8, normalization=definition["gray16_normalization"])
+                    if split_mode != "off":
+                        # The converter image has to know this storage (tools/export-recordings asks it).
+                        session["source_gray16_split_mode"] = split_mode
                 elif bayer:
                     session.update(pixel_format=definition["bayer_conversion"]["output_pixel_format"],
                                    bits_per_pixel=8, bayer_pattern=None, source_pixel_format=pf,
@@ -217,19 +223,22 @@ def _decode(run):
     at a boundary and can accumulate rounding drift, so its reconstructed timeline
     cannot validate the original CSV. The Matroska parts retain continuous PTS.
     """
-    from .sources.replay import _check_glob_hazards, _probe_mkv, _RAW_DECODE, raw_decode_chain
+    from .sources.replay import _check_glob_hazards, _probe_mkv_track, _RAW_DECODE, raw_decode_chain
     from . import gray16_split
     Gst = _gst()
     _check_glob_hazards(run)
     fmt = parse_pixel_format(run.header["pixel_format"])[0]
     width, height = int(run.header["width"]), int(run.header["height"])
     # A 16-bit recording stored as its split 8-bit frame: decode what the track holds, hand on the frame.
+    # One stored unsplit (FFV1) is decoded as it always was; the sidecar says which, per session.
     split = gray16_split.stored_mode(run.header.get("gray16_split_mode")) != "off"
     stored_fmt, stored_width = ("GRAY8", 2 * width) if split else (fmt, width)
     for part in run.mkv_paths:
-        codec = _probe_mkv(part)
+        track = _probe_mkv_track(part)
+        codec = track[0] if track else None
         if codec not in _RAW_DECODE:
             raise ValueError(f"unsupported/unreadable recording codec {codec}: {part}")
+        gray16_split.check_track(part, fmt, width, height, split, track)
         pipeline = Gst.parse_launch(
             f'filesrc location="{part}" ! matroskademux ! {raw_decode_chain(codec, run.header)} ! videoconvert n-threads=2 ! '
             f'video/x-raw,format={stored_fmt},width={stored_width},height={height} ! '
@@ -483,9 +492,12 @@ def convert(request, profile_root):
                 # These are display intensities, not radiometric counts. Advertise the actual
                 # output format so replay/ROS deliver mono8 and WebRTC does not stretch twice.
                 header.update(pixel_format="GRAY8", bits_per_pixel=8, bayer_pattern=None)
-                header["proxy"].update(
-                    normalization=definition["gray16_normalization"],
-                    transformations=["decode", "gray16-percentile-stretch", "convert-to-i420", "lossy-h264"])
+                steps = ["decode", "gray16-percentile-stretch", "convert-to-i420", "lossy-h264"]
+                if session.get("source_gray16_split_mode"):
+                    # The source track held the split 8-bit frame; the stretch saw the joined one.
+                    steps.insert(1, "join-gray16-split")
+                    header["proxy"]["source_gray16_split_mode"] = session["source_gray16_split_mode"]
+                header["proxy"].update(normalization=definition["gray16_normalization"], transformations=steps)
             elif session.get("bayer_conversion"):
                 header.update(pixel_format=session["pixel_format"], bits_per_pixel=8, bayer_pattern=None)
                 header["proxy"].update(

@@ -39,7 +39,7 @@ service processes in the smoke tests are not included in these percentages. Esta
 inspect this baseline before setting a coverage threshold; a high percentage cannot establish
 pixel fidelity or hardware support.
 
-Local Linux/arm64 baseline (2026-11-16, AGX Orin): 815 tests pass without skips on GStreamer 1.28.8, 1.28.9,
+Local Linux/arm64 baseline (2026-11-17, AGX Orin): 824 tests pass without skips on GStreamer 1.28.8, 1.28.9,
 1.24.2 and 1.20.3 in 85–96 s. At the earlier baseline (2026-09-17, 445 tests) line/branch coverage of
 `cam_driver` alone measured 76.7%/70.4% on 1.28.7 and 73.2%/66.1% on 1.20.3. These figures exclude
 `main.py`, service subprocesses and bridge tools; use the complete uploaded report when comparing the
