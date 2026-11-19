@@ -177,7 +177,7 @@ class PcapSource(GstPipelineSource):
             f"st. ! queue ! appsink name=encsink emit-signals=true max-buffers=8 drop=false sync=false"
         )
 
-    def start(self, on_frame, on_encoded=None) -> None:
+    def start(self, on_frame, on_encoded=None, *, buffer_frames=False) -> None:
         self._stop_evt.clear()
         if self._mjpeg:
             if self._playback.coordinated:
@@ -192,7 +192,7 @@ class PcapSource(GstPipelineSource):
                         if inner_encoded is not None:
                             inner_encoded(st, data, caps)
                         self._note_drain_progress()
-            super().start(on_frame, on_encoded)   # PLAYING + sink callbacks
+            super().start(on_frame, on_encoded, buffer_frames=buffer_frames)
         else:
             self._on_frame = on_frame
         self._thread = threading.Thread(target=self._feed_loop, name="pcap-feeder", daemon=True)

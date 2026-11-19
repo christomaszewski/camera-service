@@ -23,11 +23,12 @@ class CoordinatedSources(unittest.TestCase):
         self.control.env.start();self.addCleanup(self.control.env.stop)
 
     def exercise(self, source, *, expected_count, expected_raw=None, expected_encoded=None, abort=False,
-                 expected_ids=None, minimum_lead_s=0):
+                 expected_ids=None, minimum_lead_s=0, buffer_frames=False):
         self.addCleanup(source.stop)
         raw=[];encoded=[]
-        source.start(lambda st,data:raw.append((st,bytes(data),time.time())),
-                     lambda st,data,caps=None:encoded.append((st,bytes(data),time.time())))
+        start = source.start_buffers if buffer_frames else source.start
+        start(lambda st,data:raw.append((st,bytes(data),time.time())),
+              lambda st,data,caps=None:encoded.append((st,bytes(data),time.time())))
         self.control.wait('held',pump)
         self.assertEqual(raw,[]);self.assertEqual(encoded,[])
         self.assertFalse(source.playback.request('resume')['ok'])
@@ -80,7 +81,8 @@ class CoordinatedSources(unittest.TestCase):
             'height':24 if mjpeg else 8,'speed':1,'loop':False},'control':{'enabled':False}})
         source=PcapSource(cfg.pcap,cfg.playback);source.open();source.configure()
         self.exercise(source,expected_count=len(expected),expected_raw=None if mjpeg else [data for _,data in expected],
-                      expected_encoded=[data for _,data in expected] if mjpeg else None)
+                      expected_encoded=[data for _,data in expected] if mjpeg else None,
+                      buffer_frames=True)
 
     def test_raw_pcap_first_frame_retained(self):self.pcap(False)
     def test_mjpeg_pcap_decoder_ready_before_release(self):self.pcap(True)
