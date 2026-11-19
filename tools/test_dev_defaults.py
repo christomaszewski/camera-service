@@ -124,6 +124,14 @@ class DevDefaults(unittest.TestCase):
                     for name in ('core-driver', 'ros2-bridge', 'webrtc-bridge'):
                         self.assertEqual(services[name]['network_mode'], expected, name)
 
+    def test_sensor_can_disable_webrtc_mitigation(self):
+        config = json.loads(self.config.read_text())
+        bridge = next(p for p in config['plugins'] if p['name'] == 'webrtc-bridge')
+        bridge['params'] = {'CAM_WEBRTC_MITIGATION': 'off'}
+        self.config.write_text(json.dumps(config))
+        services = self.render('--jp7')
+        self.assertEqual(services['webrtc-bridge']['environment']['CAM_WEBRTC_MITIGATION'], 'off')
+
     def test_explicit_compatibility_overrides(self):
         svc = self.render('--dev', CAM_DEV_IMAGE='cam-dev:legacy',
                           CAM_WEBRTC_IMAGE='webrtc-bridge:legacy', CAM_ROS2_IMAGE='ros2-bridge:legacy',

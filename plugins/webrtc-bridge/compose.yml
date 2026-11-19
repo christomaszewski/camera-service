@@ -123,6 +123,7 @@ services:
       - CAM_WEBRTC_MAX_BITRATE=${CAM_WEBRTC_MAX_BITRATE:-}
       - CAM_WEBRTC_START_BITRATE=${CAM_WEBRTC_START_BITRATE:-}
       - CAM_WEBRTC_CONGESTION=${CAM_WEBRTC_CONGESTION:-}
+      - CAM_WEBRTC_MITIGATION=${CAM_WEBRTC_MITIGATION:-}
       # The floor defaults to 500 kbit/s in run.sh (webrtcsink's own 1 kbit/s is where a lossy fade
       # leaves the stream for half a minute).
       # Viewer sessions (plugins/webrtc-bridge/README.md "Viewer sessions"):
