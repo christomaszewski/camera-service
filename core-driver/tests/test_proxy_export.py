@@ -411,6 +411,29 @@ def test_the_implementation_identity_covers_the_split_join():
     assert '"core-driver/cam_driver/gray16_split.py"' in source
 
 
+def test_packaged_exporter_preflights_a_split_recording():
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        bundle = root / "bundle"
+        bundle.mkdir()
+        archive = root / "camera-launch.tar.gz"
+        subprocess.run([ROOT / "tools/package-launch-surface.sh", archive],
+                       check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(["tar", "-xzf", archive, "-C", bundle], check=True)
+
+        session(root, **_SPLIT)
+        req, result = root / "request.json", root / "result.json"
+        req.write_text(json.dumps(request(root)))
+        # Exercise the host preflight with only the packaged modules and no Docker CLI.
+        proc = subprocess.run([sys.executable, "-I", "tools/export-recordings", "--preflight",
+                               "--request", req, "--result", result],
+                              cwd=bundle, env={"PATH": ""}, capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+        selected = json.loads(result.read_text())["recordings"][0]["sessions"][0]
+        assert selected["source_gray16_split_mode"] == "fold"
+        assert selected["frame_count"] == 1
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().copy().items()):
         if name.startswith("test_") and callable(fn):
