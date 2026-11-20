@@ -63,6 +63,17 @@ _LAUNCHERS = {
 }
 
 
+def _frame_capture_command(config_path: str, plugin) -> list:
+    # Reads the same sensor config as the core (endpoint, recording dir, CFA pattern, its own params).
+    return [sys.executable, "-m", "cam_driver.capture", "-c", config_path, "--plugin", plugin.name]
+
+
+# in-image Python plugins that read the sensor config themselves, keyed by plugin name
+_CONFIG_LAUNCHERS = {
+    "frame-capture": _frame_capture_command,
+}
+
+
 class Service:
     def __init__(self, name: str, cmd: list, critical: bool, restart: bool):
         self.name = name
@@ -118,6 +129,8 @@ class Supervisor:
             # convenience: point the bridge at the core's endpoint unless overridden
             params.setdefault("socket_path", self.cfg.transport.plugin_endpoint.socket_path)
             return _LAUNCHERS[plugin.name](params)
+        if plugin.name in _CONFIG_LAUNCHERS:
+            return _CONFIG_LAUNCHERS[plugin.name](self.config_path, plugin)
         if isinstance(plugin.command, list) and plugin.command:
             return [str(a) for a in plugin.command]
         return None

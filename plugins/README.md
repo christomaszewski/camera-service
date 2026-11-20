@@ -41,6 +41,10 @@ A plugin consumes:
   header / unixfd framing, converted to the pinned format). Python, in the ros2-bridge image.
 - **[webrtc-bridge](webrtc-bridge)** — *built.* Re-encodes lossy/low-latency and serves remote
   viewers via `webrtcsink`. A best-effort consumer (its own encode, allowed to drop frames).
+- **frame-capture** — *built.* On a Zenoh trigger, writes the buffered frame nearest a requested
+  time as a JPEG (GPS EXIF when the trigger carries a fix) + a JSON sidecar, into the run and/or the
+  vehicle store. An in-image `isolation: process` plugin; its code lives in the core
+  (`core-driver/cam_driver/capture/`). Contract: [docs/CAPTURE.md](../docs/CAPTURE.md).
 - **mqtt-telemetry** — *example / idea.* Grab select low-res frames and forward to the cloud.
 
 Each plugin is either a lightweight in-image process (`isolation: process`, spawned by the

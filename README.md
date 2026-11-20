@@ -30,9 +30,9 @@ roundtrip testing — recording, transport, and every plugin behave as if the ca
 Whatever the source, the core attaches a **per-frame hardware timestamp** (PTP/chunk on GigE,
 v4l2 SOF on USB, RTCP→NTP on RTSP — with a graceful provenance-tracked fallback ladder),
 records a **lossless, temporally-compressed** video file, and fans the stream out to consumer
-"plugins" (ROS2, ROS1, WebRTC, MQTT, ...).
+"plugins" (ROS2, ROS1, WebRTC, triggered JPEG capture, ...).
 
-> **Design & decisions** → [docs/DESIGN.md](docs/DESIGN.md) · **Status & roadmap** → [docs/ROADMAP.md](docs/ROADMAP.md) · **Lifecycle control (standby/active over Zenoh)** → [docs/LIFECYCLE.md](docs/LIFECYCLE.md) · **Health (ROS-diagnostics-shaped, over Zenoh)** → [docs/HEALTH.md](docs/HEALTH.md) · **PTP experiment** → [docs/ptp-timestamp-experiment.md](docs/ptp-timestamp-experiment.md) · **JetPack 7 (Orin) bring-up** → [docs/jetpack7-bringup.md](docs/jetpack7-bringup.md)
+> **Design & decisions** → [docs/DESIGN.md](docs/DESIGN.md) · **Status & roadmap** → [docs/ROADMAP.md](docs/ROADMAP.md) · **Lifecycle control (standby/active over Zenoh)** → [docs/LIFECYCLE.md](docs/LIFECYCLE.md) · **Health (ROS-diagnostics-shaped, over Zenoh)** → [docs/HEALTH.md](docs/HEALTH.md) · **Frame capture (Zenoh-triggered JPEG keyframes with GPS EXIF)** → [docs/CAPTURE.md](docs/CAPTURE.md) · **PTP experiment** → [docs/ptp-timestamp-experiment.md](docs/ptp-timestamp-experiment.md) · **JetPack 7 (Orin) bring-up** → [docs/jetpack7-bringup.md](docs/jetpack7-bringup.md)
 
 ## Why it's built this way
 
