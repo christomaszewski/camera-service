@@ -65,6 +65,7 @@ services:
       # run at the reduced size: THE CPU lever for a 5MP color preview. Planned at runtime from the
       # stream's own caps, so it needs no geometry env. PREVIEW-ONLY -- recording/ROS keep full res.
       - CAM_WEBRTC_MAX_SIZE=${CAM_WEBRTC_MAX_SIZE:-}
+      - ORC_CODE=${ORC_CODE:-}
       # Geometry: only the LEGACY shm-raw path needs it (raw shm carries no caps; must match the
       # camera frame). The plugin-endpoint transports self-describe -- CAM_FPS alone still serves as
       # the caps rate HINT on headered shm (the header carries no rate; feeds the H.264 level math).
